@@ -34,6 +34,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     chunkOverlap: config.chunkOverlap || 50,
     knnNeighbors: config.knnNeighbors || 50,
     mcpTools: config.mcpTools ?? [],
+    documentationUrl: config.documentationUrl ?? '',
   });
   
   // State for available models fetched from the provider
@@ -593,6 +594,20 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                       placeholder="llama3, gpt-4, etc."
                     />
                   )}
+                </div>
+
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                    <Server className="w-4 h-4" /> Documentation URL
+                  </label>
+                  <input
+                    type="url"
+                    value={localConfig.documentationUrl}
+                    onChange={(e) => setLocalConfig({ ...localConfig, documentationUrl: e.target.value })}
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    placeholder="https://docs.example.com"
+                  />
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Lien ouvert au clic sur « Documentation » de la page d'accueil. Laissez vide pour masquer le bouton.</p>
                 </div>
 
                 <div>

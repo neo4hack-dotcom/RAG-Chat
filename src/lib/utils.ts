@@ -81,6 +81,7 @@ export type AppConfig = {
   chunkOverlap: number;
   knnNeighbors: number;
   mcpTools: McpTool[];
+  documentationUrl: string;
 };
 
 /**
@@ -107,6 +108,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     { id: 'mcp_1', label: 'MCP Tool 1', url: '' },
     { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
   ],
+  documentationUrl: '',
 };
 
 /**
