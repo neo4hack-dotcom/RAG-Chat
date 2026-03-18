@@ -53,6 +53,7 @@ export function ChatInterface({
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const currentConversation = conversations.find(c => c.id === currentId);
+  const clickhouseAgentState = currentConversation?.agentState?.clickhouse;
   const messages = currentConversation?.messages || [
     {
       id: "1",
@@ -88,7 +89,7 @@ export function ChatInterface({
               { id: 'init-1', title: 'System Initialization', status: 'success', details: 'Loaded configuration and connected to local environment.' },
               { id: 'init-2', title: 'Ready for Instructions', status: 'success', details: 'Awaiting your commands to orchestrate sub-agents or query the RAG database.' }
             ]
-          }], updatedAt: Date.now() } 
+          }], updatedAt: Date.now(), agentState: undefined } 
         : c
     ));
   };
@@ -213,6 +214,7 @@ export function ChatInterface({
       let reply = "";
       let sources = undefined;
       let confidence = undefined;
+      let nextClickhouseAgentState = clickhouseAgentState;
 
       // Route the request based on the selected workflow
       if (workflow === 'RAG') {
@@ -294,6 +296,67 @@ export function ChatInterface({
           if (idx === -1) return prev;
           const updated = [...prev];
           updated[idx] = { ...updated[idx], messages: [...updated[idx].messages, assistantMcpMsg], updatedAt: Date.now() };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (workflow === 'AGENT' && agentRole === 'clickhouse_query') {
+        const response = await fetch('/api/chat/clickhouse-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: activeMessages.filter(m => m.role !== 'system'),
+            agent_state: clickhouseAgentState ?? undefined,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: config.clickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `ClickHouse Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextClickhouseAgentState = data.agent_state;
+        setIsConnected(true);
+
+        const assistantClickHouseMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              clickhouse: nextClickhouseAgentState,
+            },
+            messages: [...updated[idx].messages, assistantClickHouseMsg],
+            updatedAt: Date.now(),
+          };
           return updated;
         });
         setIsLoading(false);
@@ -400,15 +463,21 @@ export function ChatInterface({
         ];
       }
 
-      onConversationsChange(prev => {
-        const idx = prev.findIndex(c => c.id === activeConvId);
-        if (idx === -1) return prev;
-        const updated = [...prev];
-        updated[idx] = {
-          ...updated[idx],
-          messages: [...updated[idx].messages, assistantMsg],
-          updatedAt: Date.now()
-        };
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: workflow === 'AGENT' && agentRole === 'clickhouse_query'
+              ? {
+                  ...(updated[idx].agentState ?? {}),
+                  clickhouse: nextClickhouseAgentState,
+                }
+              : updated[idx].agentState,
+            messages: [...updated[idx].messages, assistantMsg],
+            updatedAt: Date.now()
+          };
         return updated;
       });
     } catch (error) {
@@ -417,7 +486,7 @@ export function ChatInterface({
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: `**Error:** Could not connect to the LLM endpoint.\n\n\`\`\`\n${error instanceof Error ? error.message : "Unknown error"}\n\`\`\`\n\nPlease check your configuration settings.`,
+        content: `**Error:** Could not complete the request.\n\n\`\`\`\n${error instanceof Error ? error.message : "Unknown error"}\n\`\`\`\n\nPlease check your configuration settings.`,
         timestamp: Date.now(),
       };
       onConversationsChange(prev => {
@@ -614,6 +683,23 @@ export function ChatInterface({
             </div>
           )}
 
+          {workflow === 'AGENT' && agentRole === 'clickhouse_query' && (
+            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-cyan-50 to-sky-50 dark:from-cyan-900/20 dark:to-sky-900/20 border border-cyan-200/60 dark:border-cyan-700/40 shadow-sm animate-fade-in-up">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Database className="w-4 h-4 text-cyan-600 dark:text-cyan-300" />
+                <h3 className="font-semibold text-cyan-900 dark:text-cyan-200 text-[13px]">ClickHouse Query Agent</h3>
+              </div>
+              <div className="text-[11px] text-cyan-900/85 dark:text-cyan-300/90 leading-relaxed space-y-1">
+                <p>This agent works in English and guides the analysis safely before running SQL.</p>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  <li>It starts by asking you to choose a ClickHouse table.</li>
+                  <li>It inspects the schema and asks for clarification when multiple fields or date columns are plausible.</li>
+                  <li>It returns a short final answer, the executed SQL, and a concise reasoning summary.</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
           {workflow === 'RAG' && (
             <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200/50 dark:border-blue-700/40 shadow-sm animate-fade-in-up">
               <div className="flex items-center gap-2 mb-1.5">
@@ -763,6 +849,12 @@ export function ChatInterface({
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'researcher' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
               >
                 <Search className="w-3.5 h-3.5" /> Researcher
+              </button>
+              <button
+                onClick={() => onAgentRoleChange('clickhouse_query')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+              >
+                <Database className="w-3.5 h-3.5" /> ClickHouse Query
               </button>
             </div>
           </div>

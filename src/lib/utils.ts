@@ -41,6 +41,31 @@ export type Message = {
   confidence?: number;
 };
 
+export type ClickHouseSchemaColumn = {
+  name: string;
+  type: string;
+  defaultKind?: string;
+  defaultExpression?: string;
+};
+
+export type ClickHouseAgentState = {
+  stage: 'idle' | 'awaiting_table' | 'awaiting_field' | 'awaiting_date' | 'ready';
+  pendingRequest: string;
+  availableTables: string[];
+  selectedTable: string | null;
+  schema: ClickHouseSchemaColumn[];
+  candidateFields: string[];
+  dateFields: string[];
+  selectedField: string | null;
+  selectedDateField: string | null;
+  clarificationPrompt: string;
+  clarificationOptions: string[];
+};
+
+export type ConversationAgentState = {
+  clickhouse?: ClickHouseAgentState;
+};
+
 /**
  * Represents a complete chat conversation.
  */
@@ -49,11 +74,12 @@ export type Conversation = {
   title: string;
   messages: Message[];
   updatedAt: number;
+  agentState?: ConversationAgentState;
 };
 
 export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP';
 
-export type AgentRole = 'manager' | 'analyst' | 'researcher';
+export type AgentRole = 'manager' | 'analyst' | 'researcher' | 'clickhouse_query';
 
 export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 
@@ -88,6 +114,15 @@ export type AppConfig = {
   knnNeighbors: number;
   mcpTools: McpTool[];
   documentationUrl: string;
+  clickhouseHost: string;
+  clickhousePort: number;
+  clickhouseDatabase: string;
+  clickhouseUsername: string;
+  clickhousePassword: string;
+  clickhouseSecure: boolean;
+  clickhouseVerifySsl: boolean;
+  clickhouseHttpPath: string;
+  clickhouseQueryLimit: number;
 };
 
 export type AppPreferences = {
@@ -131,6 +166,15 @@ export const DEFAULT_CONFIG: AppConfig = {
     { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
   ],
   documentationUrl: '',
+  clickhouseHost: 'localhost',
+  clickhousePort: 8123,
+  clickhouseDatabase: 'default',
+  clickhouseUsername: 'default',
+  clickhousePassword: '',
+  clickhouseSecure: false,
+  clickhouseVerifySsl: true,
+  clickhouseHttpPath: '',
+  clickhouseQueryLimit: 200,
 };
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
