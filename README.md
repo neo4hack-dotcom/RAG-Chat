@@ -1,6 +1,6 @@
 # ODIN AI Portal — RAGnarok ⚡
 
-A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented Generation (RAG)** with OpenSearch, **guided agents** including a **ClickHouse SQL agent**, and **MCP (Model Context Protocol)** tool integration — powered by Ollama or any OpenAI-compatible server, with durable app state persisted by the Python backend.
+A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented Generation (RAG)** with OpenSearch, **specialist agents** orchestrated by an **Agent Manager**, **CrewAI-style planning**, and **MCP (Model Context Protocol)** tool integration — powered by Ollama or any OpenAI-compatible server, with durable app state persisted by the Python backend.
 
 ---
 
@@ -12,8 +12,11 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - [Getting Started](#getting-started)
 - [Interaction Modes](#interaction-modes)
 - [State Persistence & Backup](#state-persistence--backup)
+- [CrewAI Planning](#crewai-planning)
 - [RAG Pipeline](#rag-pipeline)
 - [ClickHouse Query Agent](#clickhouse-query-agent)
+- [File Management Agent](#file-management-agent)
+- [Data Quality - Tables Agent](#data-quality---tables-agent)
 - [MCP Integration](#mcp-integration)
 - [Configuration](#configuration)
 - [Production Build](#production-build)
@@ -25,18 +28,26 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 
 | Category | Details |
 |----------|---------|
-| **4 chat modes** | Pure LLM, RAG, Multi-Agent, MCP Tools |
-| **2 agent roles** | Agent Manager, ClickHouse Query |
+| **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, CrewAI - Planning |
+| **4 agent roles** | Agent Manager, ClickHouse Query, File management, Data quality - Tables |
+| **Manager orchestration** | Agent Manager can delegate to every specialist agent and keep follow-up context across clarifications and confirmations |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
-| **ClickHouse agent** | Guided table/schema discovery, ambiguity clarification, safe read-only SQL generation, English final answer |
+| **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
+| **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions |
+| **Data quality agent** | Statistical profiling + LLM scoring for ClickHouse tables, launched from an overlay form above the chat |
+| **Planner / scheduler** | Schedule existing agents on fixed frequency, ClickHouse watch, or file-arrival trigger |
 | **MCP tools** | Connect any MCP server via SSE, test connection, real agentic tool-call loop |
 | **Backend persistence** | App config, conversations and durable preferences stored in backend-managed `DB.json` |
 | **Backup workflow** | Export/import DB backups and force a resync from the latest backend state in Settings |
+| **Conversation memory** | Current conversation keeps a short backend-synced working memory window (at least 5 recent steps, currently 10 useful messages) |
 | **Markdown & HTML** | Syntax-highlighted code blocks, proper tables, raw HTML from LLMs, copy button |
+| **Clickable clarifications** | Agent choices are rendered as large clickable tiles in the chat instead of requiring manual retyping when possible |
+| **Chat zoom** | Floating Apple-inspired zoom control on the right side of the chat with fine-grained scaling |
 | **Apple-inspired landing** | Animated cards, contact modal, page routing |
 | **Dark mode** | Full dark/light toggle persisted through backend state sync |
 | **File attachments** | Images, PDFs, text files alongside messages |
 | **Conversation history** | Multi-session sidebar, persisted in backend state with browser fallback cache |
+| **Protected settings access** | Discreet Settings entry on the landing page, protected by a password (`MM@2026` by default, configurable in-app) |
 | **Settings panel** | All parameters configurable in-app, no `.env` required |
 
 ---
@@ -49,7 +60,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 │                                                        │
 │  Landing Page ──► RAGnarok Chat                        │
 │                   ┌──────────────────────────────────┐ │
-│                   │  Pure LLM │ RAG │ Agents │ MCP   │ │
+│                   │ LLM │ RAG │ Agents │ MCP │ CrewAI│ │
 │                   └──────┬───────┬──────────┬────────┘ │
 └──────────────────────────┼───────┼──────────┼──────────┘
                            │       │          │
@@ -67,6 +78,12 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
                            │  │  /api/chat/rag               │
                            │  │  /api/clickhouse/test        │
                            │  │  /api/chat/clickhouse-agent  │
+                           │  │  /api/chat/file-manager-agent│
+                           │  │  /api/data-quality/options   │
+                           │  │  /api/chat/data-quality-agent│
+                           │  │  /api/chat/manager-agent     │
+                           │  │  /api/planning/state         │
+                           │  │  /api/planning/plans/*       │
                            │  │  /api/mcp/test               │
                            │  │  /api/chat/mcp               │
                            │  └────┬──────────┬────────┬─────┘
@@ -87,7 +104,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 ```
 
 - **Frontend** — React 19 + TypeScript + Tailwind CSS, bundled with Vite.
-- **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, ClickHouse agent, MCP client, OpenSearch management.
+- **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, MCP client, OpenSearch management.
 - **Vector store** — OpenSearch with `opensearch-py` and `mcp` Python packages.
 - **Analytics store** — ClickHouse over HTTP for the SQL agent.
 - **LLM / Embeddings** — Ollama (local) or any OpenAI-compatible API.
@@ -174,26 +191,65 @@ Answers include cited sources `[1]`, `[2]` and a confidence score.
 
 ### Agents
 
-Multi-agent orchestration with two roles:
+Multi-agent orchestration with four roles:
 
 | Role | Behaviour |
 |------|-----------|
-| **Agent Manager** | Orchestrates sub-agents, synthesises final answer, shows thinking steps |
-| **ClickHouse Query** | Guides the user through table selection, schema inspection, field/date clarification, then runs safe read-only SQL and answers in English |
+| **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
+| **ClickHouse Query** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
+| **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations |
+| **Data quality - Tables** | Profiles ClickHouse tables and generates an English Markdown quality report from a dedicated overlay form |
 
 #### ClickHouse Query agent quick flow
 
 1. Configure ClickHouse in **Settings → RAG & OpenSearch → ClickHouse Query Agent**.
 2. Switch to **Agents** mode and select **ClickHouse Query**.
-3. The agent first proposes the list of available tables.
-4. Once the table is selected, it inspects the schema.
-5. If multiple fields or date columns are plausible, it asks the user to choose with task-list style options.
-6. It generates a read-only ClickHouse query, validates it, executes it, and returns:
+3. Ask the analytical question directly — the agent tries to infer the best table automatically.
+4. If multiple tables, fields or date columns are plausible, it asks the user to choose with clickable task-tile options.
+5. It generates a read-only ClickHouse query, validates it, executes it, and returns:
    - a short final answer in English,
    - the executed SQL,
-   - a concise reasoning summary.
+   - a concise reasoning summary,
+   - and, when relevant, an inline chart or a chart suggestion.
 
 The ClickHouse agent uses the backend only and always relies on the configured local/application LLM endpoint for planning and summarisation.
+
+#### File management quick flow
+
+1. Switch to **Agents** mode and select **File management**.
+2. Optionally double-click the agent chip or click **Configure** to set:
+   - sandbox `base_path`,
+   - max iterations,
+   - custom system prompt.
+3. Ask to list, read, create, move, edit or delete files.
+4. The backend Python agent plans one tool at a time and asks for confirmation before overwrite/delete/move actions.
+
+#### Data quality quick flow
+
+1. Configure ClickHouse once in **Settings → RAG & OpenSearch → ClickHouse Query Agent**.
+2. Switch to **Agents** mode and select **Data quality - Tables**.
+3. A dedicated form opens above the chat.
+4. Select:
+   - the table,
+   - the columns to profile,
+   - the sample size,
+   - an optional row filter,
+   - an optional time column for volumetric analysis.
+5. Launch the run and receive an English Markdown report with executive summary, per-column findings, recommendations, and optional volumetric analysis.
+
+### CrewAI Planning
+
+The **CrewAI - Planning** mode is a backend Python scheduler for existing agents.
+
+It supports:
+
+- fixed schedules (`once`, `daily`, `weekly`, `interval`),
+- ClickHouse watch triggers based on a read-only SQL result,
+- file-arrival triggers on a watched directory,
+- pause/resume, edit, delete and `Run now`,
+- recent run history in the planner overlay.
+
+You can describe an automation in natural language in the chat or open the dedicated planner form and configure it manually.
 
 ---
 
@@ -206,7 +262,9 @@ What is stored there:
 - application configuration,
 - conversation history,
 - durable UI preferences such as dark mode, selected workflow and current conversation,
-- agent state needed for guided workflows like the ClickHouse Query agent.
+- agent state needed for guided workflows,
+- planner state and saved jobs,
+- short conversation memory used to preserve recent context across follow-up turns.
 
 ### Sync behaviour
 
@@ -214,6 +272,7 @@ What is stored there:
 - If the backend DB is empty but the browser still has legacy data, the app migrates that state into `DB.json`.
 - The app re-syncs when the window regains focus or becomes visible again.
 - The browser still keeps a lightweight fallback cache, but the backend DB is the source of truth.
+- Each conversation also keeps a short rolling memory window to preserve current context for backend agents.
 
 ### Backup tools
 
@@ -273,21 +332,23 @@ The ClickHouse Query agent is designed to follow a conservative analytics workfl
 ```text
 User enters request
     ↓
-Agent lists available ClickHouse tables
+Agent tries to infer the best ClickHouse table
     ↓
-User selects one table
+If ambiguous: user selects a table via clickable tiles
     ↓
 Backend inspects system.columns for that table
     ↓
 Local LLM maps request to likely business fields
     ↓
-If ambiguous: user chooses field and/or date column
+If ambiguous: user chooses field and/or date column via clickable tiles
     ↓
 Local LLM generates one safe read-only SQL query
     ↓
 Backend validates and executes the query in ClickHouse
     ↓
 Local LLM writes final answer in English
+    ↓
+Optional chart generation when requested or clearly useful
 ```
 
 ### Safety / best-practice behaviour
@@ -298,6 +359,8 @@ Local LLM writes final answer in English
 - The backend enforces a result limit for row-oriented queries.
 - The agent tries to repair SQL once if ClickHouse returns an execution error.
 - The response stays short and includes both the SQL and a reasoning summary for auditability.
+- Clarification choices are rendered as clickable tiles in the chat whenever possible.
+- The agent can suggest or render a chart directly in the conversation.
 
 ### Backend endpoints
 
@@ -305,6 +368,71 @@ Local LLM writes final answer in English
 |----------|-------------|
 | `POST /api/clickhouse/test` | Test ClickHouse connectivity and preview available tables |
 | `POST /api/chat/clickhouse-agent` | Guided ClickHouse agent workflow: discover tables, inspect schema, clarify fields/dates, generate and execute SQL |
+
+---
+
+## File Management Agent
+
+The File Management agent is a backend Python-only ReAct loop focused on safe filesystem work.
+
+### Capabilities
+
+- Navigation: list directories, inspect paths, search files
+- Reading: text files, CSV/TSV summaries, Word, Parquet, Excel sheets
+- Creation: directories, text files, Excel workbooks
+- Edition: overwrite files, update Excel sheets/cells, append rows
+- Move / delete: explicit confirmation required before execution
+
+### Safety
+
+- Optional sandboxing through a configurable `base_path`
+- Path traversal blocked through resolved paths
+- Confirmation flow for destructive or overwrite-style actions
+- Iteration cap to avoid infinite loops
+
+### Backend endpoint
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/chat/file-manager-agent` | Runs the file-management ReAct loop and guarded tool execution |
+
+---
+
+## Data Quality - Tables Agent
+
+The Data Quality agent profiles ClickHouse tables and then asks the local LLM to score data quality and explain risks in English.
+
+### Workflow
+
+```text
+User selects agent
+    ↓
+Overlay form opens above the chat
+    ↓
+Frontend loads tables + schema from backend
+    ↓
+User selects table, columns, sample size, optional row filter and optional time column
+    ↓
+Backend computes SQL statistics
+    ↓
+Local LLM scores issues and writes recommendations
+    ↓
+Final Markdown report returned in chat
+```
+
+### Output
+
+- Executive summary with overall score
+- Per-column findings
+- Prioritised recommendations
+- Optional volumetric section when a time column is provided
+
+### Backend endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/data-quality/options` | Load tables and schema metadata for the Data Quality form |
+| `POST /api/chat/data-quality-agent` | Execute a full data-quality run from structured parameters |
 
 ---
 
@@ -344,7 +472,14 @@ http://my-mcp-server:8080/sse
 
 ## Configuration
 
-All settings are available in-app via the **⚙ Settings** panel (no `.env` file needed).
+All settings are available in-app (no `.env` file needed).
+
+### Access
+
+- The Settings entry is now a discreet button on the landing page, in the top-right corner.
+- Access is password-protected.
+- Default password: `MM@2026`
+- This password can be changed inside Settings after unlocking.
 
 ### LLM Settings
 
@@ -384,6 +519,14 @@ All settings are available in-app via the **⚙ Settings** panel (no `.env` file
 | Default Query Limit | `200` | Safety cap applied to row-returning ClickHouse queries |
 
 Use **Test ClickHouse** in the settings panel to verify the connection and preview the first available tables.
+
+### File Management Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Base Path | empty | Optional sandbox root for all file operations |
+| Max Iterations | `10` | ReAct loop cap, hard-limited in backend |
+| System Prompt | built-in | Customises the file-management agent behaviour |
 
 ### DB Backup Settings
 
@@ -434,6 +577,7 @@ ODIN AI Portal is designed to be **100% local**:
 - Durable application state is stored locally in backend-managed `DB.json`.
 - The browser keeps a fallback cache, but the backend DB is the primary state source.
 - OpenSearch and ClickHouse can run on your own infrastructure.
+- Settings access is protected locally by an application password, configurable from the UI once unlocked.
 
 ---
 

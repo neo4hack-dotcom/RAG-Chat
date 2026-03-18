@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from contextlib import asynccontextmanager
 import httpx
 import json
@@ -23,6 +23,7 @@ import hashlib
 import csv
 import shutil
 import math
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from pathlib import Path
@@ -498,6 +499,18 @@ def normalize_choice(text: str) -> str:
     return cleaned.strip().strip("`").strip()
 
 
+def normalize_intent_text(text: str) -> str:
+    normalized = normalize_choice(text).lower()
+    if not normalized:
+        return ""
+    without_accents = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", normalized)
+        if not unicodedata.combining(char)
+    )
+    return re.sub(r"\s+", " ", without_accents).strip()
+
+
 def _normalized_history_messages(
     history: list[dict[str, Any]],
     current_message: Optional[str] = None,
@@ -791,6 +804,7 @@ DATA_QUALITY_FOLLOWUP_STAGES = {
     "awaiting_custom_columns",
     "awaiting_sample_size",
     "awaiting_custom_sample_size",
+    "awaiting_row_filter_mode",
     "awaiting_row_filter",
     "awaiting_time_column",
     "awaiting_review",
@@ -1537,6 +1551,8 @@ DATA_QUALITY_TEXT_COLUMNS_OPTION = "Text columns only"
 DATA_QUALITY_DATE_COLUMNS_OPTION = "Date columns only"
 DATA_QUALITY_CUSTOM_COLUMNS_OPTION = "Custom column list"
 DATA_QUALITY_SKIP_TIME_OPTION = "Skip volumetric analysis"
+DATA_QUALITY_SKIP_ROW_FILTER_OPTION = "Skip row filter"
+DATA_QUALITY_ENTER_ROW_FILTER_OPTION = "Enter row filter manually"
 DATA_QUALITY_SAMPLE_OPTIONS = {
     "50,000 rows": 50_000,
     "100,000 rows": 100_000,
@@ -1724,6 +1740,10 @@ CHART_TYPE_LABELS = {
     "scatter": "Scatter plot",
 }
 CHART_TYPE_BY_LABEL = {label.lower(): key for key, label in CHART_TYPE_LABELS.items()}
+
+
+def dump_clickhouse_agent_state(state: ClickHouseAgentState) -> dict[str, Any]:
+    return state.model_dump(by_alias=True)
 
 
 def reset_clickhouse_chart_state(state: ClickHouseAgentState) -> None:
@@ -3265,7 +3285,7 @@ def _heuristic_manager_delegate(
     file_manager_state: dict[str, Any],
     data_quality_state: dict[str, Any],
 ) -> Optional[tuple[str, str]]:
-    normalized = normalize_choice(user_message).lower()
+    normalized = normalize_intent_text(user_message)
     active_delegate = manager_state.get("active_delegate")
 
     if active_delegate == "file_management" and _file_manager_state_needs_followup(file_manager_state):
@@ -3292,24 +3312,59 @@ def _heuristic_manager_delegate(
 
     file_tokens = [
         "file",
+        "fichier",
         "folder",
+        "dossier",
         "directory",
+        "repertoire",
         "path",
+        "chemin",
         "csv",
+        "tsv",
+        "txt",
+        "md",
+        "markdown",
+        "json",
+        "yaml",
+        "yml",
+        "sql",
+        "py",
+        "html",
         "xlsx",
         "xls",
         "excel",
         "docx",
         "parquet",
         "read",
+        "open",
+        "inspect",
+        "save",
         "write",
         "create",
+        "edit",
+        "update",
+        "append",
         "delete",
         "remove",
         "move",
         "rename",
         "list files",
         "search files",
+        "lire",
+        "ouvrir",
+        "inspecter",
+        "sauvegarder",
+        "ecrire",
+        "creer",
+        "modifier",
+        "mettre a jour",
+        "ajouter",
+        "supprimer",
+        "effacer",
+        "deplacer",
+        "renommer",
+        "lister les fichiers",
+        "chercher des fichiers",
     ]
     clickhouse_tokens = [
         "clickhouse",
@@ -3327,6 +3382,18 @@ def _heuristic_manager_delegate(
         "aggregation",
         "trend",
         "schema",
+        "requete",
+        "base de donnees",
+        "colonne",
+        "graphique",
+        "graphe",
+        "courbe",
+        "lignes",
+        "compte",
+        "mesures",
+        "agregation",
+        "tendance",
+        "schema",
     ]
     data_quality_tokens = [
         "data quality",
@@ -3342,14 +3409,86 @@ def _heuristic_manager_delegate(
         "volumetric",
         "data drift",
         "column quality",
+        "qualite des donnees",
+        "qualite de donnees",
+        "profilage",
+        "valeurs nulles",
+        "valeurs manquantes",
+        "valeurs sentinelles",
+        "derive des donnees",
+        "qualite des colonnes",
     ]
+    file_action_tokens = [
+        "create",
+        "make",
+        "generate",
+        "save",
+        "write",
+        "edit",
+        "update",
+        "append",
+        "move",
+        "rename",
+        "delete",
+        "remove",
+        "copy",
+        "open",
+        "read",
+        "creer",
+        "fais",
+        "faire",
+        "generer",
+        "sauvegarder",
+        "ecrire",
+        "modifier",
+        "mettre a jour",
+        "ajouter",
+        "deplacer",
+        "renommer",
+        "supprimer",
+        "effacer",
+        "copier",
+        "ouvrir",
+        "lire",
+    ]
+    file_target_tokens = [
+        "file",
+        "fichier",
+        "folder",
+        "dossier",
+        "directory",
+        "repertoire",
+        "document",
+        "spreadsheet",
+        "workbook",
+        "sheet",
+        "excel",
+        "csv",
+        "parquet",
+        "docx",
+        "markdown",
+        "json",
+        "yaml",
+        "yml",
+        "sql",
+        "python file",
+        "texte",
+    ]
+    file_extension_hit = bool(
+        re.search(r"\.(txt|md|csv|tsv|xlsx|xls|docx|parquet|json|ya?ml|html|sql|py|log)\b", normalized)
+    )
+    file_action_hit = any(token in normalized for token in file_action_tokens)
+    file_target_hit = file_extension_hit or any(token in normalized for token in file_target_tokens)
+    file_creation_or_edit_hit = file_action_hit and file_target_hit
 
-    file_hit = any(token in normalized for token in file_tokens)
+    file_hit = file_creation_or_edit_hit or any(token in normalized for token in file_tokens)
     clickhouse_hit = any(token in normalized for token in clickhouse_tokens)
     data_quality_hit = any(token in normalized for token in data_quality_tokens)
 
     if data_quality_hit and not file_hit:
         return "data_quality_tables", "The request is explicitly about table profiling or data-quality analysis."
+    if file_creation_or_edit_hit and not data_quality_hit:
+        return "file_management", "The request explicitly asks to create or modify a file, so File management should handle it."
     if file_hit and not clickhouse_hit and not data_quality_hit:
         return "file_management", "The request is explicitly about filesystem or spreadsheet actions."
     if clickhouse_hit and not file_hit and not data_quality_hit:
@@ -3405,6 +3544,7 @@ Return JSON only with this exact shape:
 Rules:
 - Keep the answer in English.
 - Prefer a specialist when the request depends on real filesystem state or ClickHouse data.
+- If the user asks to create, write, save, edit, move, rename, or delete a file or folder, delegate to `file_management`.
 - Keep `handoff_message` concise and actionable.
 - If the manager can answer directly, set `delegate` to `manager`.
 
@@ -4825,11 +4965,17 @@ class ClickHouseTestRequest(BaseModel):
 
 
 class ClickHouseAgentState(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     stage: str = "idle"
     pending_request: str = ""
     available_tables: list[str] = Field(default_factory=list)
     selected_table: Optional[str] = None
-    schema: list[dict] = Field(default_factory=list)
+    table_schema: list[dict] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("schema", "table_schema"),
+        serialization_alias="schema",
+    )
     candidate_fields: list[str] = Field(default_factory=list)
     date_fields: list[str] = Field(default_factory=list)
     selected_field: Optional[str] = None
@@ -4920,6 +5066,11 @@ class DataQualityAgentRequest(BaseModel):
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
     agent_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
+
+
+class DataQualityMetadataRequest(BaseModel):
+    clickhouse: ClickHouseConfig
+    table: Optional[str] = None
 
 
 class ManagerAgentRequest(BaseModel):
@@ -5521,6 +5672,26 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
     }
 
 
+@app.post("/api/data-quality/options")
+async def get_data_quality_options(req: DataQualityMetadataRequest):
+    state = _default_data_quality_state()
+    table_name = str(req.table or "").strip()
+    if table_name:
+        state["table"] = table_name
+
+    try:
+        state = await data_quality_schema_node(req.clickhouse, state)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Data-quality metadata loading failed: {exc}") from exc
+
+    return {
+        "available_tables": state.get("available_tables") or [],
+        "schema_info": state.get("schema_info") or [],
+        "available_columns": state.get("available_columns") or [],
+        "date_columns": state.get("date_columns") or [],
+    }
+
+
 @app.post("/api/chat/data-quality-agent")
 async def chat_data_quality_agent(req: DataQualityAgentRequest):
     user_message = (req.message or "").strip()
@@ -5856,18 +6027,19 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
             if number_match:
                 parsed_number = int(re.sub(r"[^\d]", "", number_match.group(1)))
                 state["sample_size"] = max(0, min(DATA_QUALITY_MAX_SAMPLE_ROWS, parsed_number))
-                state["stage"] = "awaiting_row_filter"
+                state["stage"] = "awaiting_row_filter_mode"
                 return {
-                    "answer": (
-                        "## Row Filter\n"
-                        "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+                    "answer": build_choice_markdown(
+                        "Row Filter",
+                        "Choose whether to profile all rows or enter a manual row filter.",
+                        [DATA_QUALITY_SKIP_ROW_FILTER_OPTION, DATA_QUALITY_ENTER_ROW_FILTER_OPTION],
                     ),
                     "agent_state": state,
                     "steps": _data_quality_agent_steps(
-                        "dq-row-filter",
-                        "Waiting for row filter",
+                        "dq-row-filter-mode",
+                        "Waiting for row filter mode",
                         "running",
-                        "The sampling strategy is set, and the agent is waiting for the optional row filter.",
+                        "The sampling strategy is set, and the agent is waiting for the optional row-filter choice.",
                     ),
                 }
             else:
@@ -5902,18 +6074,19 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
             }
         else:
             state["sample_size"] = DATA_QUALITY_SAMPLE_OPTIONS[selected_sample]
-            state["stage"] = "awaiting_row_filter"
+            state["stage"] = "awaiting_row_filter_mode"
             return {
-                "answer": (
-                    "## Row Filter\n"
-                    "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+                "answer": build_choice_markdown(
+                    "Row Filter",
+                    "Choose whether to profile all rows or enter a manual row filter.",
+                    [DATA_QUALITY_SKIP_ROW_FILTER_OPTION, DATA_QUALITY_ENTER_ROW_FILTER_OPTION],
                 ),
                 "agent_state": state,
                 "steps": _data_quality_agent_steps(
-                    "dq-row-filter",
-                    "Waiting for row filter",
+                    "dq-row-filter-mode",
+                    "Waiting for row filter mode",
                     "running",
-                    "The sampling strategy is set, and the agent is waiting for the optional row filter.",
+                    "The sampling strategy is set, and the agent is waiting for the optional row-filter choice.",
                 ),
             }
 
@@ -5935,33 +6108,162 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
             }
         parsed_number = 0 if normalized_lower in {"0", "full scan"} else int(re.sub(r"[^\d]", "", number_match.group(1)))
         state["sample_size"] = max(0, min(DATA_QUALITY_MAX_SAMPLE_ROWS, parsed_number))
-        state["stage"] = "awaiting_row_filter"
+        state["stage"] = "awaiting_row_filter_mode"
         return {
-            "answer": (
-                "## Row Filter\n"
-                "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+            "answer": build_choice_markdown(
+                "Row Filter",
+                "Choose whether to profile all rows or enter a manual row filter.",
+                [DATA_QUALITY_SKIP_ROW_FILTER_OPTION, DATA_QUALITY_ENTER_ROW_FILTER_OPTION],
             ),
             "agent_state": state,
             "steps": _data_quality_agent_steps(
-                "dq-row-filter",
-                "Waiting for row filter",
+                "dq-row-filter-mode",
+                "Waiting for row filter mode",
                 "running",
-                "The custom sampling strategy is set, and the agent is waiting for the optional row filter.",
+                "The custom sampling strategy is set, and the agent is waiting for the optional row-filter choice.",
+            ),
+        }
+
+    if state.get("stage") == "awaiting_row_filter_mode":
+        row_filter_options = [DATA_QUALITY_SKIP_ROW_FILTER_OPTION, DATA_QUALITY_ENTER_ROW_FILTER_OPTION]
+        selected_mode = resolve_user_choice(user_message, row_filter_options)
+
+        if not selected_mode and normalized_lower in {"skip", "no filter", "without filter", "none", "all rows"}:
+            selected_mode = DATA_QUALITY_SKIP_ROW_FILTER_OPTION
+
+        if selected_mode == DATA_QUALITY_SKIP_ROW_FILTER_OPTION:
+            state["row_filter"] = ""
+            state["stage"] = "awaiting_time_column" if state.get("date_columns") else "awaiting_review"
+
+            if state.get("stage") == "awaiting_time_column":
+                time_options = [DATA_QUALITY_SKIP_TIME_OPTION] + list(state.get("date_columns") or [])
+                return {
+                    "answer": build_choice_markdown(
+                        "Volumetric Analysis",
+                        "Choose a time column if you also want a volume-over-time analysis.",
+                        time_options,
+                    ),
+                    "agent_state": state,
+                    "steps": _data_quality_agent_steps(
+                        "dq-time-column",
+                        "Waiting for time column",
+                        "running",
+                        "The row filter was skipped, and the agent is waiting for the optional volumetric-analysis choice.",
+                    ),
+                }
+
+            return {
+                "answer": append_choice_markdown(
+                    _data_quality_review_markdown(state),
+                    "Review Actions",
+                    "Choose the next action for this data-quality run.",
+                    DATA_QUALITY_REVIEW_OPTIONS,
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-review",
+                    "Ready to launch",
+                    "running",
+                    "The row filter choice is complete, and the run is ready for review.",
+                ),
+            }
+
+        if selected_mode == DATA_QUALITY_ENTER_ROW_FILTER_OPTION:
+            state["stage"] = "awaiting_row_filter"
+            return {
+                "answer": append_choice_markdown(
+                    (
+                        "## Row Filter\n"
+                        "Type a safe boolean expression such as `region = 'FR'`."
+                    ),
+                    "Quick Choice",
+                    "Or skip the row filter for this run.",
+                    [DATA_QUALITY_SKIP_ROW_FILTER_OPTION],
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-row-filter",
+                    "Waiting for row filter",
+                    "running",
+                    "The agent is waiting for a manual row filter expression.",
+                ),
+            }
+
+        if user_message:
+            validation_error = _validate_data_quality_row_filter(user_message)
+            if not validation_error:
+                state["row_filter"] = user_message.strip()
+                state["stage"] = "awaiting_time_column" if state.get("date_columns") else "awaiting_review"
+
+                if state.get("stage") == "awaiting_time_column":
+                    time_options = [DATA_QUALITY_SKIP_TIME_OPTION] + list(state.get("date_columns") or [])
+                    return {
+                        "answer": build_choice_markdown(
+                            "Volumetric Analysis",
+                            "Choose a time column if you also want a volume-over-time analysis.",
+                            time_options,
+                        ),
+                        "agent_state": state,
+                        "steps": _data_quality_agent_steps(
+                            "dq-time-column",
+                            "Waiting for time column",
+                            "running",
+                            "The row filter is set, and the agent is waiting for the optional volumetric-analysis choice.",
+                        ),
+                    }
+
+                return {
+                    "answer": append_choice_markdown(
+                        _data_quality_review_markdown(state),
+                        "Review Actions",
+                        "Choose the next action for this data-quality run.",
+                        DATA_QUALITY_REVIEW_OPTIONS,
+                    ),
+                    "agent_state": state,
+                    "steps": _data_quality_agent_steps(
+                        "dq-review",
+                        "Ready to launch",
+                        "running",
+                        "The row filter is set, and the run is ready for review.",
+                    ),
+                }
+
+        return {
+            "answer": build_choice_markdown(
+                "Row Filter",
+                "Choose whether to profile all rows or enter a manual row filter.",
+                row_filter_options,
+            ),
+            "agent_state": state,
+            "steps": _data_quality_agent_steps(
+                "dq-row-filter-mode",
+                "Waiting for row filter mode",
+                "running",
+                "The agent is waiting for the optional row-filter choice.",
             ),
         }
 
     if state.get("stage") == "awaiting_row_filter":
-        if not user_message or normalized_lower in {"skip", "no filter", "without filter", "none", "all rows"}:
+        if (
+            not user_message
+            or normalized_lower in {"skip", "no filter", "without filter", "none", "all rows"}
+            or resolve_user_choice(user_message, [DATA_QUALITY_SKIP_ROW_FILTER_OPTION]) == DATA_QUALITY_SKIP_ROW_FILTER_OPTION
+        ):
             state["row_filter"] = ""
             state["stage"] = "awaiting_time_column" if state.get("date_columns") else "awaiting_review"
         else:
             validation_error = _validate_data_quality_row_filter(user_message)
             if validation_error:
                 return {
-                    "answer": (
-                        "## Row Filter\n"
-                        f"{validation_error}\n\n"
-                        "Please type a safe boolean expression, or answer `skip` to profile all rows."
+                    "answer": append_choice_markdown(
+                        (
+                            "## Row Filter\n"
+                            f"{validation_error}\n\n"
+                            "Please type a safe boolean expression."
+                        ),
+                        "Quick Choice",
+                        "Or skip the row filter for this run.",
+                        [DATA_QUALITY_SKIP_ROW_FILTER_OPTION],
                     ),
                     "agent_state": state,
                     "steps": _data_quality_agent_steps(
@@ -6058,7 +6360,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
         elif selected_review_action == "Edit sample size":
             state["stage"] = "awaiting_sample_size"
         elif selected_review_action == "Edit row filter":
-            state["stage"] = "awaiting_row_filter"
+            state["stage"] = "awaiting_row_filter_mode"
         elif selected_review_action == "Edit time column":
             if state.get("date_columns"):
                 state["stage"] = "awaiting_time_column"
@@ -6118,11 +6420,31 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
                     "The agent is waiting for a new sample size.",
                 ),
             }
+        if state.get("stage") == "awaiting_row_filter_mode":
+            return {
+                "answer": build_choice_markdown(
+                    "Row Filter",
+                    "Choose whether to profile all rows or enter a manual row filter.",
+                    [DATA_QUALITY_SKIP_ROW_FILTER_OPTION, DATA_QUALITY_ENTER_ROW_FILTER_OPTION],
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-row-filter-mode",
+                    "Waiting for row filter mode",
+                    "running",
+                    "The agent is waiting for the optional row-filter choice.",
+                ),
+            }
         if state.get("stage") == "awaiting_row_filter":
             return {
-                "answer": (
-                    "## Row Filter\n"
-                    "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+                "answer": append_choice_markdown(
+                    (
+                        "## Row Filter\n"
+                        "Type a safe boolean expression such as `region = 'FR'`."
+                    ),
+                    "Quick Choice",
+                    "Or skip the row filter for this run.",
+                    [DATA_QUALITY_SKIP_ROW_FILTER_OPTION],
                 ),
                 "agent_state": state,
                 "steps": _data_quality_agent_steps(
@@ -6202,7 +6524,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
 async def chat_manager_agent(req: ManagerAgentRequest):
     user_message = (req.message or "").strip()
     manager_state = _normalize_manager_agent_state(req.manager_state.model_dump())
-    clickhouse_state = req.clickhouse_state.model_dump()
+    clickhouse_state = dump_clickhouse_agent_state(req.clickhouse_state)
     file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
     data_quality_state = _normalize_data_quality_state(req.data_quality_state.model_dump())
     file_manager_config = _normalize_file_manager_config(req.file_manager_config.model_dump())
@@ -6445,7 +6767,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     explicit_table_switch = resolve_user_choice(user_message, state.available_tables)
     if state.selected_table and explicit_table_switch and explicit_table_switch != state.selected_table:
         state.selected_table = explicit_table_switch
-        state.schema = []
+        state.table_schema = []
         state.pending_request = ""
         reset_clickhouse_query_resolution(state)
         state.stage = "ready"
@@ -6483,7 +6805,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     state.stage = "ready"
                     return {
                         "answer": "## Answer\nUnderstood. I will keep the latest result in text form only.",
-                        "agent_state": state.model_dump(),
+                        "agent_state": dump_clickhouse_agent_state(state),
                         "steps": [
                             {
                                 "id": "ch-chart-skip",
@@ -6526,7 +6848,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                                 "Choose the field to use on the X axis.",
                                 x_options,
                             ),
-                            "agent_state": state.model_dump(),
+                            "agent_state": dump_clickhouse_agent_state(state),
                             "steps": [
                                 {
                                     "id": "ch-chart-x",
@@ -6557,7 +6879,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                                 "Choose the metric to use on the Y axis.",
                                 y_options,
                             ),
-                            "agent_state": state.model_dump(),
+                            "agent_state": dump_clickhouse_agent_state(state),
                             "steps": [
                                 {
                                     "id": "ch-chart-y",
@@ -6596,7 +6918,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                                 "Choose the chart type.",
                                 state.chart_type_options,
                             ),
-                            "agent_state": state.model_dump(),
+                            "agent_state": dump_clickhouse_agent_state(state),
                             "steps": [
                                 {
                                     "id": "ch-chart-type",
@@ -6622,7 +6944,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                                 "## Answer\nI could not build a usable chart from the latest result because "
                                 "the selected axes do not produce enough numeric points."
                             ),
-                            "agent_state": state.model_dump(),
+                            "agent_state": dump_clickhouse_agent_state(state),
                             "steps": [
                                 {
                                     "id": "ch-chart-failed",
@@ -6648,7 +6970,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     return {
                         "answer": answer,
                         "chart": chart,
-                        "agent_state": state.model_dump(),
+                        "agent_state": dump_clickhouse_agent_state(state),
                         "steps": [
                             {
                                 "id": "ch-chart-built",
@@ -6669,7 +6991,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     state.clarification_prompt or "Which table should I use for this request?",
                     table_options,
                 ),
-                "agent_state": state.model_dump(),
+                "agent_state": dump_clickhouse_agent_state(state),
                 "steps": [
                     {
                         "id": "ch-await-table",
@@ -6709,7 +7031,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                         "Ask your question directly. I will infer the best table when the intent is clear, "
                         "and I will only ask you to choose if the request stays ambiguous."
                     ),
-                    "agent_state": state.model_dump(),
+                    "agent_state": dump_clickhouse_agent_state(state),
                     "steps": [
                         {
                             "id": "ch-ready",
@@ -6759,7 +7081,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                         state.clarification_prompt,
                         state.clarification_options,
                     ),
-                    "agent_state": state.model_dump(),
+                    "agent_state": dump_clickhouse_agent_state(state),
                     "steps": [
                         {
                             "id": "ch-tables",
@@ -6785,7 +7107,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                 f"## ClickHouse Query Agent\nI am focused on table `{state.selected_table}`.\n\n"
                 "Please tell me what you want to know, and I will inspect the schema before writing SQL."
             ),
-            "agent_state": state.model_dump(),
+            "agent_state": dump_clickhouse_agent_state(state),
             "steps": [
                 {
                     "id": "ch-await-request",
@@ -6796,13 +7118,13 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
             ],
         }
 
-    if not state.schema:
+    if not state.table_schema:
         try:
-            state.schema = await describe_clickhouse_table(req.clickhouse, state.selected_table)
+            state.table_schema = await describe_clickhouse_table(req.clickhouse, state.selected_table)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {state.selected_table}: {e}")
 
-    if not state.schema:
+    if not state.table_schema:
         raise HTTPException(status_code=400, detail=f"Table '{state.selected_table}' has no readable columns.")
 
     if state.stage == "awaiting_field":
@@ -6814,7 +7136,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     state.clarification_prompt or "Please choose the field I should use.",
                     state.clarification_options,
                 ),
-                "agent_state": state.model_dump(),
+                "agent_state": dump_clickhouse_agent_state(state),
                 "steps": [
                     {
                         "id": "ch-await-field",
@@ -6837,7 +7159,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     state.clarification_prompt or "Please choose the date column I should use.",
                     state.clarification_options,
                 ),
-                "agent_state": state.model_dump(),
+                "agent_state": dump_clickhouse_agent_state(state),
                 "steps": [
                     {
                         "id": "ch-await-date",
@@ -6854,7 +7176,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     analysis = await analyze_clickhouse_schema(
         state.pending_request,
         state.selected_table,
-        state.schema,
+        state.table_schema,
         conversation_memory,
         req.llm_base_url,
         req.llm_model,
@@ -6862,9 +7184,9 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         req.llm_api_key,
     )
 
-    state.candidate_fields = match_schema_columns(analysis["field_candidates"], state.schema)
-    detected_date_fields = match_schema_columns(analysis["date_candidates"], state.schema)
-    heuristic_dates = find_date_columns(state.schema)
+    state.candidate_fields = match_schema_columns(analysis["field_candidates"], state.table_schema)
+    detected_date_fields = match_schema_columns(analysis["date_candidates"], state.table_schema)
+    heuristic_dates = find_date_columns(state.table_schema)
     state.date_fields = detected_date_fields or heuristic_dates
 
     if analysis["field_choice_required"] and len(state.candidate_fields) > 1 and not state.selected_field:
@@ -6877,13 +7199,13 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                 state.clarification_prompt,
                 state.clarification_options,
             ),
-            "agent_state": state.model_dump(),
+            "agent_state": dump_clickhouse_agent_state(state),
             "steps": [
                 {
                     "id": "ch-schema",
                     "title": "Inspected table schema",
                     "status": "success",
-                    "details": f"Loaded {len(state.schema)} columns from `{state.selected_table}`.",
+                    "details": f"Loaded {len(state.table_schema)} columns from `{state.selected_table}`.",
                 },
                 {
                     "id": "ch-field-clarification",
@@ -6907,13 +7229,13 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                 state.clarification_prompt,
                 state.clarification_options,
             ),
-            "agent_state": state.model_dump(),
+            "agent_state": dump_clickhouse_agent_state(state),
             "steps": [
                 {
                     "id": "ch-schema",
                     "title": "Inspected table schema",
                     "status": "success",
-                    "details": f"Loaded {len(state.schema)} columns from `{state.selected_table}`.",
+                    "details": f"Loaded {len(state.table_schema)} columns from `{state.selected_table}`.",
                 },
                 {
                     "id": "ch-date-clarification",
@@ -6930,7 +7252,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     generated = await generate_clickhouse_sql(
         state.pending_request,
         state.selected_table,
-        state.schema,
+        state.table_schema,
         state.selected_field,
         state.selected_date_field,
         conversation_memory,
@@ -6952,7 +7274,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         repaired = await generate_clickhouse_sql(
             state.pending_request,
             state.selected_table,
-            state.schema,
+            state.table_schema,
             state.selected_field,
             state.selected_date_field,
             conversation_memory,
@@ -7025,7 +7347,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     return {
                         "answer": answer,
                         "chart": chart,
-                        "agent_state": state.model_dump(),
+                        "agent_state": dump_clickhouse_agent_state(state),
                         "sql": sql,
                         "steps": [
                             {
@@ -7038,7 +7360,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                                 "id": "ch-inspect-schema",
                                 "title": "Inspected schema",
                                 "status": "success",
-                                "details": f"Loaded {len(state.schema)} columns to map the request safely.",
+                                "details": f"Loaded {len(state.table_schema)} columns to map the request safely.",
                             },
                             {
                                 "id": "ch-generate-sql",
@@ -7081,7 +7403,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
 
     return {
         "answer": answer,
-        "agent_state": state.model_dump(),
+        "agent_state": dump_clickhouse_agent_state(state),
         "sql": sql,
         "steps": [
             {
@@ -7094,7 +7416,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                 "id": "ch-inspect-schema",
                 "title": "Inspected schema",
                 "status": "success",
-                "details": f"Loaded {len(state.schema)} columns to map the request safely.",
+                "details": f"Loaded {len(state.table_schema)} columns to map the request safely.",
             },
             {
                 "id": "ch-generate-sql",
