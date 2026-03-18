@@ -207,7 +207,11 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: text,
-            history: activeMessages.filter(m => m.role !== 'system')
+            history: activeMessages.filter(m => m.role !== 'system'),
+            elasticsearchUrl:      config.elasticsearchUrl,
+            elasticsearchIndex:    config.elasticsearchIndex,
+            elasticsearchUsername: config.elasticsearchUsername,
+            elasticsearchPassword: config.elasticsearchPassword,
           })
         });
 

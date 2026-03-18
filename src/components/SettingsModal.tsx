@@ -24,6 +24,8 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     systemPrompt: config.systemPrompt || '',
     elasticsearchUrl: config.elasticsearchUrl || 'http://localhost:9200',
     elasticsearchIndex: config.elasticsearchIndex || 'rag_documents',
+    elasticsearchUsername: config.elasticsearchUsername || '',
+    elasticsearchPassword: config.elasticsearchPassword || '',
     embeddingModel: config.embeddingModel || 'nomic-embed-text',
     chunkSize: config.chunkSize || 512,
     chunkOverlap: config.chunkOverlap || 50,
@@ -57,7 +59,12 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     setEsTestMessage('');
     try {
       const url = localConfig.elasticsearchUrl.replace(/\/$/, '');
-      const response = await fetch(`${url}/`);
+      const headers: Record<string, string> = {};
+      if (localConfig.elasticsearchUsername) {
+        const credentials = btoa(`${localConfig.elasticsearchUsername}:${localConfig.elasticsearchPassword}`);
+        headers['Authorization'] = `Basic ${credentials}`;
+      }
+      const response = await fetch(`${url}/`, { headers });
       if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
       const data = await response.json();
       setEsTestStatus('success');
@@ -347,6 +354,35 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                   className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                   placeholder="rag_documents"
                 />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                    <Key className="w-4 h-4" /> Username
+                  </label>
+                  <input
+                    type="text"
+                    value={localConfig.elasticsearchUsername}
+                    onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchUsername: e.target.value })}
+                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    placeholder="elastic"
+                    autoComplete="username"
+                  />
+                </div>
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                    <Key className="w-4 h-4" /> Password
+                  </label>
+                  <input
+                    type="password"
+                    value={localConfig.elasticsearchPassword}
+                    onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchPassword: e.target.value })}
+                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    placeholder="••••••••"
+                    autoComplete="current-password"
+                  />
+                </div>
               </div>
 
               <div className="pt-4 border-t border-gray-100">
