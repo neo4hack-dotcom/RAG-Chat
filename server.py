@@ -197,6 +197,13 @@ class ChatRequest(BaseModel):
     llm_provider: str = "ollama"
 
 
+class EmbeddingTestRequest(BaseModel):
+    embedding_base_url: str
+    embedding_model: str
+    embedding_api_key: Optional[str] = None
+    opensearch: Optional[OSConfig] = None
+
+
 # ── MCP endpoints ─────────────────────────────────────────────────────────────
 
 @app.post("/api/mcp/test")
@@ -414,6 +421,55 @@ async def setup_index(req: SetupIndexRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# ── Embedding test endpoint ───────────────────────────────────────────────────
+
+@app.post("/api/embedding/test")
+async def test_embedding(req: EmbeddingTestRequest):
+    """Generate a real test embedding and optionally verify dimension compatibility with the OpenSearch index."""
+    try:
+        vector = await get_embedding(
+            "embedding connectivity test", req.embedding_base_url, req.embedding_model, req.embedding_api_key
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Embedding error: {e}")
+
+    dimension = len(vector)
+    result: dict = {"status": "ok", "dimension": dimension, "model": req.embedding_model}
+
+    if req.opensearch:
+        def _check_mapping():
+            client = get_os_client(req.opensearch.url, req.opensearch.username, req.opensearch.password)
+            index = req.opensearch.index
+            if not client.indices.exists(index=index):
+                return None
+            mapping = client.indices.get_mapping(index=index)
+            props = mapping.get(index, {}).get("mappings", {}).get("properties", {})
+            return props.get("embedding", {}).get("dimension")
+
+        try:
+            index_dim = await asyncio.to_thread(_check_mapping)
+            if index_dim is None:
+                result["opensearch"] = {
+                    "status": "no_index",
+                    "message": f"Index '{req.opensearch.index}' does not exist yet — use Setup Index.",
+                }
+            elif index_dim == dimension:
+                result["opensearch"] = {"status": "compatible", "index_dimension": index_dim}
+            else:
+                result["opensearch"] = {
+                    "status": "incompatible",
+                    "index_dimension": index_dim,
+                    "message": (
+                        f"Dimension mismatch: model produces {dimension}‑D vectors "
+                        f"but index expects {index_dim}‑D. Delete and re-create the index."
+                    ),
+                }
+        except Exception as e:
+            result["opensearch"] = {"status": "error", "message": str(e)}
+
+    return result
+
+
 # ── Document ingest endpoint ──────────────────────────────────────────────────
 
 @app.post("/api/documents/ingest")
@@ -545,16 +601,19 @@ async def chat_rag(req: ChatRequest):
 
     # Fallback — index empty or unreachable
     if not results:
-        answer = await llm_chat(
-            [
-                {"role": "system", "content": (
-                    "You are a helpful assistant. No documents were found in the knowledge base. "
-                    "Answer from general knowledge and mention that no documents are indexed."
-                )},
-                {"role": "user", "content": message},
-            ],
-            req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
-        )
+        try:
+            answer = await llm_chat(
+                [
+                    {"role": "system", "content": (
+                        "You are a helpful assistant. No documents were found in the knowledge base. "
+                        "Answer from general knowledge and mention that no documents are indexed."
+                    )},
+                    {"role": "user", "content": message},
+                ],
+                req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"LLM error: {e}")
         return {"answer": answer, "sources": [], "confidence": 0.0}
 
     # 4. Keyword boost (Python-side)
@@ -607,10 +666,13 @@ async def chat_rag(req: ChatRequest):
         messages_payload.append({"role": role, "content": m.get("content", "")})
     messages_payload.append({"role": "user", "content": message})
 
-    answer = await llm_chat(
-        messages_payload,
-        req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
-    )
+    try:
+        answer = await llm_chat(
+            messages_payload,
+            req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
     return {
         "answer": answer,
