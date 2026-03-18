@@ -91,8 +91,14 @@ async def get_embedding(
     model: str,
     api_key: str = None,
 ) -> list[float]:
-    """Get a vector embedding via an OpenAI-compatible /embeddings endpoint."""
-    url = base_url.rstrip("/") + "/embeddings"
+    """Get a vector embedding via an OpenAI-compatible /embeddings endpoint.
+
+    base_url may be a base path (e.g. ``http://host/v1``) — ``/embeddings`` is
+    appended automatically — or the full endpoint URL already ending with
+    ``/embeddings`` (e.g. ``http://host/v1/openai/embeddings``), used as-is.
+    """
+    stripped = base_url.rstrip("/")
+    url = stripped if stripped.endswith("/embeddings") else stripped + "/embeddings"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
