@@ -7,14 +7,15 @@ Vector storage and kNN search via opensearch-py.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 import httpx
 import json
 import re
 import uuid
 import os
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
 from opensearchpy import OpenSearch
@@ -31,6 +32,130 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Persistent app database ───────────────────────────────────────────────────
+
+DB_PATH = Path(__file__).parent / "DB.json"
+DB_LOCK = asyncio.Lock()
+
+DEFAULT_APP_CONFIG = {
+    "provider": "ollama",
+    "baseUrl": "http://localhost:11434",
+    "apiKey": "",
+    "model": "llama3",
+    "systemPrompt": (
+        "You are a helpful, smart, and concise AI assistant. Format your responses "
+        "beautifully using markdown. When offering choices, use markdown task lists "
+        "(- [ ] Option)."
+    ),
+    "elasticsearchUrl": "http://localhost:9200",
+    "elasticsearchIndex": "rag_documents",
+    "elasticsearchUsername": "",
+    "elasticsearchPassword": "",
+    "embeddingBaseUrl": "http://localhost:11434/v1",
+    "embeddingApiKey": "",
+    "embeddingModel": "nomic-embed-text",
+    "embeddingVerifySsl": True,
+    "chunkSize": 512,
+    "chunkOverlap": 50,
+    "knnNeighbors": 50,
+    "mcpTools": [
+        {"id": "mcp_1", "label": "MCP Tool 1", "url": ""},
+        {"id": "mcp_2", "label": "MCP Tool 2", "url": ""},
+    ],
+    "documentationUrl": "",
+}
+
+DEFAULT_PREFERENCES = {
+    "darkMode": False,
+    "currentConversationId": None,
+    "workflow": "LLM",
+    "agentRole": "manager",
+    "selectedMcpToolId": "",
+    "page": "landing",
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _default_db_state() -> dict:
+    return {
+        "schemaVersion": 1,
+        "updatedAt": _utc_now_iso(),
+        "config": json.loads(json.dumps(DEFAULT_APP_CONFIG)),
+        "conversations": [],
+        "preferences": json.loads(json.dumps(DEFAULT_PREFERENCES)),
+    }
+
+
+def _normalize_db_state(payload: Optional[dict]) -> dict:
+    state = _default_db_state()
+    if not isinstance(payload, dict):
+        return state
+
+    incoming_config = payload.get("config")
+    if isinstance(incoming_config, dict):
+        state["config"].update(incoming_config)
+
+    incoming_conversations = payload.get("conversations")
+    if isinstance(incoming_conversations, list):
+        state["conversations"] = incoming_conversations
+
+    incoming_preferences = payload.get("preferences")
+    if isinstance(incoming_preferences, dict):
+        state["preferences"].update(incoming_preferences)
+
+    incoming_updated_at = payload.get("updatedAt")
+    if isinstance(incoming_updated_at, str) and incoming_updated_at:
+        state["updatedAt"] = incoming_updated_at
+
+    incoming_schema_version = payload.get("schemaVersion")
+    if isinstance(incoming_schema_version, int):
+        state["schemaVersion"] = incoming_schema_version
+
+    return state
+
+
+def _write_db_state_sync(state: dict) -> dict:
+    normalized = _normalize_db_state(state)
+    normalized["updatedAt"] = _utc_now_iso()
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = DB_PATH.with_suffix(".json.tmp")
+    temp_path.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(DB_PATH)
+    return normalized
+
+
+def _read_db_state_sync() -> dict:
+    if not DB_PATH.exists():
+        return _write_db_state_sync(_default_db_state())
+
+    try:
+        raw = json.loads(DB_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return _write_db_state_sync(_default_db_state())
+
+    normalized = _normalize_db_state(raw)
+    if normalized != raw:
+        return _write_db_state_sync(normalized)
+    return normalized
+
+
+async def read_db_state() -> dict:
+    async with DB_LOCK:
+        return await asyncio.to_thread(_read_db_state_sync)
+
+
+async def write_db_state(payload: dict) -> dict:
+    async with DB_LOCK:
+        return await asyncio.to_thread(_write_db_state_sync, payload)
 
 
 # ── OpenSearch client factory ─────────────────────────────────────────────────
@@ -212,6 +337,57 @@ class EmbeddingTestRequest(BaseModel):
     embedding_api_key: Optional[str] = None
     embedding_verify_ssl: bool = True
     opensearch: Optional[OSConfig] = None
+
+
+class PersistedPreferences(BaseModel):
+    darkMode: bool = False
+    currentConversationId: Optional[str] = None
+    workflow: str = "LLM"
+    agentRole: str = "manager"
+    selectedMcpToolId: str = ""
+    page: str = "landing"
+
+
+class PersistedStateRequest(BaseModel):
+    config: dict = Field(default_factory=lambda: json.loads(json.dumps(DEFAULT_APP_CONFIG)))
+    conversations: list[dict] = Field(default_factory=list)
+    preferences: PersistedPreferences = Field(default_factory=PersistedPreferences)
+
+
+# ── App state persistence endpoints ───────────────────────────────────────────
+
+@app.get("/api/db/state")
+async def get_app_state():
+    return await read_db_state()
+
+
+@app.put("/api/db/state")
+async def save_app_state(req: PersistedStateRequest):
+    payload = {
+        "config": req.config,
+        "conversations": req.conversations,
+        "preferences": req.preferences.model_dump(),
+    }
+    return await write_db_state(payload)
+
+
+@app.get("/api/db/export")
+async def export_app_state():
+    state = await read_db_state()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return JSONResponse(
+        content=state,
+        headers={
+            "Content-Disposition": f'attachment; filename="ragnarok-db-backup-{timestamp}.json"'
+        },
+    )
+
+
+@app.post("/api/db/import")
+async def import_app_state(payload: dict):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON payload for DB import.")
+    return await write_db_state(payload)
 
 
 # ── MCP endpoints ─────────────────────────────────────────────────────────────
