@@ -1,7 +1,7 @@
 """
-RAGnarok — Python FastAPI Backend
-100% local: uses Ollama for LLM inference and embeddings.
-No external API keys required.
+RAGnarok — FastAPI Backend (OpenSearch edition)
+Embeddings via Ollama/OpenAI-compatible endpoint.
+Vector storage and kNN search via opensearch-py.
 """
 
 from fastapi import FastAPI, HTTPException
@@ -12,11 +12,13 @@ from pydantic import BaseModel
 import httpx
 import json
 import re
-import math
 import uuid
 import os
-from typing import Optional, List, Any
+import asyncio
+from typing import Optional
 from pathlib import Path
+from opensearchpy import OpenSearch
+from urllib.parse import urlparse
 
 app = FastAPI(title="RAGnarok API")
 
@@ -28,31 +30,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Configuration ────────────────────────────────────────────────────────────
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-LLM_MODEL       = os.getenv("LLM_MODEL",        "llama3")
-EMBEDDING_MODEL  = os.getenv("EMBEDDING_MODEL",  "nomic-embed-text")
 
-# ── In-memory RAG store ──────────────────────────────────────────────────────
-documents: list[dict] = []   # DocumentMeta
-chunks:    list[dict] = []   # DocumentChunk (with embedding vector)
+# ── OpenSearch client factory ─────────────────────────────────────────────────
 
-# ── Utility functions ────────────────────────────────────────────────────────
+def get_os_client(url: str, username: str = None, password: str = None) -> OpenSearch:
+    parsed = urlparse(url)
+    use_ssl = parsed.scheme == "https"
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (443 if use_ssl else 9200)
+    auth = (username, password) if username and password else None
+    return OpenSearch(
+        hosts=[{"host": host, "port": port}],
+        http_auth=auth,
+        use_ssl=use_ssl,
+        verify_certs=False,
+        ssl_show_warn=False,
+    )
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
+# ── Text utilities ────────────────────────────────────────────────────────────
 
 def keyword_score(query: str, text: str) -> float:
     terms = [t for t in re.split(r"\W+", query.lower()) if len(t) > 2]
+    if not terms:
+        return 0.0
     text_lower = text.lower()
-    score = sum(1 for t in terms if t in text_lower)
-    return score / (len(terms) or 1)
+    return sum(1 for t in terms if t in text_lower) / len(terms)
 
 
 def chunk_text(text: str, max_words: int = 200, overlap_sentences: int = 2) -> list[str]:
@@ -60,13 +63,11 @@ def chunk_text(text: str, max_words: int = 200, overlap_sentences: int = 2) -> l
     result: list[str] = []
     current: list[str] = []
     current_words = 0
-
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
             continue
         word_count = len(sentence.split())
-
         if current_words + word_count > max_words and current:
             result.append(" ".join(current))
             overlap = current[-overlap_sentences:]
@@ -75,164 +76,384 @@ def chunk_text(text: str, max_words: int = 200, overlap_sentences: int = 2) -> l
         else:
             current.append(sentence)
             current_words += word_count
-
     if current:
         result.append(" ".join(current))
-    return result
+    return result or [text]
 
 
-# ── Ollama helpers ───────────────────────────────────────────────────────────
+# ── Embedding helper ──────────────────────────────────────────────────────────
 
-async def ollama_chat(model: str, messages: list[dict], fmt: Optional[str] = None) -> dict:
-    payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
-    if fmt:
-        payload["format"] = fmt
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
-        response.raise_for_status()
-        return response.json()
-
-
-async def ollama_embed(model: str, text: str) -> list[float]:
+async def get_embedding(
+    text: str,
+    base_url: str,
+    model: str,
+    api_key: str = None,
+) -> list[float]:
+    """Get a vector embedding via an OpenAI-compatible /embeddings endpoint."""
+    url = base_url.rstrip("/") + "/embeddings"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            f"{OLLAMA_BASE_URL}/api/embed",
-            json={"model": model, "input": text},
-        )
-        response.raise_for_status()
-        data = response.json()
-        embeddings = data.get("embeddings", [])
-        if not embeddings:
-            raise HTTPException(status_code=500, detail="Ollama returned no embeddings")
-        return embeddings[0]
+        resp = await client.post(url, json={"model": model, "input": text}, headers=headers)
+        resp.raise_for_status()
+        return resp.json()["data"][0]["embedding"]
 
 
-# ── Request models ───────────────────────────────────────────────────────────
+# ── LLM helper ────────────────────────────────────────────────────────────────
 
-class ChatMessage(BaseModel):
-    role: str
-    content: str
+async def llm_chat(
+    messages: list[dict],
+    base_url: str,
+    model: str,
+    provider: str = "ollama",
+    api_key: str = None,
+    response_format: str = None,
+) -> str:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    if provider == "ollama":
+        payload: dict = {"model": model, "messages": messages, "stream": False}
+        if response_format == "json":
+            payload["format"] = "json"
+        endpoint = base_url.rstrip("/") + "/api/chat"
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(endpoint, json=payload, headers=headers)
+            resp.raise_for_status()
+            return resp.json().get("message", {}).get("content", "")
+    else:
+        payload = {"model": model, "messages": messages}
+        if response_format == "json":
+            payload["response_format"] = {"type": "json_object"}
+        endpoint = base_url.rstrip("/") + "/chat/completions"
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(endpoint, json=payload, headers=headers)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
+class OSConfig(BaseModel):
+    url: str
+    index: str = "rag_documents"
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class TestConnectionRequest(BaseModel):
+    url: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class SetupIndexRequest(BaseModel):
+    opensearch: OSConfig
+    embedding_dimension: int = 768
+
+
+class IngestRequest(BaseModel):
+    text: str
+    doc_name: str
+    opensearch: OSConfig
+    embedding_base_url: str = "http://localhost:11434/v1"
+    embedding_api_key: Optional[str] = None
+    embedding_model: str = "nomic-embed-text"
+    chunk_size: int = 200
+    chunk_overlap: int = 2
+    embedding_dimension: int = 768
 
 
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []
-    # Optional Elasticsearch credentials forwarded by the frontend
-    elasticsearchUrl:      Optional[str] = None
-    elasticsearchIndex:    Optional[str] = None
-    elasticsearchUsername: Optional[str] = None
-    elasticsearchPassword: Optional[str] = None
+    opensearch: OSConfig
+    embedding_base_url: str = "http://localhost:11434/v1"
+    embedding_api_key: Optional[str] = None
+    embedding_model: str = "nomic-embed-text"
+    knn_neighbors: int = 10
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
 
 
-# ── RAG endpoint ─────────────────────────────────────────────────────────────
+# ── OpenSearch management endpoints ──────────────────────────────────────────
+
+@app.post("/api/opensearch/test")
+async def test_opensearch(req: TestConnectionRequest):
+    """Test connectivity to an OpenSearch cluster."""
+    def _ping():
+        client = get_os_client(req.url, req.username, req.password)
+        return client.info()
+
+    try:
+        info = await asyncio.to_thread(_ping)
+        cluster_name = info.get("cluster_name", "OpenSearch")
+        version = info.get("version", {}).get("number", "unknown")
+        return {"status": "ok", "cluster_name": cluster_name, "version": version}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/opensearch/setup-index")
+async def setup_index(req: SetupIndexRequest):
+    """Create a kNN-enabled index if it does not already exist."""
+    def _setup():
+        client = get_os_client(
+            req.opensearch.url, req.opensearch.username, req.opensearch.password
+        )
+        index = req.opensearch.index
+        if client.indices.exists(index=index):
+            return {"status": "exists", "index": index}
+
+        mapping = {
+            "settings": {"index.knn": True},
+            "mappings": {
+                "properties": {
+                    "chunk_id":  {"type": "keyword"},
+                    "doc_id":    {"type": "keyword"},
+                    "doc_name":  {"type": "keyword"},
+                    "text":      {"type": "text", "analyzer": "standard"},
+                    "embedding": {
+                        "type":      "knn_vector",
+                        "dimension": req.embedding_dimension,
+                        "method": {
+                            "name":       "hnsw",
+                            "space_type": "cosinesimil",
+                            "engine":     "nmslib",
+                            "parameters": {"ef_construction": 128, "m": 24},
+                        },
+                    },
+                }
+            },
+        }
+        client.indices.create(index=index, body=mapping)
+        return {"status": "created", "index": index}
+
+    try:
+        result = await asyncio.to_thread(_setup)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── Document ingest endpoint ──────────────────────────────────────────────────
+
+@app.post("/api/documents/ingest")
+async def ingest_document(req: IngestRequest):
+    """Chunk a document, embed each chunk, and index into OpenSearch."""
+    chunks = chunk_text(req.text, max_words=req.chunk_size, overlap_sentences=req.chunk_overlap)
+    doc_id = str(uuid.uuid4())
+
+    try:
+        embeddings = []
+        for chunk in chunks:
+            vec = await get_embedding(
+                chunk, req.embedding_base_url, req.embedding_model, req.embedding_api_key
+            )
+            embeddings.append(vec)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Embedding error: {e}")
+
+    def _index():
+        client = get_os_client(
+            req.opensearch.url, req.opensearch.username, req.opensearch.password
+        )
+        index = req.opensearch.index
+
+        if not client.indices.exists(index=index):
+            client.indices.create(index=index, body={
+                "settings": {"index.knn": True},
+                "mappings": {
+                    "properties": {
+                        "chunk_id":  {"type": "keyword"},
+                        "doc_id":    {"type": "keyword"},
+                        "doc_name":  {"type": "keyword"},
+                        "text":      {"type": "text", "analyzer": "standard"},
+                        "embedding": {
+                            "type":      "knn_vector",
+                            "dimension": req.embedding_dimension,
+                        },
+                    }
+                },
+            })
+
+        indexed = 0
+        for i, (chunk, vec) in enumerate(zip(chunks, embeddings)):
+            client.index(index=index, body={
+                "chunk_id":  f"{doc_id}_{i}",
+                "doc_id":    doc_id,
+                "doc_name":  req.doc_name,
+                "text":      chunk,
+                "embedding": vec,
+            })
+            indexed += 1
+        return indexed
+
+    try:
+        count = await asyncio.to_thread(_index)
+        return {"status": "ok", "doc_id": doc_id, "chunks_indexed": count}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── RAG chat endpoint ─────────────────────────────────────────────────────────
 
 @app.post("/api/chat/rag")
 async def chat_rag(req: ChatRequest):
     message = req.message
     history = req.history
 
-    # 1. HyDE — generate a hypothetical answer to improve semantic search
+    # 1. HyDE — generate a hypothetical answer to improve semantic recall
     try:
-        hyde_resp = await ollama_chat(
-            LLM_MODEL,
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "Write a concise, factual hypothetical answer to help with semantic search. "
-                        "No filler words, just the key facts:\n\n" + message
-                    ),
-                }
-            ],
+        hyde_answer = await llm_chat(
+            [{"role": "user", "content": (
+                "Write a concise factual answer for semantic search. "
+                "No filler, just key facts:\n\n" + message
+            )}],
+            req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
         )
-        expanded_query = hyde_resp.get("message", {}).get("content", message)
+        search_text = hyde_answer or message
     except Exception:
-        expanded_query = message
+        search_text = message
 
-    # 2. Embed the expanded query
-    query_vector = await ollama_embed(EMBEDDING_MODEL, expanded_query)
+    # 2. Embed the query
+    try:
+        query_vector = await get_embedding(
+            search_text, req.embedding_base_url, req.embedding_model, req.embedding_api_key
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Embedding error: {e}")
 
-    # 3. Hybrid search (vector cosine + keyword BM25-like)
-    scored = []
-    for chunk in chunks:
-        vec_score = cosine_similarity(query_vector, chunk["embedding"])
-        kw_score  = keyword_score(message, chunk["text"])
-        hybrid    = vec_score * 0.7 + kw_score * 0.3
-        scored.append({**chunk, "score": hybrid, "vecScore": vec_score, "kwScore": kw_score})
+    # 3. kNN search in OpenSearch
+    def _search():
+        client = get_os_client(
+            req.opensearch.url, req.opensearch.username, req.opensearch.password
+        )
+        index = req.opensearch.index
+        if not client.indices.exists(index=index):
+            return []
 
-    scored.sort(key=lambda c: c["score"], reverse=True)
-    top_chunks = scored[:10]
+        response = client.search(
+            index=index,
+            body={
+                "size": req.knn_neighbors,
+                "query": {
+                    "knn": {
+                        "embedding": {
+                            "vector": query_vector,
+                            "k": req.knn_neighbors,
+                        }
+                    }
+                },
+                "_source": ["chunk_id", "doc_id", "doc_name", "text"],
+            },
+        )
+        return [
+            {
+                "id":       h["_id"],
+                "chunk_id": h["_source"].get("chunk_id", h["_id"]),
+                "doc_id":   h["_source"].get("doc_id", ""),
+                "doc_name": h["_source"].get("doc_name", "document"),
+                "text":     h["_source"].get("text", ""),
+                "score":    h.get("_score", 0.0),
+            }
+            for h in response.get("hits", {}).get("hits", [])
+        ]
 
-    # 4. LLM reranking
-    if top_chunks:
-        try:
-            rerank_prompt = (
-                f"Score the relevance of each chunk to the query on a scale of 0–10.\n"
-                f"Return a JSON array: [{{\"index\": 0, \"relevanceScore\": 8}}, ...]\n\n"
-                f"Query: {message}\n\nChunks:\n"
-                + "\n\n".join(
-                    f"[Chunk {i}]\n{c['text']}" for i, c in enumerate(top_chunks)
-                )
-            )
-            rerank_resp = await ollama_chat(
-                LLM_MODEL,
-                [{"role": "user", "content": rerank_prompt}],
-                fmt="json",
-            )
-            rerank_text = rerank_resp.get("message", {}).get("content", "[]")
-            json_match = re.search(r"\[.*\]", rerank_text, re.DOTALL)
-            if json_match:
-                scores = json.loads(json_match.group())
-                for s in scores:
-                    idx = s.get("index", -1)
-                    if 0 <= idx < len(top_chunks):
-                        llm_score = s.get("relevanceScore", 0) / 10.0
-                        top_chunks[idx]["score"] = (
-                            top_chunks[idx]["score"] * 0.3 + llm_score * 0.7
-                        )
-            top_chunks.sort(key=lambda c: c["score"], reverse=True)
-            top_chunks = [c for c in top_chunks if c["score"] > 0.3][:5]
-        except Exception as e:
-            print(f"Reranking failed (using hybrid scores): {e}")
-            top_chunks = [c for c in top_chunks if c["score"] > 0.2][:5]
+    try:
+        results = await asyncio.to_thread(_search)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"OpenSearch error: {e}")
 
-    # 5. Generate answer with citations
-    context_text = "\n\n".join(
-        f"[Source {i + 1}: {c['docName']}]\n{c['text']}"
-        for i, c in enumerate(top_chunks)
+    # Fallback — index empty or unreachable
+    if not results:
+        answer = await llm_chat(
+            [
+                {"role": "system", "content": (
+                    "You are a helpful assistant. No documents were found in the knowledge base. "
+                    "Answer from general knowledge and mention that no documents are indexed."
+                )},
+                {"role": "user", "content": message},
+            ],
+            req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
+        )
+        return {"answer": answer, "sources": [], "confidence": 0.0}
+
+    # 4. Keyword boost (Python-side)
+    for r in results:
+        kw = keyword_score(message, r["text"])
+        r["score"] = r["score"] * 0.7 + kw * 0.3
+    results.sort(key=lambda x: x["score"], reverse=True)
+    top = results[:10]
+
+    # 5. LLM reranking
+    try:
+        rerank_prompt = (
+            f"Score each chunk's relevance to the query 0–10.\n"
+            f"Return JSON array only: [{{\"index\": 0, \"relevanceScore\": 8}}, ...]\n\n"
+            f"Query: {message}\n\nChunks:\n"
+            + "\n\n".join(f"[Chunk {i}]\n{c['text']}" for i, c in enumerate(top))
+        )
+        rerank_text = await llm_chat(
+            [{"role": "user", "content": rerank_prompt}],
+            req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
+            response_format="json",
+        )
+        json_match = re.search(r"\[.*\]", rerank_text, re.DOTALL)
+        if json_match:
+            for s in json.loads(json_match.group()):
+                idx = s.get("index", -1)
+                if 0 <= idx < len(top):
+                    llm_score = s.get("relevanceScore", 0) / 10.0
+                    top[idx]["score"] = top[idx]["score"] * 0.3 + llm_score * 0.7
+        top.sort(key=lambda x: x["score"], reverse=True)
+        top = [c for c in top if c["score"] > 0.3][:5]
+    except Exception as e:
+        print(f"Reranking skipped: {e}")
+        top = [c for c in top if c["score"] > 0.2][:5]
+
+    # 6. Generate answer with citations
+    context = "\n\n".join(
+        f"[Source {i + 1}: {c['doc_name']}]\n{c['text']}"
+        for i, c in enumerate(top)
     )
-    system_prompt = (
-        "You are a helpful assistant. Use the retrieved context below to answer the user's question.\n"
-        "Always cite your sources using [1], [2], etc. based on the Source number provided.\n"
-        "If the answer is not in the context, say you don't know based on the provided documents.\n\n"
-        f"Context:\n{context_text}"
-    )
-
-    messages_payload = [{"role": "system", "content": system_prompt}]
+    messages_payload = [
+        {"role": "system", "content": (
+            "You are a helpful assistant. Use the retrieved context to answer.\n"
+            "Cite sources using [1], [2], etc. If the answer is not in the context, say so.\n\n"
+            f"Context:\n{context}"
+        )}
+    ]
     for m in history:
         role = "user" if m.get("role") == "user" else "assistant"
         messages_payload.append({"role": role, "content": m.get("content", "")})
     messages_payload.append({"role": "user", "content": message})
 
-    gen_resp = await ollama_chat(LLM_MODEL, messages_payload)
-    answer = gen_resp.get("message", {}).get("content", "")
+    answer = await llm_chat(
+        messages_payload,
+        req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
+    )
 
     return {
         "answer": answer,
         "sources": [
             {
-                "id":      c["id"],
-                "docName": c["docName"],
+                "id":      c["chunk_id"],
+                "docName": c["doc_name"],
                 "text":    c["text"],
                 "score":   c["score"],
             }
-            for c in top_chunks
+            for c in top
         ],
-        "confidence": top_chunks[0]["score"] if top_chunks else 0,
+        "confidence": top[0]["score"] if top else 0.0,
     }
 
 
-# ── Static file serving (production build) ───────────────────────────────────
+# ── Static file serving ───────────────────────────────────────────────────────
 
 dist_path = Path(__file__).parent / "dist"
 if dist_path.exists():
@@ -251,8 +472,5 @@ if dist_path.exists():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    print(f"RAGnarok backend running on http://localhost:{port}")
-    print(f"  Ollama URL   : {OLLAMA_BASE_URL}")
-    print(f"  LLM model    : {LLM_MODEL}")
-    print(f"  Embed model  : {EMBEDDING_MODEL}")
+    print(f"RAGnarok backend · http://localhost:{port}")
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=True)

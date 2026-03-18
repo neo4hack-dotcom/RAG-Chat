@@ -212,10 +212,20 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
           body: JSON.stringify({
             message: text,
             history: activeMessages.filter(m => m.role !== 'system'),
-            elasticsearchUrl:      config.elasticsearchUrl,
-            elasticsearchIndex:    config.elasticsearchIndex,
-            elasticsearchUsername: config.elasticsearchUsername,
-            elasticsearchPassword: config.elasticsearchPassword,
+            opensearch: {
+              url:      config.elasticsearchUrl,
+              index:    config.elasticsearchIndex,
+              username: config.elasticsearchUsername || undefined,
+              password: config.elasticsearchPassword || undefined,
+            },
+            embedding_base_url: config.embeddingBaseUrl,
+            embedding_api_key:  config.embeddingApiKey  || undefined,
+            embedding_model:    config.embeddingModel,
+            knn_neighbors:      config.knnNeighbors,
+            llm_base_url:       config.baseUrl,
+            llm_model:          config.model,
+            llm_api_key:        config.apiKey || undefined,
+            llm_provider:       config.provider,
           })
         });
 
