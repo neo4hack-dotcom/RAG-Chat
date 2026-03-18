@@ -463,10 +463,10 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
             <button
               onClick={clearCurrentChat}
               className="glass-button p-2 rounded-xl text-red-600 hover:text-red-700 hover:bg-red-50 flex items-center gap-1.5"
-              title="Purger la conversation"
+              title="Reset conversation"
             >
               <Trash2 className="w-4 h-4" />
-              <span className="hidden sm:inline text-xs font-medium">Purger</span>
+              <span className="hidden sm:inline text-xs font-medium">Reset</span>
             </button>
           )}
           <button
