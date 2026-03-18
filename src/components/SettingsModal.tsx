@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal } from "lucide-react";
-import { AppConfig } from "../lib/utils";
+import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2 } from "lucide-react";
+import { AppConfig, McpTool } from "../lib/utils";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -29,7 +29,8 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     embeddingModel: config.embeddingModel || 'nomic-embed-text',
     chunkSize: config.chunkSize || 512,
     chunkOverlap: config.chunkOverlap || 50,
-    knnNeighbors: config.knnNeighbors || 50
+    knnNeighbors: config.knnNeighbors || 50,
+    mcpTools: config.mcpTools ?? [],
   });
   
   // State for available models fetched from the provider
@@ -44,8 +45,8 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
   
-  // Tab state (LLM vs RAG settings)
-  const [activeTab, setActiveTab] = useState<'llm' | 'rag'>('llm');
+  // Tab state (LLM, RAG, or MCP settings)
+  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'mcp'>('llm');
 
   // Connection test states for Elasticsearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -229,9 +230,85 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
             >
               RAG & Elasticsearch
             </button>
+            <button
+              onClick={() => setActiveTab('mcp')}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'mcp' ? 'border-teal-500 text-teal-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              MCP Tools
+            </button>
           </div>
 
-          {activeTab === 'llm' ? (
+          {activeTab === 'mcp' ? (
+            <div className="space-y-5">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                  <Network className="w-4 h-4 text-teal-500" /> MCP Tools
+                </h3>
+                <button
+                  onClick={() => {
+                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '' };
+                    setLocalConfig(prev => ({ ...prev, mcpTools: [...(prev.mcpTools ?? []), newTool] }));
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200 rounded-xl hover:bg-teal-100 transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add Tool
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 -mt-3">Ces outils apparaissent dans le dropdown du bouton MCP dans l'interface de chat.</p>
+
+              {(localConfig.mcpTools ?? []).length === 0 && (
+                <div className="text-center py-8 text-sm text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                  Aucun outil MCP. Cliquez sur « Add Tool » pour en ajouter.
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {(localConfig.mcpTools ?? []).map((tool: McpTool, idx: number) => (
+                  <div key={tool.id} className="flex items-start gap-3 p-3 bg-white/50 border border-gray-200 rounded-xl">
+                    <div className="flex-1 grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-xs font-medium text-gray-500 mb-1 block">Label</label>
+                        <input
+                          type="text"
+                          value={tool.label}
+                          onChange={(e) => {
+                            const updated = [...(localConfig.mcpTools ?? [])];
+                            updated[idx] = { ...tool, label: e.target.value };
+                            setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                          }}
+                          className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                          placeholder="Mon outil MCP"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-gray-500 mb-1 block">URL</label>
+                        <input
+                          type="text"
+                          value={tool.url}
+                          onChange={(e) => {
+                            const updated = [...(localConfig.mcpTools ?? [])];
+                            updated[idx] = { ...tool, url: e.target.value };
+                            setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                          }}
+                          className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                          placeholder="http://localhost:3000"
+                        />
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const updated = (localConfig.mcpTools ?? []).filter((_: McpTool, i: number) => i !== idx);
+                        setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                      }}
+                      className="mt-5 p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : activeTab === 'llm' ? (
             <div className="space-y-5">
                 <div>
                   <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">

@@ -52,6 +52,15 @@ export type Conversation = {
 };
 
 /**
+ * Represents a single MCP tool entry configurable by the user.
+ */
+export type McpTool = {
+  id: string;
+  label: string;
+  url: string;
+};
+
+/**
  * Global application configuration settings.
  */
 export type AppConfig = {
@@ -70,6 +79,7 @@ export type AppConfig = {
   chunkSize: number;
   chunkOverlap: number;
   knnNeighbors: number;
+  mcpTools: McpTool[];
 };
 
 /**
@@ -91,6 +101,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   chunkSize: 512,
   chunkOverlap: 50,
   knnNeighbors: 50,
+  mcpTools: [
+    { id: 'mcp_1', label: 'MCP Tool 1', url: '' },
+    { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
+  ],
 };
 
 /**

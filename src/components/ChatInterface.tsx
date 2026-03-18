@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, Users, BarChart, Search, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 
 interface ChatInterfaceProps {
@@ -32,9 +32,10 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
   
-  // Workflow mode: Standard LLM, RAG (Retrieval-Augmented Generation), or Multi-Agent
-  const [workflow, setWorkflow] = useState<'LLM' | 'RAG' | 'AGENT'>('LLM');
+  // Workflow mode: Standard LLM, RAG (Retrieval-Augmented Generation), Multi-Agent, or MCP
+  const [workflow, setWorkflow] = useState<'LLM' | 'RAG' | 'AGENT' | 'MCP'>('LLM');
   const [agentRole, setAgentRole] = useState<'manager' | 'analyst' | 'researcher'>('manager');
+  const [mcpToolId, setMcpToolId] = useState<string>(() => config.mcpTools?.[0]?.id ?? '');
   
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -623,6 +624,31 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
             >
               <Network className="w-3.5 h-3.5" /> Agents
             </button>
+            <button
+              onClick={() => setWorkflow('MCP')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'MCP' ? 'bg-teal-100 text-teal-700 border border-teal-200 shadow-sm' : 'bg-white/50 text-gray-600 border border-gray-200 hover:bg-white/80'}`}
+            >
+              <Cpu className="w-3.5 h-3.5" /> MCP
+            </button>
+          </div>
+
+          {/* Sub-options for MCP */}
+          <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'MCP' ? 'max-h-10 opacity-100' : 'max-h-0 opacity-0'}`}>
+            <div className="flex items-center gap-2 pl-2 border-l-2 border-teal-200 overflow-x-auto pb-1 scrollbar-hide">
+              {(config.mcpTools ?? []).length === 0 ? (
+                <span className="text-xs text-gray-400 italic">Aucun outil MCP configuré — ouvrez les paramètres.</span>
+              ) : (
+                (config.mcpTools ?? []).map((tool: McpTool) => (
+                  <button
+                    key={tool.id}
+                    onClick={() => setMcpToolId(tool.id)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
+                  >
+                    <Network className="w-3.5 h-3.5" /> {tool.label}
+                  </button>
+                ))
+              )}
+            </div>
           </div>
 
           {/* Sub-options for AGENT */}
