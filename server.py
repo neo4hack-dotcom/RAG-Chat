@@ -205,11 +205,19 @@ def is_safe_read_only_sql(sql: str) -> bool:
         return False
     if ";" in cleaned:
         return False
-    if not (cleaned.startswith("select") or cleaned.startswith("with")):
+    if not (
+        cleaned.startswith("select")
+        or cleaned.startswith("with")
+        or cleaned.startswith("show")
+        or cleaned.startswith("describe")
+        or cleaned.startswith("desc")
+        or cleaned.startswith("exists")
+        or cleaned.startswith("explain")
+    ):
         return False
     forbidden = [
         "insert", "update", "delete", "alter", "drop", "truncate", "create",
-        "grant", "revoke", "rename", "optimize", "system", "attach", "detach",
+        "grant", "revoke", "rename", "optimize", "attach", "detach",
     ]
     return not any(re.search(rf"\b{keyword}\b", cleaned) for keyword in forbidden)
 
