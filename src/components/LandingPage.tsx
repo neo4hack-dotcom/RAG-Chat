@@ -326,16 +326,6 @@ export function LandingPage({ onNavigate }: LandingPageProps) {
         </div>
       </section>
 
-      {/* Footer */}
-      <motion.footer
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ delay: 1, duration: 0.5 }}
-        className="relative z-10 text-center pb-10 text-[12px] text-gray-400 tracking-wide"
-      >
-        © 2026 ODIN AI Portal
-      </motion.footer>
-
       {/* Contact modal */}
       <ContactModal isOpen={contactOpen} onClose={() => setContactOpen(false)} />
     </div>

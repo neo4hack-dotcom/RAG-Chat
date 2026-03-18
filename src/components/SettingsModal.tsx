@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2 } from "lucide-react";
+import React, { useState, useRef } from "react";
+import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2, FolderOpen, UploadCloud } from "lucide-react";
 import { AppConfig, McpTool } from "../lib/utils";
 
 interface SettingsModalProps {
@@ -26,6 +26,8 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     elasticsearchIndex: config.elasticsearchIndex || 'rag_documents',
     elasticsearchUsername: config.elasticsearchUsername || '',
     elasticsearchPassword: config.elasticsearchPassword || '',
+    embeddingBaseUrl: config.embeddingBaseUrl || 'http://localhost:11434/v1',
+    embeddingApiKey: config.embeddingApiKey || '',
     embeddingModel: config.embeddingModel || 'nomic-embed-text',
     chunkSize: config.chunkSize || 512,
     chunkOverlap: config.chunkOverlap || 50,
@@ -48,36 +50,133 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
   // Tab state (LLM, RAG, or MCP settings)
   const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'mcp'>('llm');
 
-  // Connection test states for Elasticsearch
+  // Connection test states for OpenSearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [esTestMessage, setEsTestMessage] = useState('');
-  
+
+  // Setup index status
+  const [setupStatus, setSetupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
+  const [setupMessage, setSetupMessage] = useState('');
+
+  // Document ingest state
+  const [ingestDocName, setIngestDocName] = useState('');
+  const [ingestText, setIngestText] = useState('');
+  const [ingestStatus, setIngestStatus] = useState<'idle' | 'indexing' | 'success' | 'error'>('idle');
+  const [ingestMessage, setIngestMessage] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   // Connection test states for Embedding model
   const [embedTestStatus, setEmbedTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [embedTestMessage, setEmbedTestMessage] = useState('');
 
   if (!isOpen) return null;
 
-  // Test connection to the Elasticsearch instance
+  // Test OpenSearch connection via backend
   const testElasticsearchConnection = async () => {
     setEsTestStatus('testing');
     setEsTestMessage('');
     try {
-      const url = localConfig.elasticsearchUrl.replace(/\/$/, '');
-      const headers: Record<string, string> = {};
-      if (localConfig.elasticsearchUsername) {
-        const credentials = btoa(`${localConfig.elasticsearchUsername}:${localConfig.elasticsearchPassword}`);
-        headers['Authorization'] = `Basic ${credentials}`;
+      const response = await fetch('/api/opensearch/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: localConfig.elasticsearchUrl,
+          username: localConfig.elasticsearchUsername || undefined,
+          password: localConfig.elasticsearchPassword || undefined,
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
       }
-      const response = await fetch(`${url}/`, { headers });
-      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
       const data = await response.json();
       setEsTestStatus('success');
-      setEsTestMessage(`Connected to cluster: ${data.cluster_name || 'Elasticsearch'}`);
+      setEsTestMessage(`Connected · cluster: ${data.cluster_name} · v${data.version}`);
     } catch (err) {
-      console.error("ES connection error:", err);
       setEsTestStatus('error');
       setEsTestMessage(err instanceof Error ? err.message : 'Failed to connect');
+    }
+  };
+
+  // Setup kNN index via backend
+  const setupIndex = async () => {
+    setSetupStatus('running');
+    setSetupMessage('');
+    try {
+      const response = await fetch('/api/opensearch/setup-index', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          opensearch: {
+            url: localConfig.elasticsearchUrl,
+            index: localConfig.elasticsearchIndex,
+            username: localConfig.elasticsearchUsername || undefined,
+            password: localConfig.elasticsearchPassword || undefined,
+          },
+          embedding_dimension: 768,
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      setSetupStatus('success');
+      setSetupMessage(data.status === 'exists' ? `Index "${data.index}" already exists.` : `Index "${data.index}" created.`);
+    } catch (err) {
+      setSetupStatus('error');
+      setSetupMessage(err instanceof Error ? err.message : 'Setup failed');
+    }
+  };
+
+  // Load file content into the ingest textarea
+  const handleFileLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!ingestDocName) setIngestDocName(file.name.replace(/\.[^.]+$/, ''));
+    const reader = new FileReader();
+    reader.onload = (ev) => setIngestText(ev.target?.result as string ?? '');
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // Ingest document into OpenSearch via backend
+  const ingestDocument = async () => {
+    if (!ingestText.trim() || !ingestDocName.trim()) return;
+    setIngestStatus('indexing');
+    setIngestMessage('');
+    try {
+      const response = await fetch('/api/documents/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: ingestText,
+          doc_name: ingestDocName,
+          opensearch: {
+            url: localConfig.elasticsearchUrl,
+            index: localConfig.elasticsearchIndex,
+            username: localConfig.elasticsearchUsername || undefined,
+            password: localConfig.elasticsearchPassword || undefined,
+          },
+          embedding_base_url: localConfig.embeddingBaseUrl,
+          embedding_api_key: localConfig.embeddingApiKey || undefined,
+          embedding_model: localConfig.embeddingModel,
+          chunk_size: localConfig.chunkSize,
+          chunk_overlap: localConfig.chunkOverlap,
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      setIngestStatus('success');
+      setIngestMessage(`Indexed ${data.chunks_indexed} chunks (doc id: ${data.doc_id.slice(0, 8)}…)`);
+      setIngestText('');
+      setIngestDocName('');
+    } catch (err) {
+      setIngestStatus('error');
+      setIngestMessage(err instanceof Error ? err.message : 'Ingest failed');
     }
   };
 
@@ -228,7 +327,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
               onClick={() => setActiveTab('rag')}
               className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'rag' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
             >
-              RAG & Elasticsearch
+              RAG & OpenSearch
             </button>
             <button
               onClick={() => setActiveTab('mcp')}
@@ -424,9 +523,10 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
             </div>
           ) : (
             <div className="space-y-5">
+              {/* OpenSearch URL */}
               <div>
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                  <Database className="w-4 h-4" /> Elasticsearch URL
+                  <Database className="w-4 h-4" /> OpenSearch URL
                 </label>
                 <div className="flex gap-2">
                   <input
@@ -436,7 +536,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                     className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                     placeholder="http://localhost:9200"
                   />
-                  <button 
+                  <button
                     onClick={testElasticsearchConnection}
                     disabled={esTestStatus === 'testing'}
                     className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
@@ -444,21 +544,34 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                     {esTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Connection'}
                   </button>
                 </div>
-                {esTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/> {esTestMessage}</p>}
-                {esTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3"/> {esTestMessage}</p>}
+                {esTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {esTestMessage}</p>}
+                {esTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3" /> {esTestMessage}</p>}
               </div>
 
+              {/* OpenSearch Index */}
               <div>
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                  <Layers className="w-4 h-4" /> Elasticsearch Index
+                  <Layers className="w-4 h-4" /> OpenSearch Index
                 </label>
-                <input
-                  type="text"
-                  value={localConfig.elasticsearchIndex}
-                  onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchIndex: e.target.value })}
-                  className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
-                  placeholder="rag_documents"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={localConfig.elasticsearchIndex}
+                    onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchIndex: e.target.value })}
+                    className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    placeholder="rag_documents"
+                  />
+                  <button
+                    onClick={setupIndex}
+                    disabled={setupStatus === 'running'}
+                    className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
+                    title="Create kNN index in OpenSearch"
+                  >
+                    {setupStatus === 'running' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Setup Index'}
+                  </button>
+                </div>
+                {setupStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {setupMessage}</p>}
+                {setupStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3" /> {setupMessage}</p>}
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -601,6 +714,62 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                     className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                   />
                 </div>
+              </div>
+
+              {/* ── Document Ingest ── */}
+              <div className="pt-4 border-t border-gray-100 dark:border-gray-800 space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                  <UploadCloud className="w-4 h-4 text-blue-500" /> Index a Document
+                </h3>
+                <p className="text-xs text-gray-500 dark:text-gray-400 -mt-2">
+                  Chunk, embed and push a document into OpenSearch.
+                </p>
+
+                {/* Doc name + file picker */}
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={ingestDocName}
+                    onChange={(e) => setIngestDocName(e.target.value)}
+                    placeholder="Document name"
+                    className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-2.5 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-3 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl transition-colors flex items-center gap-1.5 text-sm font-medium whitespace-nowrap"
+                  >
+                    <FolderOpen className="w-4 h-4" /> Load file
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".txt,.md,.csv,.json"
+                    className="hidden"
+                    onChange={handleFileLoad}
+                  />
+                </div>
+
+                {/* Text area */}
+                <textarea
+                  value={ingestText}
+                  onChange={(e) => setIngestText(e.target.value)}
+                  rows={4}
+                  placeholder="Paste document text here, or load a .txt / .md / .csv file above…"
+                  className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all resize-none"
+                />
+
+                <button
+                  onClick={ingestDocument}
+                  disabled={ingestStatus === 'indexing' || !ingestText.trim() || !ingestDocName.trim()}
+                  className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+                >
+                  {ingestStatus === 'indexing'
+                    ? <><Loader2 className="w-4 h-4 animate-spin" /> Indexing…</>
+                    : <><UploadCloud className="w-4 h-4" /> Index Document</>
+                  }
+                </button>
+                {ingestStatus === 'success' && <p className="text-emerald-600 text-xs flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {ingestMessage}</p>}
+                {ingestStatus === 'error'   && <p className="text-red-600   text-xs flex items-center gap-1"><XCircle      className="w-3 h-3" /> {ingestMessage}</p>}
               </div>
             </div>
           )}
