@@ -44,7 +44,7 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
           "flex-shrink-0 w-10 h-10 rounded-2xl flex items-center justify-center shadow-sm",
           isUser
             ? "bg-gradient-to-tr from-blue-500 to-blue-600 text-white"
-            : "bg-white border border-gray-200 text-gray-700"
+            : "bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300"
         )}
       >
         {isUser ? <User className="w-5 h-5" /> : <Bot className="w-5 h-5" />}
@@ -60,12 +60,12 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
       >
         {/* Agent Thinking Steps (Collapsible) */}
         {showSteps && !isUser && message.steps && message.steps.length > 0 && (
-          <div className="mb-4 bg-white/60 border border-gray-200/60 rounded-xl overflow-hidden shadow-sm">
-            <button 
+          <div className="mb-4 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 rounded-xl overflow-hidden shadow-sm">
+            <button
               onClick={() => setIsStepsExpanded(!isStepsExpanded)}
-              className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/40 transition-colors"
+              className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/40 dark:hover:bg-white/5 transition-colors"
             >
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
+              <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200">
                 <BrainCircuit className="w-4 h-4 text-purple-500" />
                 Agent Thinking Process ({message.steps.filter(s => s.status === 'success').length}/{message.steps.length})
               </div>
@@ -79,11 +79,11 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
                     <div key={step.id || idx} className="flex items-start gap-3">
                       <div className="mt-0.5">{renderStepIcon(step.status)}</div>
                       <div className="flex-1">
-                        <p className={cn("text-[13px] font-medium", step.status === 'error' ? "text-red-700" : "text-gray-800")}>
+                        <p className={cn("text-[13px] font-medium", step.status === 'error' ? "text-red-700 dark:text-red-400" : "text-gray-800 dark:text-gray-200")}>
                           {step.title}
                         </p>
                         {step.details && (
-                          <p className="text-[12px] text-gray-500 mt-1 leading-relaxed">
+                          <p className="text-[12px] text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">
                             {step.details}
                           </p>
                         )}
@@ -190,7 +190,7 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
             
             {/* RAG Confidence Warning: Show if the retrieval score is too low */}
             {message.confidence !== undefined && message.confidence < 0.4 && (
-              <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-amber-800 text-xs">
+              <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg flex items-start gap-2 text-amber-800 dark:text-amber-200 text-xs">
                 <XCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
                 <p><strong>Attention :</strong> Les documents trouvés semblent peu pertinents par rapport à votre question (score: {Math.round(message.confidence * 100)}%). La réponse peut être imprécise.</p>
               </div>
@@ -198,10 +198,10 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
 
             {/* RAG Sources Inspector (Collapsible) */}
             {message.sources && message.sources.length > 0 && (
-              <div className="mt-4 border-t border-gray-200/60 pt-3">
-                <button 
+              <div className="mt-4 border-t border-gray-200/60 dark:border-gray-700/60 pt-3">
+                <button
                   onClick={() => setIsSourcesExpanded(!isSourcesExpanded)}
-                  className="flex items-center gap-2 text-xs font-medium text-gray-500 hover:text-gray-800 transition-colors"
+                  className="flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
                 >
                   <Database className="w-3.5 h-3.5" />
                   Inspecteur RAG ({message.sources.length} sources)
@@ -211,17 +211,17 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
                 {isSourcesExpanded && (
                   <div className="mt-3 space-y-2">
                     {message.sources.map((source, idx) => (
-                      <div key={source.id} className="bg-white/60 border border-gray-200 rounded-lg p-3 text-xs">
+                      <div key={source.id} className="bg-white/60 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-lg p-3 text-xs">
                         <div className="flex items-center justify-between mb-1.5">
-                          <span className="font-semibold text-gray-700 flex items-center gap-1.5">
-                            <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[10px]">[{idx + 1}]</span>
+                          <span className="font-semibold text-gray-700 dark:text-gray-200 flex items-center gap-1.5">
+                            <span className="bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded text-[10px]">[{idx + 1}]</span>
                             {source.docName}
                           </span>
-                          <span className={cn("font-mono text-[10px] px-1.5 py-0.5 rounded", source.score > 0.6 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+                          <span className={cn("font-mono text-[10px] px-1.5 py-0.5 rounded", source.score > 0.6 ? "bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300" : "bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300")}>
                             Score: {Math.round(source.score * 100)}%
                           </span>
                         </div>
-                        <p className="text-gray-600 line-clamp-3 hover:line-clamp-none transition-all duration-300 leading-relaxed">
+                        <p className="text-gray-600 dark:text-gray-400 line-clamp-3 hover:line-clamp-none transition-all duration-300 leading-relaxed">
                           {source.text}
                         </p>
                       </div>

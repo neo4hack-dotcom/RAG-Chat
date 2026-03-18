@@ -3,6 +3,7 @@ import { ChatInterface } from './components/ChatInterface';
 import { SettingsModal } from './components/SettingsModal';
 import { AppConfig, DEFAULT_CONFIG } from './lib/utils';
 
+
 /**
  * Main Application Component
  * Manages the global state for application configuration and settings modal visibility.
@@ -10,6 +11,20 @@ import { AppConfig, DEFAULT_CONFIG } from './lib/utils';
 export default function App() {
   // State to control the visibility of the settings modal
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  // Dark mode state — persisted in localStorage, applied as class on <html>
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    return localStorage.getItem('ragnarok-dark') === 'true';
+  });
+
+  useEffect(() => {
+    if (isDark) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('ragnarok-dark', String(isDark));
+  }, [isDark]);
   
   // Load configuration from localStorage on initial render, or fallback to DEFAULT_CONFIG
   const [config, setConfig] = useState<AppConfig>(() => {
@@ -35,6 +50,8 @@ export default function App() {
       <ChatInterface
         config={config}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        isDark={isDark}
+        onToggleDark={() => setIsDark(d => !d)}
       />
       
       {/* Settings Modal overlay */}

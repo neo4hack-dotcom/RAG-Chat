@@ -4,6 +4,8 @@
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer utilities {
   .glass-panel {
     @apply bg-white/60 dark:bg-black/60 backdrop-blur-2xl border border-white/40 dark:border-white/10 shadow-[0_8px_32px_0_rgba(0,0,0,0.08)];
@@ -50,6 +52,12 @@ body {
   background-color: #f5f5f7;
   color: #1d1d1f;
   overflow: hidden;
+  transition: background-color 0.3s, color 0.3s;
+}
+
+.dark body {
+  background-color: #0f0f13;
+  color: #e8e8ed;
 }
 
 /* Animated Mesh Gradient Background */
@@ -60,13 +68,21 @@ body {
   width: 200%;
   height: 200%;
   background-color: #f5f5f7;
-  background-image: 
+  background-image:
     radial-gradient(circle at 50% 50%, rgba(167, 192, 255, 0.4) 0%, transparent 40%),
     radial-gradient(circle at 80% 20%, rgba(255, 182, 255, 0.4) 0%, transparent 40%),
     radial-gradient(circle at 20% 80%, rgba(167, 255, 235, 0.4) 0%, transparent 40%);
   filter: blur(60px);
   z-index: -1;
   animation: rotate 30s linear infinite;
+}
+
+.dark .mesh-bg {
+  background-color: #0f0f13;
+  background-image:
+    radial-gradient(circle at 50% 50%, rgba(56, 70, 140, 0.4) 0%, transparent 40%),
+    radial-gradient(circle at 80% 20%, rgba(100, 40, 120, 0.4) 0%, transparent 40%),
+    radial-gradient(circle at 20% 80%, rgba(20, 90, 90, 0.4) 0%, transparent 40%);
 }
 
 @keyframes rotate {

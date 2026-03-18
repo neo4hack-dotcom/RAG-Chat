@@ -1,14 +1,16 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, Users, BarChart, Search, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment } from "../lib/utils";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, Users, BarChart, Search, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun } from "lucide-react";
+import { Message, AppConfig, Conversation, Attachment, McpTool } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 
 interface ChatInterfaceProps {
   config: AppConfig;
   onOpenSettings: () => void;
+  isDark: boolean;
+  onToggleDark: () => void;
 }
 
-export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
+export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark }: ChatInterfaceProps) {
   // --- STATE MANAGEMENT ---
   
   // Load conversation history from local storage
@@ -32,9 +34,10 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
   
-  // Workflow mode: Standard LLM, RAG (Retrieval-Augmented Generation), or Multi-Agent
-  const [workflow, setWorkflow] = useState<'LLM' | 'RAG' | 'AGENT'>('LLM');
+  // Workflow mode: Standard LLM, RAG (Retrieval-Augmented Generation), Multi-Agent, or MCP
+  const [workflow, setWorkflow] = useState<'LLM' | 'RAG' | 'AGENT' | 'MCP'>('LLM');
   const [agentRole, setAgentRole] = useState<'manager' | 'analyst' | 'researcher'>('manager');
+  const [mcpToolId, setMcpToolId] = useState<string>(() => config.mcpTools?.[0]?.id ?? '');
   
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -375,12 +378,12 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
   };
 
   return (
-    <div className="flex h-screen relative overflow-hidden bg-[#f5f5f5]">
+    <div className="flex h-screen relative overflow-hidden bg-[#f5f5f5] dark:bg-[#0f0f13] transition-colors duration-300">
       <div className="mesh-bg" />
 
       {/* Sidebar */}
-      <aside className={`bg-white/60 border-r border-gray-200/50 backdrop-blur-xl flex flex-col z-20 flex-shrink-0 transition-all duration-300 ease-in-out hidden md:flex ${isSidebarOpen ? 'w-64 md:w-72 opacity-100' : 'w-0 opacity-0 overflow-hidden border-none'}`}>
-        <div className="p-4 border-b border-gray-200/50 w-64 md:w-72">
+      <aside className={`bg-white/60 dark:bg-black/60 border-r border-gray-200/50 dark:border-gray-800/50 backdrop-blur-xl flex flex-col z-20 flex-shrink-0 transition-all duration-300 ease-in-out hidden md:flex ${isSidebarOpen ? 'w-64 md:w-72 opacity-100' : 'w-0 opacity-0 overflow-hidden border-none'}`}>
+        <div className="p-4 border-b border-gray-200/50 dark:border-gray-800/50 w-64 md:w-72">
           <button
             onClick={createNewChat}
             className="w-full flex items-center justify-center gap-2 bg-black text-white px-4 py-3 rounded-xl hover:bg-gray-800 transition-all shadow-lg shadow-black/5 font-medium"
@@ -395,14 +398,14 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
               onClick={() => setCurrentId(conv.id)}
               className={`group relative w-full text-left p-3 rounded-xl text-sm transition-all cursor-pointer border ${
                 currentId === conv.id
-                  ? "bg-white border-gray-200 shadow-sm"
-                  : "border-transparent hover:bg-white/50 hover:border-gray-200/50"
+                  ? "bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 shadow-sm"
+                  : "border-transparent hover:bg-white/50 dark:hover:bg-white/5 hover:border-gray-200/50 dark:hover:border-gray-700/50"
               }`}
             >
               <div className="flex items-start gap-3">
                 <MessageSquare className={`w-4 h-4 mt-0.5 flex-shrink-0 ${currentId === conv.id ? 'text-blue-500' : 'text-gray-400'}`} />
                 <div className="flex-1 overflow-hidden">
-                  <div className="truncate font-medium text-gray-900">{conv.title}</div>
+                  <div className="truncate font-medium text-gray-900 dark:text-gray-100">{conv.title}</div>
                   <div className="text-xs text-gray-400 mt-1">
                     {new Date(conv.updatedAt).toLocaleDateString()}
                   </div>
@@ -432,8 +435,8 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
         {/* Left: Sidebar Toggle */}
         <div className="flex items-center w-1/3">
           <button 
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
-            className="p-2 -ml-2 rounded-xl hover:bg-black/5 text-gray-600 transition-colors hidden md:block"
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            className="p-2 -ml-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-gray-600 dark:text-gray-300 transition-colors hidden md:block"
             title={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
           >
             {isSidebarOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
@@ -442,16 +445,16 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
 
         {/* Center: Title & Icons */}
         <div className="flex flex-col items-center justify-center w-1/3">
-          <div className="flex items-center gap-4">
-            <div className="w-6 h-6 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
-              <Hammer className="w-3 h-3 text-white" />
+          <div className="flex items-center gap-5">
+            <div className="w-9 h-9 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-xl flex items-center justify-center shadow-md shadow-slate-900/20">
+              <Hammer className="w-5 h-5 text-white" />
             </div>
-            <h1 className="text-xl font-bold text-gray-900 tracking-tight">RAGnarok</h1>
-            <div className="w-6 h-6 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
-              <Hammer className="w-3 h-3 text-white" />
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-white tracking-tight">RAGnarok</h1>
+            <div className="w-9 h-9 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-xl flex items-center justify-center shadow-md shadow-slate-900/20">
+              <Hammer className="w-5 h-5 text-white" />
             </div>
           </div>
-          <div className="flex items-center gap-2 text-[10px] font-medium text-gray-500 mt-0.5">
+          <div className="flex items-center gap-2 text-[10px] font-medium text-gray-500 dark:text-gray-400 mt-0.5">
             <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]'}`} />
             {isConnected ? 'Active' : 'Offline'}
           </div>
@@ -462,7 +465,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           {currentId && (
             <button
               onClick={clearCurrentChat}
-              className="glass-button p-2 rounded-xl text-red-600 hover:text-red-700 hover:bg-red-50 flex items-center gap-1.5"
+              className="glass-button p-2 rounded-xl text-red-600 dark:text-red-400 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30 flex items-center gap-1.5"
               title="Reset conversation"
             >
               <Trash2 className="w-4 h-4" />
@@ -470,8 +473,15 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
             </button>
           )}
           <button
+            onClick={onToggleDark}
+            className="glass-button p-2 rounded-xl text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+            title={isDark ? "Light mode" : "Dark mode"}
+          >
+            {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+          <button
             onClick={onOpenSettings}
-            className="glass-button p-2 rounded-xl text-gray-600 hover:text-gray-900"
+            className="glass-button p-2 rounded-xl text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
             title="Configuration"
           >
             <Settings className="w-4 h-4" />
@@ -481,7 +491,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
 
       {/* Chat Area */}
       <main className="flex-1 overflow-y-auto p-4 md:p-8 z-10 scroll-smooth">
-        <div className="max-w-4xl mx-auto pb-20">
+        <div className="max-w-[67rem] mx-auto pb-20">
           {messages.map((msg) => (
             <ChatMessage
               key={msg.id}
@@ -492,24 +502,24 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           ))}
           
           {isLoading && (
-            <div className="flex gap-4 w-full max-w-4xl mx-auto mb-8 animate-fade-in-up">
-              <div className="flex-shrink-0 w-10 h-10 rounded-2xl bg-white border border-gray-200 flex items-center justify-center shadow-sm">
-                <Bot className="w-5 h-5 text-gray-400" />
+            <div className="flex gap-4 w-full max-w-[67rem] mx-auto mb-8 animate-fade-in-up">
+              <div className="flex-shrink-0 w-10 h-10 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center shadow-sm">
+                <Bot className="w-5 h-5 text-gray-400 dark:text-gray-500" />
               </div>
               <div className="glass-panel px-6 py-4 rounded-[2rem] rounded-tl-sm flex items-center gap-2">
                 <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
-                <span className="text-sm text-gray-500 font-medium">Thinking...</span>
+                <span className="text-sm text-gray-500 dark:text-gray-400 font-medium">Thinking...</span>
               </div>
             </div>
           )}
 
           {workflow === 'AGENT' && agentRole === 'manager' && (
-            <div className="max-w-4xl mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200/50 shadow-sm animate-fade-in-up">
+            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-900/20 dark:to-orange-900/20 border border-amber-200/50 dark:border-amber-700/40 shadow-sm animate-fade-in-up">
               <div className="flex items-center gap-2 mb-1.5">
                 <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
-                <h3 className="font-semibold text-amber-900 text-[13px]">Agent Manager Brief</h3>
+                <h3 className="font-semibold text-amber-900 dark:text-amber-200 text-[13px]">Agent Manager Brief</h3>
               </div>
-              <div className="text-[11px] text-amber-800/90 leading-relaxed space-y-1">
+              <div className="text-[11px] text-amber-800/90 dark:text-amber-300/90 leading-relaxed space-y-1">
                 <p>Welcome to the <strong>Agent Manager</strong> mode. Here is what you can do:</p>
                 <ul className="list-disc pl-4 space-y-0.5">
                   <li>Orchestrate multiple sub-agents to solve complex tasks.</li>
@@ -522,12 +532,12 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           )}
 
           {workflow === 'RAG' && (
-            <div className="max-w-4xl mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200/50 shadow-sm animate-fade-in-up">
+            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200/50 dark:border-blue-700/40 shadow-sm animate-fade-in-up">
               <div className="flex items-center gap-2 mb-1.5">
                 <Database className="w-4 h-4 text-blue-500" />
-                <h3 className="font-semibold text-blue-900 text-[13px]">Retrieval-Augmented Generation (RAG)</h3>
+                <h3 className="font-semibold text-blue-900 dark:text-blue-200 text-[13px]">Retrieval-Augmented Generation (RAG)</h3>
               </div>
-              <div className="text-[11px] text-blue-800/90 leading-relaxed space-y-1">
+              <div className="text-[11px] text-blue-800/90 dark:text-blue-300/90 leading-relaxed space-y-1">
                 <p>Welcome to <strong>RAG</strong> mode. This workflow helps you find and synthesize information from your documents:</p>
                 <ul className="list-disc pl-4 space-y-0.5">
                   <li><strong>Retrieve:</strong> Your query is converted into a vector using the local embedding model and searched against the Elasticsearch database.</li>
@@ -544,18 +554,18 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
       </main>
 
       {/* Input Area */}
-      <div className="p-4 md:p-8 pt-0 z-10 w-full max-w-4xl mx-auto">
+      <div className="p-4 md:p-8 pt-0 z-10 w-full max-w-[67rem] mx-auto">
         <div className="glass-panel rounded-[2rem] p-2 flex flex-col gap-2 shadow-2xl shadow-black/5">
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 px-4 pt-3 pb-1">
               {attachments.map(att => (
-                <div key={att.id} className="relative group flex items-center gap-2 bg-white/60 border border-gray-200/60 px-3 py-1.5 rounded-xl text-sm shadow-sm">
+                <div key={att.id} className="relative group flex items-center gap-2 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 px-3 py-1.5 rounded-xl text-sm shadow-sm">
                   {att.type.startsWith('image/') ? (
                     <img src={att.data} alt={att.name} className="w-6 h-6 object-cover rounded-md" />
                   ) : (
-                    <File className="w-4 h-4 text-blue-500" />
+                    <File className="w-4 h-4 text-blue-500 dark:text-blue-400" />
                   )}
-                  <span className="truncate max-w-[120px] font-medium text-gray-700">{att.name}</span>
+                  <span className="truncate max-w-[120px] font-medium text-gray-700 dark:text-gray-200">{att.name}</span>
                   <button
                     onClick={() => removeAttachment(att.id)}
                     className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
@@ -578,7 +588,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
             />
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="flex-shrink-0 w-12 h-12 rounded-2xl text-gray-400 hover:text-blue-500 hover:bg-blue-50 flex items-center justify-center transition-colors mb-1 ml-1"
+              className="flex-shrink-0 w-12 h-12 rounded-2xl text-gray-400 dark:text-gray-500 hover:text-blue-500 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 flex items-center justify-center transition-colors mb-1 ml-1"
               title="Attach file"
             >
               <Paperclip className="w-5 h-5" />
@@ -589,7 +599,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               placeholder="Message your AI agent..."
-              className="w-full min-h-[56px] bg-transparent border-none resize-none focus:ring-0 px-2 py-4 text-[14px] leading-relaxed text-gray-900 placeholder-gray-400 outline-none overflow-y-auto"
+              className="w-full min-h-[56px] bg-transparent border-none resize-none focus:ring-0 px-2 py-4 text-[14px] leading-relaxed text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 outline-none overflow-y-auto"
               rows={1}
             />
             <button
@@ -607,22 +617,47 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
             <button
               onClick={() => setWorkflow('LLM')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'LLM' ? 'bg-blue-100 text-blue-700 border border-blue-200 shadow-sm' : 'bg-white/50 text-gray-600 border border-gray-200 hover:bg-white/80'}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'LLM' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Cpu className="w-3.5 h-3.5" /> Pure LLM
             </button>
             <button
               onClick={() => setWorkflow('RAG')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'RAG' ? 'bg-emerald-100 text-emerald-700 border border-emerald-200 shadow-sm' : 'bg-white/50 text-gray-600 border border-gray-200 hover:bg-white/80'}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'RAG' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Database className="w-3.5 h-3.5" /> RAG Knowledge
             </button>
             <button
               onClick={() => setWorkflow('AGENT')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'AGENT' ? 'bg-purple-100 text-purple-700 border border-purple-200 shadow-sm' : 'bg-white/50 text-gray-600 border border-gray-200 hover:bg-white/80'}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'AGENT' ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Network className="w-3.5 h-3.5" /> Agents
             </button>
+            <button
+              onClick={() => setWorkflow('MCP')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'MCP' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-200 border border-teal-200 dark:border-teal-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
+            >
+              <Cpu className="w-3.5 h-3.5" /> MCP
+            </button>
+          </div>
+
+          {/* Sub-options for MCP */}
+          <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'MCP' ? 'max-h-10 opacity-100' : 'max-h-0 opacity-0'}`}>
+            <div className="flex items-center gap-2 pl-2 border-l-2 border-teal-200 overflow-x-auto pb-1 scrollbar-hide">
+              {(config.mcpTools ?? []).length === 0 ? (
+                <span className="text-xs text-gray-400 italic">Aucun outil MCP configuré — ouvrez les paramètres.</span>
+              ) : (
+                (config.mcpTools ?? []).map((tool: McpTool) => (
+                  <button
+                    key={tool.id}
+                    onClick={() => setMcpToolId(tool.id)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
+                  >
+                    <Network className="w-3.5 h-3.5" /> {tool.label}
+                  </button>
+                ))
+              )}
+            </div>
           </div>
 
           {/* Sub-options for AGENT */}
@@ -630,19 +665,19 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
             <div className="flex items-center gap-2 pl-2 border-l-2 border-purple-200 overflow-x-auto pb-1 scrollbar-hide">
               <button
                 onClick={() => setAgentRole('manager')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
               >
                 <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
               </button>
               <button
                 onClick={() => setAgentRole('analyst')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'analyst' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'analyst' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
               >
                 <BarChart className="w-3.5 h-3.5" /> Data Analyst
               </button>
               <button
                 onClick={() => setAgentRole('researcher')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'researcher' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'researcher' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
               >
                 <Search className="w-3.5 h-3.5" /> Researcher
               </button>
@@ -650,7 +685,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           </div>
         </div>
 
-        <div className="text-center mt-3 text-xs text-gray-400 font-medium">
+        <div className="text-center mt-3 text-xs text-gray-400 dark:text-gray-600 font-medium">
           AI can make mistakes. Consider verifying important information.
         </div>
       </div>
