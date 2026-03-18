@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, Users, BarChart, Search, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun } from "lucide-react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, Users, BarChart, Search, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home } from "lucide-react";
 import { Message, AppConfig, Conversation, Attachment, McpTool } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 
@@ -8,9 +8,10 @@ interface ChatInterfaceProps {
   onOpenSettings: () => void;
   isDark: boolean;
   onToggleDark: () => void;
+  onGoHome?: () => void;
 }
 
-export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark }: ChatInterfaceProps) {
+export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, onGoHome }: ChatInterfaceProps) {
   // --- STATE MANAGEMENT ---
   
   // Load conversation history from local storage
@@ -486,6 +487,15 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark }: 
           >
             <Settings className="w-4 h-4" />
           </button>
+          {onGoHome && (
+            <button
+              onClick={onGoHome}
+              className="glass-button p-2 rounded-xl text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+              title="Accueil"
+            >
+              <Home className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </header>
 
