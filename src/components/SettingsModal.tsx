@@ -35,6 +35,7 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     knnNeighbors: config.knnNeighbors || 50,
     mcpTools: config.mcpTools ?? [],
     documentationUrl: config.documentationUrl ?? '',
+    settingsAccessPassword: config.settingsAccessPassword || 'MM@2026',
     clickhouseHost: config.clickhouseHost || 'localhost',
     clickhousePort: config.clickhousePort || 8123,
     clickhouseDatabase: config.clickhouseDatabase || 'default',
@@ -44,6 +45,11 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     clickhouseVerifySsl: config.clickhouseVerifySsl ?? true,
     clickhouseHttpPath: config.clickhouseHttpPath ?? '',
     clickhouseQueryLimit: config.clickhouseQueryLimit || 200,
+    fileManagerConfig: {
+      basePath: config.fileManagerConfig?.basePath ?? '',
+      maxIterations: Math.min(15, Math.max(1, config.fileManagerConfig?.maxIterations ?? 10)),
+      systemPrompt: config.fileManagerConfig?.systemPrompt ?? 'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, and ask for confirmation before destructive or overwrite actions.',
+    },
   };
 }
 
@@ -581,6 +587,26 @@ export function SettingsModal({
                     <XCircle className="w-3 h-3" /> Sync backend: {syncError}
                   </p>
                 )}
+              </div>
+
+              <div className="p-4 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Key className="w-4 h-4 text-amber-600 dark:text-amber-300" />
+                  <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Protection de l&apos;accès configuration</h3>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                  Le bouton discret de la landing page demande ce mot de passe avant d&apos;ouvrir les paramètres. Valeur par défaut: <span className="font-mono">MM@2026</span>.
+                </p>
+                <div>
+                  <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Mot de passe d&apos;accès</label>
+                  <input
+                    type="password"
+                    value={localConfig.settingsAccessPassword}
+                    onChange={(e) => setLocalConfig(prev => ({ ...prev, settingsAccessPassword: e.target.value }))}
+                    className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500/40 transition-all"
+                    placeholder="MM@2026"
+                  />
+                </div>
               </div>
             </div>
           ) : activeTab === 'mcp' ? (

@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { motion, useMotionValue, useSpring } from 'motion/react';
-import { ArrowRight, Brain, BarChart3, Cpu } from 'lucide-react';
+import { ArrowRight, Brain, BarChart3, Cpu, Lock, Settings, XCircle } from 'lucide-react';
 import { ContactModal } from './ContactModal';
 
 type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
@@ -8,6 +8,8 @@ type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 interface LandingPageProps {
   onNavigate: (page: Page) => void;
   documentationUrl?: string;
+  settingsAccessPassword?: string;
+  onOpenSettings: () => void;
 }
 
 const CARDS = [
@@ -48,7 +50,7 @@ const CARDS = [
     name: 'Agents & Tools',
     tagline: 'Multi-Agent Orchestration',
     description:
-      'Deploy networks of intelligent agents that plan, collaborate, and execute complex tasks autonomously.',
+      'A workflow is a fixed, "If This, Then That" sequence designed for predictable, repetitive tasks like data entry or status updates. In contrast, an AI agent uses reasoning to independently choose tools and adapt its steps to reach a goal.',
     Icon: Cpu,
     gradient: 'linear-gradient(135deg, #ede9fe 0%, #ddd6fe 60%, #fae8ff 100%)',
     hoverGradient: 'linear-gradient(135deg, #ddd6fe 0%, #c4b5fd 60%, #f5d0fe 100%)',
@@ -261,8 +263,23 @@ function HeroHeadline() {
 }
 
 /* ---------- Main component ---------- */
-export function LandingPage({ onNavigate, documentationUrl }: LandingPageProps) {
+export function LandingPage({ onNavigate, documentationUrl, settingsAccessPassword, onOpenSettings }: LandingPageProps) {
   const [contactOpen, setContactOpen] = useState(false);
+  const [isAccessPromptOpen, setIsAccessPromptOpen] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [accessError, setAccessError] = useState('');
+  const effectivePassword = settingsAccessPassword || 'MM@2026';
+
+  const submitSettingsAccess = () => {
+    if (passwordInput === effectivePassword) {
+      setPasswordInput('');
+      setAccessError('');
+      setIsAccessPromptOpen(false);
+      onOpenSettings();
+      return;
+    }
+    setAccessError('Incorrect password.');
+  };
 
   return (
     <div className="min-h-screen w-full bg-white overflow-auto relative">
@@ -276,6 +293,18 @@ export function LandingPage({ onNavigate, documentationUrl }: LandingPageProps) 
         className="relative z-10 flex items-center justify-end px-8 py-5 max-w-7xl mx-auto"
       >
         <div className="flex items-center gap-1">
+          <button
+            onClick={() => {
+              setAccessError('');
+              setPasswordInput('');
+              setIsAccessPromptOpen(true);
+            }}
+            className="w-9 h-9 rounded-full border border-gray-200/80 bg-white/75 backdrop-blur-sm text-gray-400 hover:text-gray-700 hover:border-gray-300 hover:bg-white transition-all duration-200 flex items-center justify-center"
+            title="Protected configuration"
+            aria-label="Protected configuration"
+          >
+            <Settings size={14} />
+          </button>
           {documentationUrl ? (
             <a
               href={documentationUrl}
@@ -330,6 +359,84 @@ export function LandingPage({ onNavigate, documentationUrl }: LandingPageProps) 
 
       {/* Contact modal */}
       <ContactModal isOpen={contactOpen} onClose={() => setContactOpen(false)} />
+
+      {isAccessPromptOpen && (
+        <div className="fixed inset-0 z-50 bg-black/20 backdrop-blur-sm flex items-start justify-end p-6">
+          <motion.div
+            initial={{ opacity: 0, y: -12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+            className="w-full max-w-sm rounded-3xl border border-gray-200 bg-white/95 backdrop-blur-xl shadow-2xl p-5"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-gray-500">
+                  <Lock size={12} />
+                  Protected Access
+                </div>
+                <h3 className="mt-1 text-lg font-semibold text-gray-900">Configuration</h3>
+                <p className="mt-1 text-sm text-gray-500 leading-relaxed">
+                  Enter the password to open the settings panel.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAccessPromptOpen(false);
+                  setPasswordInput('');
+                  setAccessError('');
+                }}
+                className="w-9 h-9 rounded-full border border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-300 transition-colors flex items-center justify-center"
+              >
+                <XCircle size={16} />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => {
+                  setPasswordInput(e.target.value);
+                  if (accessError) setAccessError('');
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    submitSettingsAccess();
+                  }
+                }}
+                autoFocus
+                placeholder="Password"
+                className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none focus:border-slate-400"
+              />
+              {accessError && (
+                <p className="text-xs text-red-600">{accessError}</p>
+              )}
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAccessPromptOpen(false);
+                    setPasswordInput('');
+                    setAccessError('');
+                  }}
+                  className="px-4 py-2 rounded-full text-sm font-medium text-gray-500 hover:text-gray-800 hover:bg-gray-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={submitSettingsAccess}
+                  className="px-4 py-2 rounded-full bg-gray-900 text-white text-sm font-medium hover:bg-black transition-colors"
+                >
+                  Unlock
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

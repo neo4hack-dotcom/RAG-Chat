@@ -26,7 +26,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | Category | Details |
 |----------|---------|
 | **4 chat modes** | Pure LLM, RAG, Multi-Agent, MCP Tools |
-| **4 agent roles** | Agent Manager, Data Analyst, Researcher, ClickHouse Query |
+| **2 agent roles** | Agent Manager, ClickHouse Query |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Guided table/schema discovery, ambiguity clarification, safe read-only SQL generation, English final answer |
 | **MCP tools** | Connect any MCP server via SSE, test connection, real agentic tool-call loop |
@@ -174,13 +174,11 @@ Answers include cited sources `[1]`, `[2]` and a confidence score.
 
 ### Agents
 
-Multi-agent orchestration with four roles:
+Multi-agent orchestration with two roles:
 
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Orchestrates sub-agents, synthesises final answer, shows thinking steps |
-| **Data Analyst** | Focuses on structured analysis and data interpretation |
-| **Researcher** | Deep research with broad context gathering |
 | **ClickHouse Query** | Guides the user through table selection, schema inspection, field/date clarification, then runs safe read-only SQL and answers in English |
 
 #### ClickHouse Query agent quick flow
