@@ -15,9 +15,15 @@ import re
 import uuid
 import os
 import asyncio
-from datetime import datetime, timezone
+import fnmatch
+import hashlib
+import csv
+import shutil
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from opensearchpy import OpenSearch
 from urllib.parse import urlparse
 from mcp import ClientSession
@@ -65,6 +71,7 @@ DEFAULT_APP_CONFIG = {
         {"id": "mcp_2", "label": "MCP Tool 2", "url": ""},
     ],
     "documentationUrl": "",
+    "settingsAccessPassword": "MM@2026",
     "clickhouseHost": "localhost",
     "clickhousePort": 8123,
     "clickhouseDatabase": "default",
@@ -74,6 +81,15 @@ DEFAULT_APP_CONFIG = {
     "clickhouseVerifySsl": True,
     "clickhouseHttpPath": "",
     "clickhouseQueryLimit": 200,
+    "fileManagerConfig": {
+        "basePath": "",
+        "maxIterations": 10,
+        "systemPrompt": (
+            "You are the File Management agent. Reply in English by default. Use "
+            "filesystem tools instead of guessing, keep answers short and factual, "
+            "and ask for confirmation before destructive or overwrite actions."
+        ),
+    },
 }
 
 DEFAULT_PREFERENCES = {
@@ -84,6 +100,208 @@ DEFAULT_PREFERENCES = {
     "selectedMcpToolId": "",
     "page": "landing",
 }
+
+AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "data_quality_tables"}
+PLANNER_AGENT_ROLES = {"manager", "clickhouse_query", "file_management"}
+PLANNER_TRIGGER_KINDS = {
+    "once",
+    "daily",
+    "weekly",
+    "interval",
+    "clickhouse_watch",
+    "file_watch",
+}
+PLANNER_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+PLANNER_WATCH_MODES = {"returns_rows", "count_increases", "result_changes"}
+PLANNER_MAX_RUNS = 60
+PLANNER_MAX_KNOWN_FILES = 2000
+PLANNER_LOOP_INTERVAL_SECONDS = 20
+CHAT_MEMORY_MIN_STEPS = 5
+CHAT_MEMORY_MAX_STEPS = 10
+DATA_QUALITY_MAX_GUIDED_TABLES = 20
+DATA_QUALITY_MAX_SAMPLE_ROWS = 2_000_000
+DATA_QUALITY_DEFAULT_SAMPLE_SIZE = 50_000
+DATA_QUALITY_STRING_SENTINELS = ["n/a", "na", "null", "none", "unknown", "-1", "9999", "99999"]
+
+
+def _default_planning_state() -> dict:
+    return {
+        "plans": [],
+        "runs": [],
+    }
+
+
+def _default_planning_trigger() -> dict:
+    return {
+        "kind": "daily",
+        "timezone": "UTC",
+        "oneTimeAt": "",
+        "timeOfDay": "09:00",
+        "weekdays": ["mon"],
+        "intervalMinutes": 60,
+        "pollMinutes": 5,
+        "watchSql": "",
+        "watchMode": "result_changes",
+        "directory": "",
+        "pattern": "*",
+        "recursive": False,
+    }
+
+
+def _default_planning_runtime() -> dict:
+    return {
+        "lastCheckedAt": None,
+        "lastSeenFingerprint": "",
+        "lastSeenMetric": None,
+        "knownFiles": [],
+    }
+
+
+def _normalize_planning_trigger(trigger: Optional[dict]) -> dict:
+    normalized = _default_planning_trigger()
+    if not isinstance(trigger, dict):
+        return normalized
+
+    kind = trigger.get("kind")
+    normalized["kind"] = kind if kind in PLANNER_TRIGGER_KINDS else normalized["kind"]
+    timezone_name = str(trigger.get("timezone") or normalized["timezone"]).strip() or normalized["timezone"]
+    normalized["timezone"] = timezone_name
+    normalized["oneTimeAt"] = str(trigger.get("oneTimeAt") or "").strip()
+    normalized["timeOfDay"] = str(trigger.get("timeOfDay") or normalized["timeOfDay"]).strip() or normalized["timeOfDay"]
+    weekdays = trigger.get("weekdays")
+    if isinstance(weekdays, list):
+        normalized["weekdays"] = [
+            day for day in weekdays
+            if isinstance(day, str) and day.lower() in PLANNER_WEEKDAYS
+        ] or normalized["weekdays"]
+    interval_minutes = trigger.get("intervalMinutes")
+    if isinstance(interval_minutes, (int, float)):
+        normalized["intervalMinutes"] = max(1, int(interval_minutes))
+    poll_minutes = trigger.get("pollMinutes")
+    if isinstance(poll_minutes, (int, float)):
+        normalized["pollMinutes"] = max(1, int(poll_minutes))
+    normalized["watchSql"] = str(trigger.get("watchSql") or "").strip()
+    watch_mode = trigger.get("watchMode")
+    normalized["watchMode"] = watch_mode if watch_mode in PLANNER_WATCH_MODES else normalized["watchMode"]
+    normalized["directory"] = str(trigger.get("directory") or "").strip()
+    normalized["pattern"] = str(trigger.get("pattern") or normalized["pattern"]).strip() or normalized["pattern"]
+    normalized["recursive"] = bool(trigger.get("recursive", normalized["recursive"]))
+    return normalized
+
+
+def _normalize_planning_plan(plan: Optional[dict]) -> dict:
+    normalized = {
+        "id": uuid.uuid4().hex,
+        "name": "",
+        "prompt": "",
+        "agents": [],
+        "status": "active",
+        "trigger": _default_planning_trigger(),
+        "createdAt": "",
+        "updatedAt": "",
+        "nextRunAt": None,
+        "lastRunAt": None,
+        "lastStatus": None,
+        "lastSummary": "",
+        "runtime": _default_planning_runtime(),
+    }
+    if not isinstance(plan, dict):
+        return normalized
+
+    normalized["id"] = str(plan.get("id") or normalized["id"])
+    normalized["name"] = str(plan.get("name") or "").strip()
+    normalized["prompt"] = str(plan.get("prompt") or plan.get("objective") or "").strip()
+    agents = plan.get("agents")
+    if isinstance(agents, list):
+        normalized["agents"] = [
+            agent for agent in agents
+            if isinstance(agent, str) and agent in PLANNER_AGENT_ROLES
+        ]
+    status = plan.get("status")
+    normalized["status"] = status if status in {"active", "paused"} else "active"
+    normalized["trigger"] = _normalize_planning_trigger(plan.get("trigger"))
+    normalized["createdAt"] = str(plan.get("createdAt") or "").strip()
+    normalized["updatedAt"] = str(plan.get("updatedAt") or "").strip()
+    normalized["nextRunAt"] = plan.get("nextRunAt") if isinstance(plan.get("nextRunAt"), str) or plan.get("nextRunAt") is None else None
+    normalized["lastRunAt"] = plan.get("lastRunAt") if isinstance(plan.get("lastRunAt"), str) or plan.get("lastRunAt") is None else None
+    normalized["lastStatus"] = plan.get("lastStatus") if plan.get("lastStatus") in {"running", "success", "error", None} else None
+    normalized["lastSummary"] = str(plan.get("lastSummary") or "").strip()
+
+    runtime = _default_planning_runtime()
+    incoming_runtime = plan.get("runtime")
+    if isinstance(incoming_runtime, dict):
+        runtime["lastCheckedAt"] = incoming_runtime.get("lastCheckedAt") if isinstance(incoming_runtime.get("lastCheckedAt"), str) or incoming_runtime.get("lastCheckedAt") is None else None
+        runtime["lastSeenFingerprint"] = str(incoming_runtime.get("lastSeenFingerprint") or "").strip()
+        last_seen_metric = incoming_runtime.get("lastSeenMetric")
+        if isinstance(last_seen_metric, (int, float)) or last_seen_metric is None:
+            runtime["lastSeenMetric"] = last_seen_metric
+        known_files = incoming_runtime.get("knownFiles")
+        if isinstance(known_files, list):
+            runtime["knownFiles"] = [
+                str(path) for path in known_files
+                if isinstance(path, str)
+            ][:PLANNER_MAX_KNOWN_FILES]
+    normalized["runtime"] = runtime
+    return normalized
+
+
+def _normalize_planning_run(run: Optional[dict]) -> dict:
+    normalized = {
+        "id": uuid.uuid4().hex,
+        "planId": "",
+        "planName": "Unnamed plan",
+        "triggerKind": "manual",
+        "triggerLabel": "",
+        "startedAt": "",
+        "finishedAt": None,
+        "status": "running",
+        "summary": "",
+        "outputs": [],
+    }
+    if not isinstance(run, dict):
+        return normalized
+
+    normalized["id"] = str(run.get("id") or normalized["id"])
+    normalized["planId"] = str(run.get("planId") or "").strip()
+    normalized["planName"] = str(run.get("planName") or normalized["planName"]).strip()
+    trigger_kind = str(run.get("triggerKind") or "manual").strip()
+    normalized["triggerKind"] = (
+        trigger_kind if trigger_kind in PLANNER_TRIGGER_KINDS or trigger_kind == "manual" else "manual"
+    )
+    normalized["triggerLabel"] = str(run.get("triggerLabel") or "").strip()
+    normalized["startedAt"] = str(run.get("startedAt") or "").strip()
+    normalized["finishedAt"] = run.get("finishedAt") if isinstance(run.get("finishedAt"), str) or run.get("finishedAt") is None else None
+    status = run.get("status")
+    normalized["status"] = status if status in {"running", "success", "error"} else "running"
+    normalized["summary"] = str(run.get("summary") or "").strip()
+    outputs = run.get("outputs")
+    if isinstance(outputs, list):
+        normalized["outputs"] = [
+            {
+                "agent": str(item.get("agent") or "").strip(),
+                "status": item.get("status") if item.get("status") in {"success", "error"} else "success",
+                "content": str(item.get("content") or "").strip(),
+            }
+            for item in outputs
+            if isinstance(item, dict)
+        ]
+    return normalized
+
+
+def _normalize_planning_state(payload: Optional[dict]) -> dict:
+    state = _default_planning_state()
+    if not isinstance(payload, dict):
+        return state
+
+    plans = payload.get("plans")
+    if isinstance(plans, list):
+        state["plans"] = [_normalize_planning_plan(plan) for plan in plans]
+
+    runs = payload.get("runs")
+    if isinstance(runs, list):
+        state["runs"] = [_normalize_planning_run(run) for run in runs[:PLANNER_MAX_RUNS]]
+
+    return state
 
 
 def _utc_now_iso() -> str:
@@ -97,6 +315,7 @@ def _default_db_state() -> dict:
         "config": json.loads(json.dumps(DEFAULT_APP_CONFIG)),
         "conversations": [],
         "preferences": json.loads(json.dumps(DEFAULT_PREFERENCES)),
+        "planning": _default_planning_state(),
     }
 
 
@@ -108,6 +327,12 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
     incoming_config = payload.get("config")
     if isinstance(incoming_config, dict):
         state["config"].update(incoming_config)
+        incoming_file_manager = incoming_config.get("fileManagerConfig")
+        if isinstance(incoming_file_manager, dict):
+            state["config"]["fileManagerConfig"] = {
+                **DEFAULT_APP_CONFIG["fileManagerConfig"],
+                **incoming_file_manager,
+            }
 
     incoming_conversations = payload.get("conversations")
     if isinstance(incoming_conversations, list):
@@ -116,6 +341,10 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
     incoming_preferences = payload.get("preferences")
     if isinstance(incoming_preferences, dict):
         state["preferences"].update(incoming_preferences)
+    if state["preferences"].get("agentRole") not in AGENT_ROLES:
+        state["preferences"]["agentRole"] = "manager"
+
+    state["planning"] = _normalize_planning_state(payload.get("planning"))
 
     incoming_updated_at = payload.get("updatedAt")
     if isinstance(incoming_updated_at, str) and incoming_updated_at:
@@ -165,6 +394,27 @@ async def read_db_state() -> dict:
 async def write_db_state(payload: dict) -> dict:
     async with DB_LOCK:
         return await asyncio.to_thread(_write_db_state_sync, payload)
+
+
+@app.on_event("startup")
+async def startup_planning_scheduler():
+    await read_db_state()
+    stop_event = asyncio.Event()
+    app.state.planning_scheduler_stop = stop_event
+    app.state.planning_scheduler_task = asyncio.create_task(planning_scheduler_loop(stop_event))
+
+
+@app.on_event("shutdown")
+async def shutdown_planning_scheduler():
+    stop_event = getattr(app.state, "planning_scheduler_stop", None)
+    task = getattr(app.state, "planning_scheduler_task", None)
+    if stop_event is not None:
+        stop_event.set()
+    if task is not None:
+        try:
+            await task
+        except Exception:
+            pass
 
 
 # ── OpenSearch client factory ─────────────────────────────────────────────────
@@ -243,6 +493,55 @@ def extract_json_object(text: str) -> dict[str, Any]:
 def normalize_choice(text: str) -> str:
     cleaned = re.sub(r"^\s*i choose:\s*", "", text or "", flags=re.IGNORECASE)
     return cleaned.strip().strip("`").strip()
+
+
+def _normalized_history_messages(
+    history: list[dict[str, Any]],
+    current_message: Optional[str] = None,
+    max_steps: int = CHAT_MEMORY_MAX_STEPS,
+) -> list[dict[str, str]]:
+    safe_max_steps = max(CHAT_MEMORY_MIN_STEPS, max_steps)
+    normalized: list[dict[str, str]] = []
+    for item in history:
+        role = str(item.get("role") or "user")
+        if role not in {"user", "assistant", "system"}:
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        normalized.append(
+            {
+                "role": role,
+                "content": _truncate_text_preview(content, 1200),
+            }
+        )
+
+    if current_message:
+        current_normalized = normalize_choice(current_message).lower()
+        while normalized:
+            last = normalized[-1]
+            if last["role"] != "user":
+                break
+            if normalize_choice(last["content"]).lower() != current_normalized:
+                break
+            normalized.pop()
+
+    return normalized[-safe_max_steps:]
+
+
+def _conversation_memory_markdown(
+    history: list[dict[str, Any]],
+    current_message: Optional[str] = None,
+    max_steps: int = CHAT_MEMORY_MAX_STEPS,
+) -> str:
+    trimmed = _normalized_history_messages(history, current_message=current_message, max_steps=max_steps)
+    if not trimmed:
+        return "No recent memory."
+    lines = []
+    for item in trimmed:
+        label = "User" if item["role"] == "user" else "Assistant"
+        lines.append(f"- {label}: {item['content']}")
+    return "\n".join(lines)
 
 
 def resolve_user_choice(user_text: str, options: list[str]) -> Optional[str]:
@@ -370,6 +669,1349 @@ def match_schema_columns(candidates: list[str], schema: list[dict[str, str]]) ->
             matched.append(name)
     return matched
 
+
+def match_available_options(candidates: list[str], options: list[str]) -> list[str]:
+    lookup = {
+        option.lower(): option
+        for option in options
+        if option
+    }
+    matched: list[str] = []
+    for candidate in candidates:
+        option = lookup.get((candidate or "").lower())
+        if option and option not in matched:
+            matched.append(option)
+    return matched
+
+
+def quote_clickhouse_identifier(name: str) -> str:
+    escaped = (name or "").replace("`", "``")
+    return f"`{escaped}`"
+
+
+def classify_clickhouse_column_type(type_name: str) -> str:
+    lowered = (type_name or "").lower()
+    if any(token in lowered for token in ["date", "time"]):
+        return "date"
+    if any(token in lowered for token in ["int", "float", "decimal", "double"]):
+        return "numeric"
+    if any(token in lowered for token in ["string", "fixedstring", "uuid", "enum"]):
+        return "string"
+    return "other"
+
+
+def _default_data_quality_state() -> dict[str, Any]:
+    return {
+        "stage": "idle",
+        "table": None,
+        "columns": [],
+        "sample_size": DATA_QUALITY_DEFAULT_SAMPLE_SIZE,
+        "row_filter": "",
+        "time_column": None,
+        "db_type": "clickhouse",
+        "schema_info": [],
+        "column_stats": {},
+        "volumetric_stats": None,
+        "llm_analysis": "",
+        "final_answer": "",
+        "agent_id": "data_quality_tables",
+        "session_id": uuid.uuid4().hex,
+        "last_error": "",
+        "available_tables": [],
+        "available_columns": [],
+        "date_columns": [],
+    }
+
+
+def _normalize_data_quality_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_data_quality_state()
+    if not isinstance(payload, dict):
+        return state
+
+    schema_info = payload.get("schema_info") if isinstance(payload.get("schema_info"), list) else payload.get("schemaInfo")
+    state["stage"] = str(payload.get("stage") or state["stage"]).strip() or state["stage"]
+    state["table"] = str(payload.get("table")).strip() if payload.get("table") else None
+    state["columns"] = [
+        str(item).strip()
+        for item in (payload.get("columns") or [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    sample_size = payload.get("sample_size") if "sample_size" in payload else payload.get("sampleSize")
+    if isinstance(sample_size, (int, float)):
+        state["sample_size"] = max(0, min(DATA_QUALITY_MAX_SAMPLE_ROWS, int(sample_size)))
+    state["row_filter"] = str(payload.get("row_filter") or payload.get("rowFilter") or "").strip()
+    time_column = payload.get("time_column") if "time_column" in payload else payload.get("timeColumn")
+    state["time_column"] = str(time_column).strip() if isinstance(time_column, str) and time_column.strip() else None
+    db_type = str(payload.get("db_type") or payload.get("dbType") or "clickhouse").lower()
+    state["db_type"] = "oracle" if db_type == "oracle" else "clickhouse"
+    state["schema_info"] = [
+        {
+            "name": str(column.get("name") or "").strip(),
+            "type": str(column.get("type") or "").strip(),
+            "category": classify_clickhouse_column_type(str(column.get("type") or "")),
+        }
+        for column in (schema_info or [])
+        if isinstance(column, dict) and str(column.get("name") or "").strip()
+    ]
+    state["column_stats"] = payload.get("column_stats") if isinstance(payload.get("column_stats"), dict) else payload.get("columnStats") if isinstance(payload.get("columnStats"), dict) else {}
+    state["volumetric_stats"] = payload.get("volumetric_stats") if isinstance(payload.get("volumetric_stats"), dict) else payload.get("volumetricStats") if isinstance(payload.get("volumetricStats"), dict) else None
+    llm_analysis = payload.get("llm_analysis") if "llm_analysis" in payload else payload.get("llmAnalysis")
+    if isinstance(llm_analysis, str):
+        state["llm_analysis"] = llm_analysis
+    elif isinstance(llm_analysis, dict):
+        state["llm_analysis"] = json.dumps(llm_analysis, ensure_ascii=False)
+    state["final_answer"] = str(payload.get("final_answer") or payload.get("finalAnswer") or "").strip()
+    state["agent_id"] = str(payload.get("agent_id") or payload.get("agentId") or state["agent_id"]).strip() or state["agent_id"]
+    state["session_id"] = str(payload.get("session_id") or payload.get("sessionId") or state["session_id"]).strip() or state["session_id"]
+    state["last_error"] = str(payload.get("last_error") or payload.get("lastError") or "").strip()
+    state["available_tables"] = [
+        str(item).strip()
+        for item in (payload.get("available_tables") or payload.get("availableTables") or [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    state["available_columns"] = [
+        str(item).strip()
+        for item in (payload.get("available_columns") or payload.get("availableColumns") or [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    state["date_columns"] = [
+        str(item).strip()
+        for item in (payload.get("date_columns") or payload.get("dateColumns") or [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    return state
+
+
+DATA_QUALITY_FOLLOWUP_STAGES = {
+    "awaiting_table",
+    "awaiting_columns_mode",
+    "awaiting_custom_columns",
+    "awaiting_sample_size",
+    "awaiting_custom_sample_size",
+    "awaiting_row_filter",
+    "awaiting_time_column",
+    "awaiting_review",
+}
+
+
+def _data_quality_state_needs_followup(state: dict[str, Any]) -> bool:
+    return str(state.get("stage") or "").strip() in DATA_QUALITY_FOLLOWUP_STAGES
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _round_metric(value: Any, digits: int = 4) -> Any:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return value
+    if math.isfinite(numeric):
+        return round(numeric, digits)
+    return value
+
+
+def _first_row(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data") or []
+    return data[0] if data else {}
+
+
+def _data_quality_scan_limit(sample_size: int) -> int:
+    if sample_size <= 0:
+        return DATA_QUALITY_MAX_SAMPLE_ROWS
+    return max(1, min(sample_size, DATA_QUALITY_MAX_SAMPLE_ROWS))
+
+
+def _validate_data_quality_row_filter(row_filter: str) -> Optional[str]:
+    text = (row_filter or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if ";" in text or "--" in text or "/*" in text or "*/" in text:
+        return "The row filter must be a single safe boolean expression without comments or semicolons."
+    forbidden = ["drop", "delete", "insert", "update", "create", "alter", "exec", "union", "sleep"]
+    if any(re.search(rf"\b{keyword}\b", lowered) for keyword in forbidden):
+        return "The row filter contains blocked keywords and was rejected for safety reasons."
+    return None
+
+
+def _match_data_quality_columns(column_names: list[str], schema_info: list[dict[str, Any]]) -> list[str]:
+    available = {
+        str(column.get("name") or "").lower(): str(column.get("name") or "")
+        for column in schema_info
+        if column.get("name")
+    }
+    matched: list[str] = []
+    for column_name in column_names:
+        found = available.get(str(column_name or "").strip().lower())
+        if found and found not in matched:
+            matched.append(found)
+    return matched
+
+
+def _parse_custom_column_input(text: str) -> list[str]:
+    chunks = re.split(r"[\n,]+", text or "")
+    return [chunk.strip().strip("`") for chunk in chunks if chunk.strip()]
+
+
+def _build_data_quality_source_sql(
+    table_name: str,
+    columns: list[str],
+    row_filter: str,
+    sample_size: int,
+) -> str:
+    selected_columns = ", ".join(quote_clickhouse_identifier(column) for column in columns) if columns else "*"
+    sql = f"SELECT {selected_columns} FROM {quote_clickhouse_identifier(table_name)}"
+    if row_filter:
+        sql += f" WHERE ({row_filter})"
+    sql += f"\nLIMIT {_data_quality_scan_limit(sample_size)}"
+    return sql
+
+
+def _data_quality_percentile(values: list[float], q: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * q
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _data_quality_numeric_severity(stats: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    null_pct = _safe_float(stats.get("null_pct")) or 0.0
+    iqr_pct = _safe_float(stats.get("iqr_outlier_pct")) or 0.0
+    zscore_pct = _safe_float(stats.get("zscore_outlier_pct")) or 0.0
+    if null_pct > 20:
+        reasons.append(f"Null rate is {round(null_pct, 2)}%, which is critical.")
+    elif null_pct > 5:
+        reasons.append(f"Null rate is {round(null_pct, 2)}%, which is a warning.")
+    if iqr_pct > 10 or zscore_pct > 10:
+        reasons.append("Outlier volume is above the critical threshold.")
+    elif iqr_pct > 2 or zscore_pct > 2:
+        reasons.append("Outlier volume is above the warning threshold.")
+    severity = "ok"
+    if any("critical" in reason.lower() for reason in reasons):
+        severity = "critical"
+    elif reasons:
+        severity = "warning"
+    return severity, reasons
+
+
+def _data_quality_generic_severity(stats: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    null_pct = _safe_float(stats.get("null_pct")) or 0.0
+    sentinel_pct = _safe_float(stats.get("sentinel_pct")) or 0.0
+    distinct_pct = _safe_float(stats.get("distinct_pct")) or 0.0
+    if null_pct > 20:
+        reasons.append(f"Null rate is {round(null_pct, 2)}%, which is critical.")
+    elif null_pct > 5:
+        reasons.append(f"Null rate is {round(null_pct, 2)}%, which is a warning.")
+    if sentinel_pct > 5:
+        reasons.append(f"Sentinel values represent {round(sentinel_pct, 2)}%, which is critical.")
+    elif sentinel_pct > 0:
+        reasons.append(f"Sentinel values are present at {round(sentinel_pct, 2)}%.")
+    if distinct_pct > 95 and (stats.get("category") == "string"):
+        reasons.append("Cardinality is very high for a text field and may indicate identifier-like data.")
+    severity = "ok"
+    if any("critical" in reason.lower() for reason in reasons):
+        severity = "critical"
+    elif reasons:
+        severity = "warning"
+    return severity, reasons
+
+
+def _finalize_data_quality_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    row_count = int(stats.get("row_count") or 0)
+    null_count = int(stats.get("null_count") or 0)
+    nonnull_count = max(0, row_count - null_count)
+    stats["nonnull_count"] = nonnull_count
+    stats["null_pct"] = round((null_count / row_count) * 100, 2) if row_count else 0.0
+    distinct_count = int(stats.get("distinct_count") or 0)
+    stats["distinct_pct"] = round((distinct_count / nonnull_count) * 100, 2) if nonnull_count else 0.0
+
+    if stats.get("category") == "numeric":
+        severity, reasons = _data_quality_numeric_severity(stats)
+    else:
+        severity, reasons = _data_quality_generic_severity(stats)
+
+    stats["severity_hint"] = severity
+    stats["severity_icon"] = "🔴" if severity == "critical" else "🟡" if severity == "warning" else "🟢"
+    stats["issues"] = reasons
+    return stats
+
+
+async def _data_quality_numeric_stats(
+    config: "ClickHouseConfig",
+    source_sql: str,
+    column_name: str,
+) -> dict[str, Any]:
+    identifier = quote_clickhouse_identifier(column_name)
+    summary = await execute_clickhouse_sql(
+        config,
+        f"""
+        SELECT
+          count() AS row_count,
+          countIf(isNull(value)) AS null_count,
+          uniqExact(value) AS distinct_count,
+          min(value) AS min_value,
+          max(value) AS max_value,
+          avg(value) AS avg_value,
+          stddevPop(value) AS stddev_value,
+          quantilesExactInclusive(0.25, 0.5, 0.75)(value) AS quartiles,
+          countIf(value = 0) AS zero_count,
+          countIf(value < 0) AS negative_count
+        FROM (
+          SELECT toFloat64OrNull({identifier}) AS value
+          FROM ({source_sql}) AS src
+        ) AS profile
+        """,
+    )
+    row = _first_row(summary)
+    quartiles = row.get("quartiles") or [None, None, None]
+    q1 = _safe_float(quartiles[0] if len(quartiles) > 0 else None)
+    median = _safe_float(quartiles[1] if len(quartiles) > 1 else None)
+    q3 = _safe_float(quartiles[2] if len(quartiles) > 2 else None)
+    iqr = (q3 - q1) if q1 is not None and q3 is not None else None
+    lower_fence = (q1 - 1.5 * iqr) if iqr is not None else None
+    upper_fence = (q3 + 1.5 * iqr) if iqr is not None else None
+    avg_value = _safe_float(row.get("avg_value"))
+    stddev_value = _safe_float(row.get("stddev_value"))
+
+    iqr_outlier_count = 0
+    zscore_outlier_count = 0
+    if lower_fence is not None and upper_fence is not None:
+        outlier_query = await execute_clickhouse_sql(
+            config,
+            f"""
+            SELECT
+              countIf(value < {lower_fence} OR value > {upper_fence}) AS iqr_outlier_count,
+              countIf(abs((value - {avg_value or 0}) / {stddev_value or 1}) > 3) AS zscore_outlier_count
+            FROM (
+              SELECT toFloat64OrNull({identifier}) AS value
+              FROM ({source_sql}) AS src
+            ) AS profile
+            WHERE NOT isNull(value)
+            """,
+        )
+        outlier_row = _first_row(outlier_query)
+        iqr_outlier_count = int(outlier_row.get("iqr_outlier_count") or 0)
+        zscore_outlier_count = int(outlier_row.get("zscore_outlier_count") or 0) if stddev_value and stddev_value > 0 else 0
+
+    stats = {
+        "category": "numeric",
+        "row_count": int(row.get("row_count") or 0),
+        "null_count": int(row.get("null_count") or 0),
+        "distinct_count": int(row.get("distinct_count") or 0),
+        "min": _round_metric(row.get("min_value")),
+        "max": _round_metric(row.get("max_value")),
+        "avg": _round_metric(avg_value),
+        "stddev": _round_metric(stddev_value),
+        "p25": _round_metric(q1),
+        "p50": _round_metric(median),
+        "p75": _round_metric(q3),
+        "iqr": _round_metric(iqr),
+        "lower_fence": _round_metric(lower_fence),
+        "upper_fence": _round_metric(upper_fence),
+        "zero_count": int(row.get("zero_count") or 0),
+        "negative_count": int(row.get("negative_count") or 0),
+        "iqr_outlier_count": iqr_outlier_count,
+        "zscore_outlier_count": zscore_outlier_count,
+    }
+    nonnull_count = max(1, stats["row_count"] - stats["null_count"])
+    stats["iqr_outlier_pct"] = round((iqr_outlier_count / nonnull_count) * 100, 2)
+    stats["zscore_outlier_pct"] = round((zscore_outlier_count / nonnull_count) * 100, 2)
+    stats["coeff_variation"] = round(abs((stddev_value or 0.0) / avg_value), 4) if avg_value not in (None, 0) else None
+    stats["skewness_approx"] = round((3 * ((avg_value or 0.0) - (median or 0.0)) / stddev_value), 4) if stddev_value not in (None, 0) and median is not None else None
+    return _finalize_data_quality_stats(stats)
+
+
+async def _data_quality_string_stats(
+    config: "ClickHouseConfig",
+    source_sql: str,
+    column_name: str,
+) -> dict[str, Any]:
+    identifier = quote_clickhouse_identifier(column_name)
+    sentinel_values = ", ".join(quote_clickhouse_literal(value) for value in DATA_QUALITY_STRING_SENTINELS)
+    query = await execute_clickhouse_sql(
+        config,
+        f"""
+        SELECT
+          (SELECT count() FROM ({source_sql}) AS src) AS row_count,
+          (SELECT countIf(isNull(toNullable({identifier}))) FROM ({source_sql}) AS src) AS null_count,
+          count() AS nonnull_count,
+          countIf(trimmed = '') AS empty_count,
+          uniqExact(trimmed) AS distinct_count,
+          min(lengthUTF8(trimmed)) AS min_length,
+          max(lengthUTF8(trimmed)) AS max_length,
+          avg(lengthUTF8(trimmed)) AS avg_length,
+          countIf(lengthUTF8(trimmed) > 1000) AS very_long_count,
+          countIf(match(raw_text, '^\\s') OR match(raw_text, '\\s$')) AS edge_space_count,
+          countIf(match(trimmed, '[A-Za-z]') AND trimmed = upperUTF8(trimmed)) AS uppercase_count,
+          countIf(match(trimmed, '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\\\.[A-Za-z]{{2,}}$')) AS email_like_count,
+          countIf(match(trimmed, '^[-+]?[0-9]+(\\\\.[0-9]+)?$')) AS numeric_like_count,
+          countIf(lowerUTF8(trimmed) IN ({sentinel_values})) AS sentinel_count
+        FROM (
+          SELECT
+            toString({identifier}) AS raw_text,
+            replaceRegexpAll(toString({identifier}), '^\\s+|\\s+$', '') AS trimmed
+          FROM ({source_sql}) AS src
+          WHERE NOT isNull(toNullable({identifier}))
+        ) AS profile
+        """,
+    )
+    row = _first_row(query)
+    stats = {
+        "category": "string",
+        "row_count": int(row.get("row_count") or 0),
+        "null_count": int(row.get("null_count") or 0),
+        "distinct_count": int(row.get("distinct_count") or 0),
+        "empty_count": int(row.get("empty_count") or 0),
+        "min_length": int(row.get("min_length") or 0) if row.get("min_length") is not None else None,
+        "max_length": int(row.get("max_length") or 0) if row.get("max_length") is not None else None,
+        "avg_length": _round_metric(row.get("avg_length")),
+        "very_long_count": int(row.get("very_long_count") or 0),
+        "edge_space_count": int(row.get("edge_space_count") or 0),
+        "uppercase_count": int(row.get("uppercase_count") or 0),
+        "email_like_count": int(row.get("email_like_count") or 0),
+        "numeric_like_count": int(row.get("numeric_like_count") or 0),
+        "sentinel_count": int(row.get("sentinel_count") or 0),
+    }
+    nonnull_count = max(1, stats["row_count"] - stats["null_count"])
+    stats["sentinel_pct"] = round((stats["sentinel_count"] / nonnull_count) * 100, 2)
+    return _finalize_data_quality_stats(stats)
+
+
+async def _data_quality_date_stats(
+    config: "ClickHouseConfig",
+    source_sql: str,
+    column_name: str,
+) -> dict[str, Any]:
+    identifier = quote_clickhouse_identifier(column_name)
+    query = await execute_clickhouse_sql(
+        config,
+        f"""
+        SELECT
+          (SELECT count() FROM ({source_sql}) AS src) AS row_count,
+          (SELECT countIf(isNull(toNullable({identifier}))) FROM ({source_sql}) AS src) AS null_count,
+          count() AS nonnull_count,
+          uniqExact(parsed_dt) AS distinct_count,
+          min(parsed_dt) AS min_value,
+          max(parsed_dt) AS max_value,
+          countIf(parsed_dt > now()) AS future_count,
+          countIf(parsed_dt < toDateTime('1970-01-02 00:00:00')) AS epoch_like_count,
+          countIf(parsed_dt < toDateTime('1900-01-01 00:00:00')) AS pre_1900_count,
+          countIf(toDayOfWeek(parsed_dt) >= 6) AS weekend_count
+        FROM (
+          SELECT parseDateTimeBestEffortOrNull(toString({identifier})) AS parsed_dt
+          FROM ({source_sql}) AS src
+          WHERE NOT isNull(toNullable({identifier}))
+        ) AS profile
+        WHERE NOT isNull(parsed_dt)
+        """,
+    )
+    row = _first_row(query)
+    stats = {
+        "category": "date",
+        "row_count": int(row.get("row_count") or 0),
+        "null_count": int(row.get("null_count") or 0),
+        "distinct_count": int(row.get("distinct_count") or 0),
+        "min": row.get("min_value"),
+        "max": row.get("max_value"),
+        "future_count": int(row.get("future_count") or 0),
+        "epoch_like_count": int(row.get("epoch_like_count") or 0),
+        "pre_1900_count": int(row.get("pre_1900_count") or 0),
+        "weekend_count": int(row.get("weekend_count") or 0),
+        "sentinel_count": 0,
+        "sentinel_pct": 0.0,
+    }
+    return _finalize_data_quality_stats(stats)
+
+
+async def data_quality_schema_node(
+    config: "ClickHouseConfig",
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    state["available_tables"] = await list_clickhouse_tables(config)
+    if state.get("table"):
+        raw_schema = await describe_clickhouse_table(config, state["table"])
+        state["schema_info"] = [
+            {
+                "name": column["name"],
+                "type": column["type"],
+                "category": classify_clickhouse_column_type(column["type"]),
+            }
+            for column in raw_schema
+        ]
+        state["available_columns"] = [column["name"] for column in state["schema_info"]]
+        state["date_columns"] = [column["name"] for column in state["schema_info"] if column["category"] == "date"]
+    return state
+
+
+async def data_quality_stats_node(
+    config: "ClickHouseConfig",
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    if not state.get("table") or not state.get("columns"):
+        raise ValueError("Table and columns are required before profiling can start.")
+    source_sql = _build_data_quality_source_sql(
+        state["table"],
+        state["columns"],
+        state.get("row_filter") or "",
+        int(state.get("sample_size") or DATA_QUALITY_DEFAULT_SAMPLE_SIZE),
+    )
+    state["column_stats"] = {}
+    schema_lookup = {
+        column["name"]: column
+        for column in state.get("schema_info", [])
+        if column.get("name")
+    }
+    for column_name in state["columns"]:
+        schema_entry = schema_lookup.get(column_name, {})
+        category = schema_entry.get("category") or classify_clickhouse_column_type(schema_entry.get("type", ""))
+        if category == "numeric":
+            state["column_stats"][column_name] = await _data_quality_numeric_stats(config, source_sql, column_name)
+        elif category == "string":
+            state["column_stats"][column_name] = await _data_quality_string_stats(config, source_sql, column_name)
+        elif category == "date":
+            state["column_stats"][column_name] = await _data_quality_date_stats(config, source_sql, column_name)
+        else:
+            state["column_stats"][column_name] = {
+                "category": "other",
+                "severity_hint": "warning",
+                "severity_icon": "🟡",
+                "issues": ["This column type is not fully profiled yet."],
+            }
+    return state
+
+
+async def data_quality_volumetric_node(
+    config: "ClickHouseConfig",
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    time_column = state.get("time_column")
+    if not time_column:
+        state["volumetric_stats"] = None
+        return state
+
+    source_sql = _build_data_quality_source_sql(
+        state["table"],
+        [time_column],
+        state.get("row_filter") or "",
+        int(state.get("sample_size") or DATA_QUALITY_DEFAULT_SAMPLE_SIZE),
+    )
+    identifier = quote_clickhouse_identifier(time_column)
+    range_query = await execute_clickhouse_sql(
+        config,
+        f"""
+        SELECT
+          min(parsed_time) AS min_time,
+          max(parsed_time) AS max_time,
+          count() AS profiled_rows
+        FROM (
+          SELECT parseDateTimeBestEffortOrNull(toString({identifier})) AS parsed_time
+          FROM ({source_sql}) AS src
+        ) AS profile
+        WHERE NOT isNull(parsed_time)
+        """,
+    )
+    range_row = _first_row(range_query)
+    min_time = range_row.get("min_time")
+    max_time = range_row.get("max_time")
+    if not min_time or not max_time:
+        state["volumetric_stats"] = None
+        return state
+
+    min_dt = _parse_iso_datetime(str(min_time)) if "T" in str(min_time) else None
+    max_dt = _parse_iso_datetime(str(max_time)) if "T" in str(max_time) else None
+    if min_dt and max_dt:
+        span_days = max(0, int((max_dt - min_dt).total_seconds() // 86400))
+    else:
+        span_days = 8
+    granularity = "hour" if span_days <= 7 else "day"
+    bucket_expression = "toStartOfHour(parsed_time)" if granularity == "hour" else "toStartOfDay(parsed_time)"
+
+    volume_query = await execute_clickhouse_sql(
+        config,
+        f"""
+        SELECT
+          {bucket_expression} AS bucket,
+          count() AS volume
+        FROM (
+          SELECT parseDateTimeBestEffortOrNull(toString({identifier})) AS parsed_time
+          FROM ({source_sql}) AS src
+        ) AS profile
+        WHERE NOT isNull(parsed_time)
+        GROUP BY bucket
+        ORDER BY bucket
+        """,
+    )
+    buckets = [
+        {
+            "bucket": row.get("bucket"),
+            "volume": int(row.get("volume") or 0),
+        }
+        for row in (volume_query.get("data") or [])
+    ]
+    volumes = [bucket["volume"] for bucket in buckets]
+    if not volumes:
+        state["volumetric_stats"] = None
+        return state
+
+    q1 = _data_quality_percentile([float(value) for value in volumes], 0.25)
+    q3 = _data_quality_percentile([float(value) for value in volumes], 0.75)
+    iqr = (q3 - q1) if q1 is not None and q3 is not None else None
+    lower_fence = max(0.0, (q1 - 1.5 * iqr)) if iqr is not None else None
+    avg_volume = sum(volumes) / len(volumes)
+    stddev_volume = math.sqrt(sum((value - avg_volume) ** 2 for value in volumes) / len(volumes))
+    anomalously_low = [
+        bucket for bucket in buckets
+        if lower_fence is not None and bucket["volume"] < lower_fence
+    ]
+    state["volumetric_stats"] = {
+        "granularity": granularity,
+        "min_time": min_time,
+        "max_time": max_time,
+        "bucket_count": len(buckets),
+        "avg_volume": round(avg_volume, 2),
+        "stddev_volume": round(stddev_volume, 2),
+        "q1": _round_metric(q1),
+        "q3": _round_metric(q3),
+        "iqr": _round_metric(iqr),
+        "lower_fence": _round_metric(lower_fence),
+        "anomalously_low_periods": anomalously_low[:12],
+        "series_preview": buckets[:24],
+    }
+    return state
+
+
+def _compact_data_quality_payload(state: dict[str, Any]) -> dict[str, Any]:
+    compact_columns = {}
+    for column_name, stats in (state.get("column_stats") or {}).items():
+        compact_columns[column_name] = {
+            "category": stats.get("category"),
+            "severity_hint": stats.get("severity_hint"),
+            "null_pct": stats.get("null_pct"),
+            "distinct_pct": stats.get("distinct_pct"),
+            "issues": stats.get("issues") or [],
+            "key_metrics": {
+                key: value
+                for key, value in stats.items()
+                if key in {
+                    "min", "max", "avg", "stddev", "p25", "p50", "p75", "iqr",
+                    "zero_count", "negative_count", "iqr_outlier_pct", "zscore_outlier_pct",
+                    "empty_count", "sentinel_pct", "avg_length", "very_long_count",
+                    "future_count", "epoch_like_count", "pre_1900_count", "weekend_count",
+                }
+            },
+        }
+    return {
+        "table": state.get("table"),
+        "columns": state.get("columns"),
+        "sample_size": state.get("sample_size"),
+        "row_filter": state.get("row_filter") or "",
+        "time_column": state.get("time_column"),
+        "db_type": state.get("db_type"),
+        "column_stats": compact_columns,
+        "volumetric_stats": state.get("volumetric_stats"),
+    }
+
+
+def _data_quality_python_fallback_analysis(state: dict[str, Any]) -> dict[str, Any]:
+    column_entries = []
+    critical_count = 0
+    warning_count = 0
+    ok_count = 0
+    score = 100
+
+    for column_name, stats in (state.get("column_stats") or {}).items():
+        severity = stats.get("severity_hint") or "ok"
+        if severity == "critical":
+            critical_count += 1
+            score -= 15
+        elif severity == "warning":
+            warning_count += 1
+            score -= 5
+        else:
+            ok_count += 1
+        column_entries.append(
+            {
+                "name": column_name,
+                "severity": severity,
+                "headline": (
+                    stats.get("issues")[0]
+                    if stats.get("issues")
+                    else "No major issue detected in the sampled profile."
+                ),
+                "business_risk": (
+                    "Data quality issues may reduce reporting trust and downstream decision accuracy."
+                    if severity != "ok"
+                    else "No immediate business risk was detected in the sampled data."
+                ),
+            }
+        )
+
+    return {
+        "global_score": max(0, score),
+        "critical_count": critical_count,
+        "warning_count": warning_count,
+        "ok_count": ok_count,
+        "columns": column_entries,
+        "top_recommendations": [
+            "Prioritize columns marked as critical before using this table for reporting or automation.",
+            "Add validation rules for nulls, sentinel values, and format anomalies at ingestion time.",
+            "Review row filters and sample size choices if you need a narrower business scope.",
+        ],
+        "volumetric_summary": (
+            "No volumetric anomaly was computed."
+            if not state.get("volumetric_stats")
+            else "Volumetric analysis is included below and highlights low-volume periods."
+        ),
+    }
+
+
+async def data_quality_llm_analysis_node(
+    state: dict[str, Any],
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> dict[str, Any]:
+    payload = _compact_data_quality_payload(state)
+    prompt = f"""
+You are a senior data-quality analyst.
+Analyze the profiling payload below and return JSON only with this exact shape:
+{{
+  "global_score": 0,
+  "critical_count": 0,
+  "warning_count": 0,
+  "ok_count": 0,
+  "columns": [
+    {{
+      "name": "column_name",
+      "severity": "critical" | "warning" | "ok",
+      "headline": "short finding summary",
+      "business_risk": "short business risk"
+    }}
+  ],
+  "top_recommendations": ["recommendation 1", "recommendation 2"],
+  "volumetric_summary": "short summary if volumetric analysis exists"
+}}
+
+Scoring rules:
+- Critical: null_pct > 20, outliers > 10, sentinel_pct > 5 => -15 points
+- Warning: null_pct 5-20, outliers 2-10, suspicious cardinality => -5 points
+- OK: no meaningful issue => 0 points
+
+Keep everything in English.
+Use the payload only. Do not invent metrics that are not provided.
+
+Payload:
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+""".strip()
+
+    try:
+        raw = await llm_chat(
+            [{"role": "user", "content": prompt}],
+            llm_base_url,
+            llm_model,
+            llm_provider,
+            llm_api_key,
+            response_format="json",
+        )
+        parsed = extract_json_object(raw)
+        if not parsed:
+            raise ValueError("Empty data-quality analysis payload from the LLM.")
+        state["llm_analysis"] = json.dumps(parsed, ensure_ascii=False)
+        return parsed
+    except Exception:
+        fallback = _data_quality_python_fallback_analysis(state)
+        state["llm_analysis"] = json.dumps(fallback, ensure_ascii=False)
+        return fallback
+
+
+def data_quality_synthesizer_node(
+    state: dict[str, Any],
+    llm_analysis: dict[str, Any],
+) -> str:
+    lines = [
+        "## Executive Summary",
+        f"Global score: {int(llm_analysis.get('global_score') or 0)}/100",
+        (
+            f"Critical issues: {int(llm_analysis.get('critical_count') or 0)} | "
+            f"Warnings: {int(llm_analysis.get('warning_count') or 0)} | "
+            f"OK: {int(llm_analysis.get('ok_count') or 0)}"
+        ),
+        "",
+        "## Analysis by Column",
+    ]
+
+    analysis_by_name = {
+        str(item.get("name")): item
+        for item in (llm_analysis.get("columns") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    for column_name in state.get("columns") or []:
+        stats = (state.get("column_stats") or {}).get(column_name, {})
+        entry = analysis_by_name.get(column_name, {})
+        severity = str(entry.get("severity") or stats.get("severity_hint") or "ok")
+        icon = "🔴" if severity == "critical" else "🟡" if severity == "warning" else "🟢"
+        label = "Critical" if severity == "critical" else "Warning" if severity == "warning" else "OK"
+        lines.append(f"### `{column_name}` — {icon} [{label}]")
+        key_bits = [
+            f"null_pct={stats.get('null_pct', 0)}%",
+            f"distinct_pct={stats.get('distinct_pct', 0)}%",
+        ]
+        if stats.get("category") == "numeric":
+            key_bits.extend([
+                f"min={stats.get('min')}",
+                f"max={stats.get('max')}",
+                f"avg={stats.get('avg')}",
+                f"iqr_outliers={stats.get('iqr_outlier_pct', 0)}%",
+            ])
+        elif stats.get("category") == "string":
+            key_bits.extend([
+                f"avg_length={stats.get('avg_length')}",
+                f"sentinel_pct={stats.get('sentinel_pct', 0)}%",
+                f"empty_count={stats.get('empty_count', 0)}",
+            ])
+        elif stats.get("category") == "date":
+            key_bits.extend([
+                f"min={stats.get('min')}",
+                f"max={stats.get('max')}",
+                f"future_count={stats.get('future_count', 0)}",
+            ])
+        lines.append(f"Key metrics: {', '.join(key_bits)}")
+        lines.append(str(entry.get("headline") or (stats.get("issues") or ["No major issue detected."])[0]))
+        lines.append(str(entry.get("business_risk") or "No business risk summary was generated."))
+        lines.append("")
+
+    lines.extend(["## Top Recommendations"])
+    recommendations = llm_analysis.get("top_recommendations") or []
+    if recommendations:
+        lines.extend(f"- {recommendation}" for recommendation in recommendations[:6])
+    else:
+        lines.append("- No recommendation was generated.")
+
+    if state.get("volumetric_stats"):
+        volumetric = state["volumetric_stats"]
+        lines.extend([
+            "",
+            "## Volumetric Analysis",
+            str(llm_analysis.get("volumetric_summary") or "Volumetric analysis was requested for the selected time column."),
+            (
+                f"Granularity: {volumetric.get('granularity')} | "
+                f"Buckets: {volumetric.get('bucket_count')} | "
+                f"Average volume: {volumetric.get('avg_volume')} | "
+                f"Stddev: {volumetric.get('stddev_volume')}"
+            ),
+        ])
+        low_periods = volumetric.get("anomalously_low_periods") or []
+        if low_periods:
+            lines.append("Low-volume periods:")
+            lines.extend(
+                f"- {item.get('bucket')}: {item.get('volume')}"
+                for item in low_periods[:8]
+            )
+
+    return "\n".join(lines).strip()
+
+
+DATA_QUALITY_ALL_COLUMNS_OPTION = "All columns"
+DATA_QUALITY_NUMERIC_COLUMNS_OPTION = "Numeric columns only"
+DATA_QUALITY_TEXT_COLUMNS_OPTION = "Text columns only"
+DATA_QUALITY_DATE_COLUMNS_OPTION = "Date columns only"
+DATA_QUALITY_CUSTOM_COLUMNS_OPTION = "Custom column list"
+DATA_QUALITY_SKIP_TIME_OPTION = "Skip volumetric analysis"
+DATA_QUALITY_SAMPLE_OPTIONS = {
+    "50,000 rows": 50_000,
+    "100,000 rows": 100_000,
+    "500,000 rows": 500_000,
+    f"Full scan (capped at {DATA_QUALITY_MAX_SAMPLE_ROWS:,} rows)": 0,
+}
+DATA_QUALITY_CUSTOM_SAMPLE_OPTION = "Custom sample size"
+DATA_QUALITY_REVIEW_OPTIONS = [
+    "Launch analysis",
+    "Edit table",
+    "Edit columns",
+    "Edit sample size",
+    "Edit row filter",
+    "Edit time column",
+    "Start over",
+]
+
+
+def _data_quality_agent_steps(
+    stage_id: str,
+    title: str,
+    status: str,
+    details: str,
+    extra_steps: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    steps = [
+        {
+            "id": stage_id,
+            "title": title,
+            "status": status,
+            "details": details,
+        }
+    ]
+    if extra_steps:
+        steps.extend(extra_steps)
+    return steps
+
+
+def _data_quality_table_options(state: dict[str, Any]) -> list[str]:
+    return (state.get("available_tables") or [])[:DATA_QUALITY_MAX_GUIDED_TABLES]
+
+
+def _data_quality_column_mode_options(state: dict[str, Any]) -> list[str]:
+    schema_info = state.get("schema_info") or []
+    options = [DATA_QUALITY_ALL_COLUMNS_OPTION]
+    if any(column.get("category") == "numeric" for column in schema_info):
+        options.append(DATA_QUALITY_NUMERIC_COLUMNS_OPTION)
+    if any(column.get("category") == "string" for column in schema_info):
+        options.append(DATA_QUALITY_TEXT_COLUMNS_OPTION)
+    if any(column.get("category") == "date" for column in schema_info):
+        options.append(DATA_QUALITY_DATE_COLUMNS_OPTION)
+    options.append(DATA_QUALITY_CUSTOM_COLUMNS_OPTION)
+    return options
+
+
+def _data_quality_columns_for_mode(mode: str, schema_info: list[dict[str, Any]]) -> list[str]:
+    if mode == DATA_QUALITY_ALL_COLUMNS_OPTION:
+        return [column["name"] for column in schema_info if column.get("name")]
+    if mode == DATA_QUALITY_NUMERIC_COLUMNS_OPTION:
+        return [column["name"] for column in schema_info if column.get("category") == "numeric"]
+    if mode == DATA_QUALITY_TEXT_COLUMNS_OPTION:
+        return [column["name"] for column in schema_info if column.get("category") == "string"]
+    if mode == DATA_QUALITY_DATE_COLUMNS_OPTION:
+        return [column["name"] for column in schema_info if column.get("category") == "date"]
+    return []
+
+
+def _data_quality_review_payload(state: dict[str, Any]) -> dict[str, Any]:
+    raw_sample_size = state.get("sample_size")
+    payload = {
+        "__dq__": True,
+        "table": state.get("table"),
+        "columns": state.get("columns") or [],
+        "sample_size": 0 if raw_sample_size == 0 else int(raw_sample_size or DATA_QUALITY_DEFAULT_SAMPLE_SIZE),
+    }
+    if state.get("row_filter"):
+        payload["row_filter"] = state["row_filter"]
+    if state.get("time_column"):
+        payload["time_column"] = state["time_column"]
+    return payload
+
+
+def _data_quality_review_markdown(state: dict[str, Any]) -> str:
+    row_filter = state.get("row_filter") or "No row filter"
+    time_column = state.get("time_column") or "No volumetric analysis"
+    selected_columns = state.get("columns") or []
+    lines = [
+        "## Data Quality Review",
+        f"- Table: `{state.get('table') or 'Not selected yet'}`",
+        f"- Columns: {', '.join(f'`{column}`' for column in selected_columns) if selected_columns else 'Not selected yet'}",
+        (
+            "- Sample size: "
+            + (
+                f"Full scan capped at {DATA_QUALITY_MAX_SAMPLE_ROWS:,} rows"
+                if int(state.get("sample_size") or 0) == 0
+                else f"{int(state.get('sample_size') or DATA_QUALITY_DEFAULT_SAMPLE_SIZE):,} rows"
+            )
+        ),
+        f"- Row filter: {row_filter}",
+        f"- Time column: {time_column}",
+        "",
+        "## Structured Payload",
+        "```json",
+        json.dumps(_data_quality_review_payload(state), ensure_ascii=False, indent=2),
+        "```",
+        "",
+        "## Next Step",
+        "Launch the analysis or edit one of the parameters below.",
+    ]
+    return "\n".join(lines)
+
+
+def _data_quality_intro_markdown(database_name: str, table_options: list[str], total_tables: int) -> str:
+    lines = [
+        "## Data quality - Tables",
+        (
+            "I can guide you through a table quality assessment in English, then run statistical profiling "
+            "and local-LLM scoring."
+        ),
+        "",
+        "## What I Need",
+        "- A target table",
+        "- Which columns to profile",
+        "- A sample size (or a capped full scan)",
+        "- An optional row filter",
+        "- An optional time column for volumetric analysis",
+        "",
+        f"I found {total_tables} table(s) in `{database_name}`.",
+    ]
+    if total_tables > len(table_options):
+        lines.append(
+            f"Choose from the suggestions below or type another exact table name from the remaining {total_tables - len(table_options)} table(s)."
+        )
+    else:
+        lines.append("Choose the table you want to profile.")
+    return "\n".join(lines)
+
+
+def _data_quality_guess_table_from_message(user_message: str, available_tables: list[str]) -> Optional[str]:
+    direct = resolve_user_choice(user_message, available_tables)
+    if direct:
+        return direct
+    normalized = normalize_choice(user_message).lower()
+    if not normalized:
+        return None
+    matches = [
+        table for table in available_tables
+        if re.search(rf"(?<![a-z0-9_]){re.escape(table.lower())}(?![a-z0-9_])", normalized)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _data_quality_guess_columns_from_message(
+    user_message: str,
+    schema_info: list[dict[str, Any]],
+) -> list[str]:
+    normalized = normalize_choice(user_message).lower()
+    if not normalized:
+        return []
+    exact = []
+    for column in schema_info:
+        name = str(column.get("name") or "").strip()
+        if not name:
+            continue
+        if re.search(rf"(?<![a-z0-9_]){re.escape(name.lower())}(?![a-z0-9_])", normalized):
+            exact.append(name)
+    return exact
+
+
+def _try_extract_data_quality_payload(user_message: str) -> Optional[dict[str, Any]]:
+    parsed = extract_json_object(user_message)
+    if isinstance(parsed, dict) and parsed.get("__dq__") is True:
+        return parsed
+    return None
+
+
+CHART_CREATE_OPTION = "Create a chart"
+CHART_SKIP_OPTION = "Keep text answer only"
+CHART_TYPE_LABELS = {
+    "bar": "Bar chart",
+    "line": "Line chart",
+    "area": "Area chart",
+    "scatter": "Scatter plot",
+}
+CHART_TYPE_BY_LABEL = {label.lower(): key for key, label in CHART_TYPE_LABELS.items()}
+
+
+def reset_clickhouse_chart_state(state: ClickHouseAgentState) -> None:
+    state.chart_requested = False
+    state.chart_suggested = False
+    state.chart_offer_options = []
+    state.chart_x_options = []
+    state.chart_y_options = []
+    state.chart_type_options = []
+    state.selected_chart_x = None
+    state.selected_chart_y = None
+    state.selected_chart_type = None
+
+
+def reset_clickhouse_query_resolution(state: ClickHouseAgentState) -> None:
+    state.candidate_fields = []
+    state.date_fields = []
+    state.selected_field = None
+    state.selected_date_field = None
+    reset_clickhouse_clarification(state)
+    reset_clickhouse_chart_state(state)
+
+
+def detect_chart_request(text: str) -> bool:
+    normalized = (text or "").lower()
+    return any(
+        keyword in normalized
+        for keyword in [
+            "chart", "graph", "plot", "visual", "visualize", "visualise",
+            "dashboard", "trend chart", "bar chart", "line chart", "scatter",
+            "graphique", "graphe", "courbe", "histogram",
+        ]
+    )
+
+
+def is_chart_followup_request(text: str) -> bool:
+    normalized = (text or "").lower().strip()
+    return any(
+        phrase in normalized
+        for phrase in [
+            "create a chart",
+            "generate a chart",
+            "show a chart",
+            "make a chart",
+            "plot this",
+            "graph this",
+            "visualize this",
+            "visualise this",
+            "show me a graph",
+            "create graph",
+            "make graph",
+        ]
+    )
+
+
+def is_affirmative_response(text: str) -> bool:
+    normalized = normalize_choice(text).lower()
+    return normalized in {
+        "yes",
+        "y",
+        "ok",
+        "okay",
+        "sure",
+        "please do",
+        "do it",
+        "go ahead",
+        "why not",
+        "yes please",
+    }
+
+
+def is_negative_response(text: str) -> bool:
+    normalized = normalize_choice(text).lower()
+    return normalized in {
+        "no",
+        "n",
+        "nope",
+        "not now",
+        "skip",
+        "cancel",
+        "keep text",
+        "text only",
+        "no thanks",
+    }
+
+
+def detect_requested_chart_type(text: str) -> Optional[str]:
+    normalized = (text or "").lower()
+    if "scatter" in normalized:
+        return "scatter"
+    if "area" in normalized:
+        return "area"
+    if "line" in normalized or "curve" in normalized:
+        return "line"
+    if "bar" in normalized or "histogram" in normalized:
+        return "bar"
+    return None
+
+
+def is_numeric_clickhouse_type(type_name: str) -> bool:
+    lowered = (type_name or "").lower()
+    return any(
+        token in lowered
+        for token in [
+            "int", "float", "decimal", "numeric", "double", "real",
+        ]
+    ) and "interval" not in lowered
+
+
+def is_temporal_clickhouse_type(type_name: str) -> bool:
+    lowered = (type_name or "").lower()
+    return "date" in lowered or "time" in lowered
+
+
+def normalize_chart_value(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+def infer_chart_options(meta: list[dict], rows: list[dict]) -> dict[str, Any]:
+    if len(rows) < 2:
+        return {
+            "can_chart": False,
+            "recommended": False,
+            "x_options": [],
+            "y_options": [],
+            "type_options": [],
+        }
+
+    numeric_columns = [col["name"] for col in meta if is_numeric_clickhouse_type(col.get("type", ""))]
+    temporal_columns = [col["name"] for col in meta if is_temporal_clickhouse_type(col.get("type", ""))]
+    text_columns = [
+        col["name"] for col in meta
+        if col.get("name") not in numeric_columns and col.get("name") not in temporal_columns
+    ]
+
+    x_options = temporal_columns + text_columns
+    if not x_options and len(numeric_columns) >= 2:
+        x_options = numeric_columns[:-1]
+
+    y_options = numeric_columns
+
+    if not x_options or not y_options:
+        return {
+            "can_chart": False,
+            "recommended": False,
+            "x_options": [],
+            "y_options": [],
+            "type_options": [],
+        }
+
+    unique_counts = {
+        column_name: len({str(row.get(column_name, "")) for row in rows if row.get(column_name) is not None})
+        for column_name in x_options
+    }
+
+    filtered_x_options = [
+        column_name for column_name in x_options
+        if unique_counts.get(column_name, 0) <= min(40, len(rows))
+    ] or x_options
+
+    uses_temporal_x = any(column_name in temporal_columns for column_name in filtered_x_options)
+    uses_numeric_x = all(column_name in numeric_columns for column_name in filtered_x_options)
+
+    type_options = ["Bar chart", "Line chart", "Area chart"]
+    if uses_numeric_x and len(numeric_columns) >= 2:
+        type_options = ["Scatter plot", "Line chart", "Bar chart"]
+    elif uses_temporal_x:
+        type_options = ["Line chart", "Area chart", "Bar chart"]
+
+    recommended = len(filtered_x_options) > 0 and len(y_options) > 0 and len(rows) >= 3
+    return {
+        "can_chart": True,
+        "recommended": recommended,
+        "x_options": filtered_x_options,
+        "y_options": y_options,
+        "type_options": type_options,
+    }
+
+
+def build_chart(
+    rows: list[dict],
+    x_field: str,
+    y_field: str,
+    chart_type: str,
+) -> Optional[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for row in rows:
+        x_raw = row.get(x_field)
+        y_raw = normalize_chart_value(row.get(y_field))
+        if x_raw is None or y_raw is None:
+            continue
+        points.append({"x": str(x_raw), "y": y_raw})
+
+    if len(points) < 2:
+        return None
+
+    points = points[:30]
+    return {
+        "type": chart_type,
+        "title": f"{y_field} by {x_field}",
+        "xField": x_field,
+        "yField": y_field,
+        "points": points,
+    }
+
+
+def initialize_chart_selection(
+    state: ClickHouseAgentState,
+    x_options: list[str],
+    y_options: list[str],
+    type_options: list[str],
+    requested_chart_type: Optional[str] = None,
+) -> None:
+    state.chart_requested = True
+    state.chart_x_options = x_options
+    state.chart_y_options = y_options
+    state.chart_type_options = type_options
+
+    if not state.selected_chart_x and len(x_options) == 1:
+        state.selected_chart_x = x_options[0]
+
+    filtered_y_options = [
+        option for option in y_options
+        if option != state.selected_chart_x
+    ] or y_options
+
+    if not state.selected_chart_y and len(filtered_y_options) == 1:
+        state.selected_chart_y = filtered_y_options[0]
+
+    if (
+        not state.selected_chart_type
+        and requested_chart_type
+        and CHART_TYPE_LABELS.get(requested_chart_type) in type_options
+    ):
+        state.selected_chart_type = requested_chart_type
+
+    if not state.selected_chart_type and len(type_options) == 1:
+        state.selected_chart_type = CHART_TYPE_BY_LABEL.get(type_options[0].lower())
+
+
+def next_chart_prompt(state: ClickHouseAgentState) -> Optional[dict[str, Any]]:
+    x_options = state.chart_x_options
+    y_options = [
+        option for option in state.chart_y_options
+        if option != state.selected_chart_x
+    ] or state.chart_y_options
+
+    if not state.selected_chart_x:
+        state.stage = "awaiting_chart_x"
+        return {
+            "title": "Chart X Axis",
+            "prompt": "Choose the field to use on the X axis.",
+            "options": x_options,
+            "step_id": "ch-chart-x",
+            "step_title": "Waiting for X axis selection",
+            "step_details": "The user must choose which field should drive the horizontal axis.",
+        }
+
+    if not state.selected_chart_y:
+        state.stage = "awaiting_chart_y"
+        return {
+            "title": "Chart Y Axis",
+            "prompt": "Choose the metric to use on the Y axis.",
+            "options": y_options,
+            "step_id": "ch-chart-y",
+            "step_title": "Waiting for Y axis selection",
+            "step_details": "The user must choose the metric to visualize.",
+        }
+
+    if not state.selected_chart_type:
+        state.stage = "awaiting_chart_type"
+        return {
+            "title": "Chart Type",
+            "prompt": "Choose the chart type.",
+            "options": state.chart_type_options,
+            "step_id": "ch-chart-type",
+            "step_title": "Waiting for chart type",
+            "step_details": "The user must choose how to visualize the selected axes.",
+        }
+
+    return None
+
 # ── Text utilities ────────────────────────────────────────────────────────────
 
 def keyword_score(query: str, text: str) -> float:
@@ -463,12 +2105,1386 @@ async def llm_chat(
             return resp.json()["choices"][0]["message"]["content"]
 
 
+# ── File Management agent helpers ────────────────────────────────────────────
+
+FILE_PREVIEW_CHAR_LIMIT = 3000
+FILE_TABULAR_PREVIEW_ROWS = 50
+FILE_SEARCH_RESULTS_LIMIT = 20
+FILE_MANAGER_MAX_ITERATIONS = 15
+FILE_MANAGER_WRITE_TOOL_LIMIT = 1000
+FILE_MANAGER_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".py", ".sql", ".json", ".yaml", ".yml", ".html", ".css",
+    ".js", ".ts", ".tsx", ".jsx", ".csv", ".tsv", ".log", ".ini", ".toml",
+    ".xml", ".sh", ".env", ".rst",
+}
+FILE_MANAGER_SPREADSHEET_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls"}
+FILE_MANAGER_CONFIRMATION_TOOLS = {
+    "write_file",
+    "delete_file",
+    "delete_directory",
+    "move_file",
+    "write_excel_sheet",
+    "edit_excel_cells",
+    "delete_excel_sheet",
+}
+
+
+def _truncate_text_preview(text: str, limit: int = FILE_PREVIEW_CHAR_LIMIT) -> str:
+    value = str(text or "")
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def _file_tool_result(
+    summary: str,
+    *,
+    preview: str = "",
+    data: Any = None,
+    visited_path: str = "",
+    requires_confirmation: bool = False,
+    pending_action: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    return {
+        "summary": summary.strip(),
+        "preview": _truncate_text_preview(preview),
+        "data": data,
+        "visited_path": visited_path,
+        "requires_confirmation": requires_confirmation,
+        "pending_action": pending_action,
+    }
+
+
+def _import_openpyxl():
+    try:
+        from openpyxl import Workbook, load_workbook
+        return Workbook, load_workbook
+    except ImportError as exc:
+        raise ValueError("The optional dependency `openpyxl` is required for Excel tools.") from exc
+
+
+def _import_xlrd():
+    try:
+        import xlrd
+        return xlrd
+    except ImportError as exc:
+        raise ValueError("The optional dependency `xlrd` is required to read `.xls` files.") from exc
+
+
+def _import_docx_document():
+    try:
+        from docx import Document
+        return Document
+    except ImportError as exc:
+        raise ValueError("The optional dependency `python-docx` is required to read `.docx` files.") from exc
+
+
+def _import_pyarrow_parquet():
+    try:
+        import pyarrow.parquet as pq
+        return pq
+    except ImportError as exc:
+        raise ValueError("The optional dependency `pyarrow` is required to read `.parquet` files.") from exc
+
+
+def _resolve_agent_path(path_value: str, base_path: str = "") -> Path:
+    raw_path = str(path_value or ".").strip() or "."
+    sandbox_root = Path(base_path).expanduser().resolve() if base_path else None
+
+    if os.path.isabs(raw_path):
+        resolved = Path(raw_path).expanduser().resolve()
+    else:
+        anchor = sandbox_root or Path.cwd().resolve()
+        resolved = (anchor / raw_path).resolve()
+
+    if sandbox_root:
+        try:
+            resolved.relative_to(sandbox_root)
+        except ValueError as exc:
+            raise ValueError("Path escapes the configured base_path sandbox.") from exc
+
+    return resolved
+
+
+def _ensure_parent_directory(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _format_table_rows(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "No rows found."
+    headers = list(rows[0].keys())
+    header_line = "| " + " | ".join(headers) + " |"
+    divider = "| " + " | ".join(["---"] * len(headers)) + " |"
+    body_lines = []
+    for row in rows[:FILE_TABULAR_PREVIEW_ROWS]:
+        body_lines.append("| " + " | ".join(str(row.get(header, "")) for header in headers) + " |")
+    return "\n".join([header_line, divider, *body_lines])
+
+
+def _normalize_excel_rows(headers: list[Any], rows: list[list[Any]]) -> list[dict[str, Any]]:
+    safe_headers = []
+    for index, header in enumerate(headers, start=1):
+        value = str(header).strip() if header is not None else ""
+        safe_headers.append(value or f"column_{index}")
+    return [
+        {safe_headers[idx]: row[idx] if idx < len(row) else "" for idx in range(len(safe_headers))}
+        for row in rows
+    ]
+
+
+def _load_excel_sheet_preview(path: Path, sheet_name: Optional[str] = None) -> tuple[str, list[dict[str, Any]], str]:
+    extension = path.suffix.lower()
+    if extension == ".xlsx":
+        _, load_workbook = _import_openpyxl()
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        target_sheet = sheet_name or workbook.sheetnames[0]
+        if target_sheet not in workbook.sheetnames:
+            raise ValueError(f"Sheet `{target_sheet}` was not found.")
+        worksheet = workbook[target_sheet]
+        rows = list(worksheet.iter_rows(values_only=True))
+        headers = list(rows[0]) if rows else []
+        data_rows = [list(row) for row in rows[1:1 + FILE_TABULAR_PREVIEW_ROWS]] if len(rows) > 1 else []
+        preview_rows = _normalize_excel_rows(headers, data_rows) if headers else []
+        return target_sheet, preview_rows, ", ".join(workbook.sheetnames)
+
+    if extension == ".xls":
+        xlrd = _import_xlrd()
+        workbook = xlrd.open_workbook(path)
+        target_sheet = sheet_name or workbook.sheet_names()[0]
+        worksheet = workbook.sheet_by_name(target_sheet)
+        headers = worksheet.row_values(0) if worksheet.nrows > 0 else []
+        data_rows = [worksheet.row_values(index) for index in range(1, min(worksheet.nrows, FILE_TABULAR_PREVIEW_ROWS + 1))]
+        preview_rows = _normalize_excel_rows(headers, data_rows) if headers else []
+        return target_sheet, preview_rows, ", ".join(workbook.sheet_names())
+
+    raise ValueError("Excel tools support `.xlsx` and `.xls` files only.")
+
+
+def _read_csv_rows(path: Path, delimiter: Optional[str] = None) -> tuple[list[str], list[dict[str, Any]], int]:
+    detected_delimiter = delimiter or ("\t" if path.suffix.lower() == ".tsv" else ",")
+    rows_preview: list[dict[str, Any]] = []
+    total_rows = 0
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=detected_delimiter)
+        headers = reader.fieldnames or []
+        for row in reader:
+            total_rows += 1
+            if len(rows_preview) < FILE_TABULAR_PREVIEW_ROWS:
+                rows_preview.append(dict(row))
+    return headers, rows_preview, total_rows
+
+
+def list_directory_tool(path: str = ".", recursive: bool = False, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not target.exists():
+        raise ValueError(f"Directory `{target}` does not exist.")
+    if not target.is_dir():
+        raise ValueError(f"`{target}` is not a directory.")
+
+    iterator = target.rglob("*") if recursive else target.iterdir()
+    entries = []
+    for item in iterator:
+        entry_type = "dir" if item.is_dir() else "file"
+        size = item.stat().st_size if item.is_file() else 0
+        entries.append(
+            {
+                "name": item.name,
+                "path": str(item),
+                "type": entry_type,
+                "size": size,
+            }
+        )
+        if len(entries) >= FILE_TABULAR_PREVIEW_ROWS:
+            break
+
+    preview_lines = [
+        f"- `{Path(entry['path']).name}{'/' if entry['type'] == 'dir' else ''}` · {entry['type']} · {entry['size']} bytes"
+        for entry in entries
+    ] or ["No entries found."]
+    return _file_tool_result(
+        f"Listed `{target}`.",
+        preview="\n".join(preview_lines),
+        data=entries,
+        visited_path=str(target),
+    )
+
+
+def get_file_info_tool(path: str, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not target.exists():
+        raise ValueError(f"Path `{target}` does not exist.")
+
+    stats = target.stat()
+    info = {
+        "path": str(target),
+        "name": target.name,
+        "isDirectory": target.is_dir(),
+        "size": stats.st_size,
+        "modifiedAt": datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc).isoformat(),
+        "createdAt": datetime.fromtimestamp(stats.st_ctime, tz=timezone.utc).isoformat(),
+        "suffix": target.suffix.lower(),
+    }
+    preview = "\n".join(f"- **{key}**: {value}" for key, value in info.items())
+    return _file_tool_result(
+        f"Loaded metadata for `{target.name}`.",
+        preview=preview,
+        data=info,
+        visited_path=str(target if target.is_dir() else target.parent),
+    )
+
+
+def search_files_tool(path: str = ".", query: str = "", recursive: bool = True, base_path: str = "") -> dict[str, Any]:
+    if not query.strip():
+        raise ValueError("A search query is required.")
+
+    root = _resolve_agent_path(path, base_path)
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Directory `{root}` does not exist.")
+
+    matches = []
+    lowered_query = query.lower().strip()
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    for item in iterator:
+        if len(matches) >= FILE_SEARCH_RESULTS_LIMIT:
+            break
+
+        relative_path = str(item.relative_to(root))
+        match_kind = None
+        if lowered_query in relative_path.lower():
+            match_kind = "name"
+        elif item.is_file() and item.suffix.lower() in FILE_MANAGER_TEXT_EXTENSIONS and item.stat().st_size <= 1_000_000:
+            content = _read_text_file(item)
+            if lowered_query in content.lower():
+                match_kind = "content"
+
+        if match_kind:
+            matches.append(
+                {
+                    "path": str(item),
+                    "relativePath": relative_path,
+                    "type": "dir" if item.is_dir() else "file",
+                    "matchKind": match_kind,
+                }
+            )
+
+    preview = "\n".join(
+        f"- `{item['relativePath']}` · {item['type']} · matched by {item['matchKind']}"
+        for item in matches
+    ) or "No match found."
+    return _file_tool_result(
+        f"Found {len(matches)} matching item(s) in `{root}`.",
+        preview=preview,
+        data=matches,
+        visited_path=str(root),
+    )
+
+
+def read_file_tool(path: str, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not target.exists() or not target.is_file():
+        raise ValueError(f"File `{target}` does not exist.")
+
+    suffix = target.suffix.lower()
+    if suffix in FILE_MANAGER_TEXT_EXTENSIONS:
+        content = _read_text_file(target)
+        return _file_tool_result(
+            f"Read text file `{target.name}`.",
+            preview=f"```text\n{_truncate_text_preview(content)}\n```",
+            data={"path": str(target), "content": _truncate_text_preview(content)},
+            visited_path=str(target.parent),
+        )
+
+    if suffix in {".csv", ".tsv"}:
+        headers, rows, total_rows = _read_csv_rows(target)
+        preview = (
+            f"Rows shown: {len(rows)} / {total_rows}\n\n"
+            f"{_format_table_rows(rows)}"
+        )
+        return _file_tool_result(
+            f"Read tabular file `{target.name}`.",
+            preview=preview,
+            data={"headers": headers, "rows": rows, "totalRows": total_rows},
+            visited_path=str(target.parent),
+        )
+
+    if suffix in {".xlsx", ".xls"}:
+        sheet_name, rows, sheet_list = _load_excel_sheet_preview(target)
+        preview = (
+            f"Sheet: `{sheet_name}`\n"
+            f"Available sheets: {sheet_list}\n\n"
+            f"{_format_table_rows(rows)}"
+        )
+        return _file_tool_result(
+            f"Read Excel file `{target.name}`.",
+            preview=preview,
+            data={"sheet": sheet_name, "rows": rows, "sheetNames": sheet_list.split(", ") if sheet_list else []},
+            visited_path=str(target.parent),
+        )
+
+    if suffix == ".docx":
+        Document = _import_docx_document()
+        document = Document(target)
+        content = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text.strip())
+        return _file_tool_result(
+            f"Read Word document `{target.name}`.",
+            preview=f"```text\n{_truncate_text_preview(content)}\n```",
+            data={"path": str(target), "content": _truncate_text_preview(content)},
+            visited_path=str(target.parent),
+        )
+
+    if suffix == ".parquet":
+        pq = _import_pyarrow_parquet()
+        parquet_file = pq.ParquetFile(target)
+        batch = next(parquet_file.iter_batches(batch_size=FILE_TABULAR_PREVIEW_ROWS), None)
+        rows = batch.to_pylist() if batch is not None else []
+        preview = (
+            f"Rows shown: {len(rows)} / {parquet_file.metadata.num_rows}\n\n"
+            f"{_format_table_rows(rows)}"
+        )
+        return _file_tool_result(
+            f"Read Parquet file `{target.name}`.",
+            preview=preview,
+            data={"rows": rows, "totalRows": parquet_file.metadata.num_rows},
+            visited_path=str(target.parent),
+        )
+
+    raise ValueError(f"Unsupported file format `{suffix or 'unknown'}` for read_file.")
+
+
+def read_csv_summary_tool(path: str, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not target.exists() or not target.is_file():
+        raise ValueError(f"File `{target}` does not exist.")
+    if target.suffix.lower() not in {".csv", ".tsv"}:
+        raise ValueError("read_csv_summary only supports `.csv` and `.tsv` files.")
+
+    headers, rows, total_rows = _read_csv_rows(target)
+    preview = (
+        f"Columns: {', '.join(headers) if headers else 'No header'}\n"
+        f"Rows shown: {len(rows)} / {total_rows}\n\n"
+        f"{_format_table_rows(rows)}"
+    )
+    return _file_tool_result(
+        f"Loaded a CSV summary for `{target.name}`.",
+        preview=preview,
+        data={"headers": headers, "rows": rows, "totalRows": total_rows},
+        visited_path=str(target.parent),
+    )
+
+
+def create_directory_tool(path: str, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    target.mkdir(parents=True, exist_ok=True)
+    return _file_tool_result(
+        f"Created directory `{target}`.",
+        preview=f"Directory ready at `{target}`.",
+        visited_path=str(target),
+    )
+
+
+def create_file_tool(path: str, content: str = "", base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if target.exists():
+        raise ValueError(f"File `{target}` already exists.")
+    if target.suffix.lower() not in FILE_MANAGER_TEXT_EXTENSIONS:
+        raise ValueError("create_file only supports text-based file formats.")
+    _ensure_parent_directory(target)
+    target.write_text(str(content), encoding="utf-8")
+    return _file_tool_result(
+        f"Created file `{target.name}`.",
+        preview=f"```text\n{_truncate_text_preview(content)}\n```",
+        visited_path=str(target.parent),
+    )
+
+
+def create_excel_file_tool(
+    path: str,
+    sheet_name: str = "Sheet1",
+    headers: Optional[list[Any]] = None,
+    rows: Optional[list[list[Any]]] = None,
+    base_path: str = "",
+) -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if target.exists():
+        raise ValueError(f"File `{target}` already exists.")
+    if target.suffix.lower() != ".xlsx":
+        raise ValueError("create_excel_file currently supports `.xlsx` files only.")
+    Workbook, _ = _import_openpyxl()
+    _ensure_parent_directory(target)
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = sheet_name or "Sheet1"
+    if headers:
+        worksheet.append(list(headers))
+    for row in rows or []:
+        worksheet.append(list(row))
+    workbook.save(target)
+    return _file_tool_result(
+        f"Created Excel file `{target.name}` with sheet `{worksheet.title}`.",
+        preview=f"Workbook saved to `{target}`.",
+        visited_path=str(target.parent),
+    )
+
+
+def write_file_tool(path: str, content: str, confirmed: bool = False, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if target.suffix.lower() not in FILE_MANAGER_TEXT_EXTENSIONS:
+        raise ValueError("write_file only supports text-based file formats.")
+    existing_content = _read_text_file(target) if target.exists() else ""
+    preview = (
+        f"Target: `{target}`\n"
+        f"Existing size: {len(existing_content)} characters\n"
+        f"New size: {len(str(content))} characters\n\n"
+        f"## New content preview\n```text\n{_truncate_text_preview(str(content))}\n```"
+    )
+    if not confirmed:
+        return _file_tool_result(
+            f"Writing `{target.name}` will overwrite the current content.",
+            preview=preview,
+            visited_path=str(target.parent),
+            requires_confirmation=True,
+            pending_action={
+                "tool_name": "write_file",
+                "tool_input": {"path": path, "content": str(content)},
+            },
+        )
+    _ensure_parent_directory(target)
+    target.write_text(str(content), encoding="utf-8")
+    return _file_tool_result(
+        f"Wrote `{target.name}` successfully.",
+        preview=f"```text\n{_truncate_text_preview(str(content))}\n```",
+        visited_path=str(target.parent),
+    )
+
+
+def _load_excel_for_write(path: Path):
+    _, load_workbook = _import_openpyxl()
+    if not path.exists():
+        raise ValueError(f"Excel file `{path}` does not exist.")
+    if path.suffix.lower() != ".xlsx":
+        raise ValueError("Excel write operations currently support `.xlsx` files only.")
+    return load_workbook(path)
+
+
+def list_excel_sheets_tool(path: str, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not target.exists() or not target.is_file():
+        raise ValueError(f"Excel file `{target}` does not exist.")
+    _, _, sheet_list = _load_excel_sheet_preview(target)
+    preview = "\n".join(f"- `{sheet}`" for sheet in sheet_list.split(", ") if sheet) or "No sheet found."
+    return _file_tool_result(
+        f"Listed sheets for `{target.name}`.",
+        preview=preview,
+        data={"sheets": [sheet for sheet in sheet_list.split(", ") if sheet]},
+        visited_path=str(target.parent),
+    )
+
+
+def read_excel_sheet_tool(path: str, sheet_name: Optional[str] = None, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not target.exists() or not target.is_file():
+        raise ValueError(f"Excel file `{target}` does not exist.")
+    resolved_sheet_name, rows, sheet_list = _load_excel_sheet_preview(target, sheet_name)
+    preview = (
+        f"Sheet: `{resolved_sheet_name}`\n"
+        f"Available sheets: {sheet_list}\n\n"
+        f"{_format_table_rows(rows)}"
+    )
+    return _file_tool_result(
+        f"Read sheet `{resolved_sheet_name}` from `{target.name}`.",
+        preview=preview,
+        data={"sheet": resolved_sheet_name, "rows": rows},
+        visited_path=str(target.parent),
+    )
+
+
+def add_excel_sheet_tool(path: str, sheet_name: str, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    workbook = _load_excel_for_write(target)
+    if sheet_name in workbook.sheetnames:
+        raise ValueError(f"Sheet `{sheet_name}` already exists.")
+    workbook.create_sheet(title=sheet_name)
+    workbook.save(target)
+    return _file_tool_result(
+        f"Added sheet `{sheet_name}` to `{target.name}`.",
+        preview="\n".join(f"- `{sheet}`" for sheet in workbook.sheetnames),
+        visited_path=str(target.parent),
+    )
+
+
+def rename_excel_sheet_tool(path: str, old_name: str, new_name: str, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    workbook = _load_excel_for_write(target)
+    if old_name not in workbook.sheetnames:
+        raise ValueError(f"Sheet `{old_name}` does not exist.")
+    if new_name in workbook.sheetnames:
+        raise ValueError(f"Sheet `{new_name}` already exists.")
+    workbook[old_name].title = new_name
+    workbook.save(target)
+    return _file_tool_result(
+        f"Renamed sheet `{old_name}` to `{new_name}` in `{target.name}`.",
+        preview="\n".join(f"- `{sheet}`" for sheet in workbook.sheetnames),
+        visited_path=str(target.parent),
+    )
+
+
+def write_excel_sheet_tool(
+    path: str,
+    sheet_name: str,
+    headers: Optional[list[Any]] = None,
+    rows: Optional[list[list[Any]]] = None,
+    confirmed: bool = False,
+    base_path: str = "",
+) -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    preview_rows = _normalize_excel_rows(list(headers or []), [list(row) for row in (rows or [])[:10]]) if headers else []
+    preview = (
+        f"Target workbook: `{target.name}`\n"
+        f"Sheet: `{sheet_name}`\n"
+        f"Rows to write: {len(rows or [])}\n\n"
+        f"{_format_table_rows(preview_rows) if preview_rows else 'The sheet will be cleared and rewritten.'}"
+    )
+    if not confirmed:
+        return _file_tool_result(
+            f"Writing sheet `{sheet_name}` will replace its current content.",
+            preview=preview,
+            visited_path=str(target.parent),
+            requires_confirmation=True,
+            pending_action={
+                "tool_name": "write_excel_sheet",
+                "tool_input": {
+                    "path": path,
+                    "sheet_name": sheet_name,
+                    "headers": headers or [],
+                    "rows": rows or [],
+                },
+            },
+        )
+
+    workbook = _load_excel_for_write(target)
+    worksheet = workbook[sheet_name] if sheet_name in workbook.sheetnames else workbook.create_sheet(sheet_name)
+    worksheet.delete_rows(1, worksheet.max_row or 1)
+    if headers:
+        worksheet.append(list(headers))
+    for row in rows or []:
+        worksheet.append(list(row))
+    workbook.save(target)
+    return _file_tool_result(
+        f"Wrote sheet `{sheet_name}` in `{target.name}`.",
+        preview=preview,
+        visited_path=str(target.parent),
+    )
+
+
+def edit_excel_cells_tool(
+    path: str,
+    sheet_name: str,
+    updates: list[dict[str, Any]],
+    confirmed: bool = False,
+    base_path: str = "",
+) -> dict[str, Any]:
+    if not updates:
+        raise ValueError("At least one cell update is required.")
+    target = _resolve_agent_path(path, base_path)
+    preview = "\n".join(
+        f"- `{item.get('cell', '?')}` → `{item.get('value', '')}`"
+        for item in updates[:20]
+    )
+    if not confirmed:
+        return _file_tool_result(
+            f"Editing cells in `{sheet_name}` will modify `{target.name}`.",
+            preview=preview,
+            visited_path=str(target.parent),
+            requires_confirmation=True,
+            pending_action={
+                "tool_name": "edit_excel_cells",
+                "tool_input": {
+                    "path": path,
+                    "sheet_name": sheet_name,
+                    "updates": updates,
+                },
+            },
+        )
+
+    workbook = _load_excel_for_write(target)
+    if sheet_name not in workbook.sheetnames:
+        raise ValueError(f"Sheet `{sheet_name}` does not exist.")
+    worksheet = workbook[sheet_name]
+    for item in updates:
+        cell = str(item.get("cell") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z]+[1-9][0-9]*", cell):
+            raise ValueError(f"Invalid cell reference `{cell}`.")
+        worksheet[cell] = item.get("value")
+    workbook.save(target)
+    return _file_tool_result(
+        f"Updated {len(updates)} cell(s) in `{sheet_name}`.",
+        preview=preview,
+        visited_path=str(target.parent),
+    )
+
+
+def append_excel_rows_tool(path: str, sheet_name: str, rows: list[list[Any]], base_path: str = "") -> dict[str, Any]:
+    if not rows:
+        raise ValueError("At least one row is required.")
+    target = _resolve_agent_path(path, base_path)
+    workbook = _load_excel_for_write(target)
+    if sheet_name not in workbook.sheetnames:
+        raise ValueError(f"Sheet `{sheet_name}` does not exist.")
+    worksheet = workbook[sheet_name]
+    for row in rows:
+        worksheet.append(list(row))
+    workbook.save(target)
+    return _file_tool_result(
+        f"Appended {len(rows)} row(s) to `{sheet_name}`.",
+        preview=f"Sheet `{sheet_name}` now has {worksheet.max_row} row(s).",
+        visited_path=str(target.parent),
+    )
+
+
+def delete_excel_sheet_tool(path: str, sheet_name: str, confirmed: bool = False, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not confirmed:
+        return _file_tool_result(
+            f"Deleting sheet `{sheet_name}` will modify `{target.name}`.",
+            preview=f"Workbook: `{target}`\nSheet to delete: `{sheet_name}`",
+            visited_path=str(target.parent),
+            requires_confirmation=True,
+            pending_action={
+                "tool_name": "delete_excel_sheet",
+                "tool_input": {"path": path, "sheet_name": sheet_name},
+            },
+        )
+
+    workbook = _load_excel_for_write(target)
+    if sheet_name not in workbook.sheetnames:
+        raise ValueError(f"Sheet `{sheet_name}` does not exist.")
+    if len(workbook.sheetnames) == 1:
+        raise ValueError("An Excel workbook must keep at least one sheet.")
+    worksheet = workbook[sheet_name]
+    workbook.remove(worksheet)
+    workbook.save(target)
+    return _file_tool_result(
+        f"Deleted sheet `{sheet_name}` from `{target.name}`.",
+        preview="\n".join(f"- `{sheet}`" for sheet in workbook.sheetnames),
+        visited_path=str(target.parent),
+    )
+
+
+def delete_file_tool(path: str, confirmed: bool = False, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    if not target.exists() or not target.is_file():
+        raise ValueError(f"File `{target}` does not exist.")
+    preview = f"File: `{target}`\nSize: {target.stat().st_size} bytes"
+    if not confirmed:
+        return _file_tool_result(
+            f"Deleting `{target.name}` is destructive.",
+            preview=preview,
+            visited_path=str(target.parent),
+            requires_confirmation=True,
+            pending_action={"tool_name": "delete_file", "tool_input": {"path": path}},
+        )
+    target.unlink()
+    return _file_tool_result(
+        f"Deleted file `{target.name}`.",
+        preview=preview,
+        visited_path=str(target.parent),
+    )
+
+
+def delete_directory_tool(path: str, recursive: bool = False, confirmed: bool = False, base_path: str = "") -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    sandbox_root = Path(base_path).expanduser().resolve() if base_path else None
+    if sandbox_root and target == sandbox_root:
+        raise ValueError("Deleting the configured base_path root is blocked for safety.")
+    if not target.exists() or not target.is_dir():
+        raise ValueError(f"Directory `{target}` does not exist.")
+    child_count = sum(1 for _ in target.iterdir())
+    preview = f"Directory: `{target}`\nEntries inside: {child_count}\nRecursive: {recursive}"
+    if not confirmed:
+        return _file_tool_result(
+            f"Deleting directory `{target.name}` is destructive.",
+            preview=preview,
+            visited_path=str(target.parent),
+            requires_confirmation=True,
+            pending_action={
+                "tool_name": "delete_directory",
+                "tool_input": {"path": path, "recursive": recursive},
+            },
+        )
+    if recursive:
+        shutil.rmtree(target)
+    else:
+        target.rmdir()
+    return _file_tool_result(
+        f"Deleted directory `{target.name}`.",
+        preview=preview,
+        visited_path=str(target.parent),
+    )
+
+
+def move_file_tool(source_path: str, destination_path: str, confirmed: bool = False, base_path: str = "") -> dict[str, Any]:
+    source = _resolve_agent_path(source_path, base_path)
+    destination = _resolve_agent_path(destination_path, base_path)
+    if not source.exists() or not source.is_file():
+        raise ValueError(f"Source file `{source}` does not exist.")
+    preview = (
+        f"Source: `{source}`\n"
+        f"Destination: `{destination}`\n"
+        f"Destination exists: {destination.exists()}"
+    )
+    if not confirmed:
+        return _file_tool_result(
+            f"Moving `{source.name}` will change the filesystem state.",
+            preview=preview,
+            visited_path=str(source.parent),
+            requires_confirmation=True,
+            pending_action={
+                "tool_name": "move_file",
+                "tool_input": {"source_path": source_path, "destination_path": destination_path},
+            },
+        )
+    _ensure_parent_directory(destination)
+    if destination.exists():
+        if destination.is_dir():
+            raise ValueError("Destination already exists and is a directory.")
+        destination.unlink()
+    shutil.move(str(source), str(destination))
+    return _file_tool_result(
+        f"Moved `{source.name}` to `{destination}`.",
+        preview=preview,
+        visited_path=str(destination.parent),
+    )
+
+
+FILE_MANAGER_TOOLS: dict[str, dict[str, Any]] = {
+    "list_directory": {
+        "description": "List files and folders in a directory.",
+        "parameters": {"path": "string, default '.'", "recursive": "boolean, default false"},
+        "handler": list_directory_tool,
+    },
+    "get_file_info": {
+        "description": "Get metadata for a file or directory.",
+        "parameters": {"path": "string"},
+        "handler": get_file_info_tool,
+    },
+    "search_files": {
+        "description": "Search files by name and, for text files, by content.",
+        "parameters": {"path": "string, default '.'", "query": "string", "recursive": "boolean, default true"},
+        "handler": search_files_tool,
+    },
+    "read_file": {
+        "description": "Read text, Word, Parquet, CSV, TSV, XLSX, or XLS content.",
+        "parameters": {"path": "string"},
+        "handler": read_file_tool,
+    },
+    "read_csv_summary": {
+        "description": "Read a CSV or TSV file and summarize up to 50 rows.",
+        "parameters": {"path": "string"},
+        "handler": read_csv_summary_tool,
+    },
+    "create_directory": {
+        "description": "Create a directory.",
+        "parameters": {"path": "string"},
+        "handler": create_directory_tool,
+    },
+    "create_file": {
+        "description": "Create a new text file.",
+        "parameters": {"path": "string", "content": "string, optional"},
+        "handler": create_file_tool,
+    },
+    "create_excel_file": {
+        "description": "Create a new XLSX workbook.",
+        "parameters": {"path": "string ending with .xlsx", "sheet_name": "string, optional", "headers": "array, optional", "rows": "2D array, optional"},
+        "handler": create_excel_file_tool,
+    },
+    "write_file": {
+        "description": "Overwrite a text file. Requires confirmation first.",
+        "parameters": {"path": "string", "content": "string", "confirmed": "boolean, default false"},
+        "handler": write_file_tool,
+    },
+    "write_excel_sheet": {
+        "description": "Overwrite an XLSX sheet with new rows. Requires confirmation first.",
+        "parameters": {"path": "string", "sheet_name": "string", "headers": "array, optional", "rows": "2D array, optional", "confirmed": "boolean, default false"},
+        "handler": write_excel_sheet_tool,
+    },
+    "edit_excel_cells": {
+        "description": "Edit specific XLSX cells. Requires confirmation first.",
+        "parameters": {"path": "string", "sheet_name": "string", "updates": "array of {cell, value}", "confirmed": "boolean, default false"},
+        "handler": edit_excel_cells_tool,
+    },
+    "append_excel_rows": {
+        "description": "Append rows to an existing XLSX sheet.",
+        "parameters": {"path": "string", "sheet_name": "string", "rows": "2D array"},
+        "handler": append_excel_rows_tool,
+    },
+    "delete_file": {
+        "description": "Delete a file. Requires confirmation first.",
+        "parameters": {"path": "string", "confirmed": "boolean, default false"},
+        "handler": delete_file_tool,
+    },
+    "delete_directory": {
+        "description": "Delete a directory. Requires confirmation first.",
+        "parameters": {"path": "string", "recursive": "boolean, default false", "confirmed": "boolean, default false"},
+        "handler": delete_directory_tool,
+    },
+    "delete_excel_sheet": {
+        "description": "Delete an XLSX sheet. Requires confirmation first.",
+        "parameters": {"path": "string", "sheet_name": "string", "confirmed": "boolean, default false"},
+        "handler": delete_excel_sheet_tool,
+    },
+    "list_excel_sheets": {
+        "description": "List sheets inside an Excel file.",
+        "parameters": {"path": "string"},
+        "handler": list_excel_sheets_tool,
+    },
+    "read_excel_sheet": {
+        "description": "Read up to 50 rows from an Excel sheet.",
+        "parameters": {"path": "string", "sheet_name": "string, optional"},
+        "handler": read_excel_sheet_tool,
+    },
+    "add_excel_sheet": {
+        "description": "Add a new sheet to an XLSX workbook.",
+        "parameters": {"path": "string", "sheet_name": "string"},
+        "handler": add_excel_sheet_tool,
+    },
+    "rename_excel_sheet": {
+        "description": "Rename a sheet inside an XLSX workbook.",
+        "parameters": {"path": "string", "old_name": "string", "new_name": "string"},
+        "handler": rename_excel_sheet_tool,
+    },
+    "move_file": {
+        "description": "Move a file to another location. Requires confirmation first.",
+        "parameters": {"source_path": "string", "destination_path": "string", "confirmed": "boolean, default false"},
+        "handler": move_file_tool,
+    },
+}
+
+
+def _file_manager_tool_manifest() -> str:
+    lines = []
+    for tool_name, tool_spec in FILE_MANAGER_TOOLS.items():
+        lines.append(f"- {tool_name}: {tool_spec['description']}")
+        lines.append("  Parameters:")
+        for key, value in tool_spec["parameters"].items():
+            lines.append(f"    - {key}: {value}")
+    return "\n".join(lines)
+
+
+def execute_file_manager_tool(tool_name: str, tool_input: dict[str, Any], base_path: str = "") -> dict[str, Any]:
+    if tool_name not in FILE_MANAGER_TOOLS:
+        raise ValueError(f"Unknown file-management tool `{tool_name}`.")
+    handler = FILE_MANAGER_TOOLS[tool_name]["handler"]
+    safe_input = dict(tool_input or {})
+    safe_input["base_path"] = base_path
+    return handler(**safe_input)
+
+
+async def plan_file_manager_step(
+    user_message: str,
+    history: list[dict[str, Any]],
+    scratchpad: list[dict[str, Any]],
+    base_path: str,
+    system_prompt: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    trimmed_history = _normalized_history_messages(
+        history,
+        current_message=user_message,
+        max_steps=CHAT_MEMORY_MAX_STEPS,
+    )
+    prompt = f"""
+You are a ReAct-style file management agent.
+Reply in English.
+You must either:
+1. return a tool action, or
+2. return a final answer.
+
+Return JSON only with this exact shape:
+{{
+  "reasoning": "short internal reasoning",
+  "action": "tool" | "final",
+  "tool_name": "list_directory",
+  "tool_input": {{"path": "."}},
+  "final_answer": "final answer when action is final"
+}}
+
+Rules:
+- Never invent filesystem state. Use tools whenever the answer depends on the actual files.
+- Use only one tool at a time.
+- For overwrite, delete, and move actions, call the tool with confirmed=false first.
+- Prefer short answers.
+- If the task is already complete, return action="final".
+- The configured sandbox base_path is: {base_path or "not set"}.
+- If you need to inspect files before acting, do that first.
+
+System prompt:
+{system_prompt}
+
+Available tools:
+{_file_manager_tool_manifest()}
+
+Recent conversation:
+{json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
+
+Scratchpad from this request:
+{json.dumps(scratchpad, ensure_ascii=False, indent=2)}
+
+Current user request:
+{user_message}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    action = str(parsed.get("action", "") or "").strip().lower()
+    return {
+        "reasoning": str(parsed.get("reasoning", "") or "").strip(),
+        "action": action,
+        "tool_name": str(parsed.get("tool_name", "") or "").strip(),
+        "tool_input": parsed.get("tool_input") if isinstance(parsed.get("tool_input"), dict) else {},
+        "final_answer": str(parsed.get("final_answer", "") or "").strip(),
+    }
+
+
+def _default_file_manager_state() -> dict[str, Any]:
+    return {
+        "pending_confirmation": None,
+        "last_tool_result": "",
+        "last_visited_path": "",
+    }
+
+
+def _normalize_file_manager_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_file_manager_state()
+    if not isinstance(payload, dict):
+        return state
+
+    pending = payload.get("pending_confirmation") or payload.get("pendingConfirmation")
+    if isinstance(pending, dict):
+        state["pending_confirmation"] = {
+            "tool_name": str(pending.get("tool_name") or pending.get("toolName") or "").strip(),
+            "tool_input": pending.get("tool_input") if isinstance(pending.get("tool_input"), dict) else pending.get("toolInput") if isinstance(pending.get("toolInput"), dict) else {},
+            "preview": str(pending.get("preview") or "").strip(),
+            "summary": str(pending.get("summary") or "").strip(),
+            "requested_at": str(pending.get("requested_at") or pending.get("requestedAt") or "").strip(),
+        }
+
+    state["last_tool_result"] = str(payload.get("last_tool_result") or payload.get("lastToolResult") or "").strip()
+    state["last_visited_path"] = str(payload.get("last_visited_path") or payload.get("lastVisitedPath") or "").strip()
+    return state
+
+
+def _normalize_file_manager_config(payload: Optional[dict]) -> dict[str, Any]:
+    defaults = DEFAULT_APP_CONFIG["fileManagerConfig"]
+    if not isinstance(payload, dict):
+        return dict(defaults)
+    max_iterations = payload.get("maxIterations") if "maxIterations" in payload else payload.get("max_iterations")
+    return {
+        "basePath": str(payload.get("basePath") or payload.get("base_path") or defaults["basePath"]).strip(),
+        "maxIterations": max(1, min(FILE_MANAGER_MAX_ITERATIONS, int(max_iterations or defaults["maxIterations"]))),
+        "systemPrompt": str(payload.get("systemPrompt") or payload.get("system_prompt") or defaults["systemPrompt"]).strip() or defaults["systemPrompt"],
+    }
+
+
+def _file_manager_confirmation_answer(state: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    pending = state.get("pending_confirmation") or {}
+    preview = str(pending.get("preview") or "").strip()
+    summary = str(pending.get("summary") or "This action requires confirmation.").strip()
+    answer = (
+        "## Confirmation Needed\n"
+        f"{summary}\n\n"
+        f"{preview}\n\n"
+        "Please confirm if you want me to continue."
+    )
+    actions = [
+        {
+            "id": "confirm-file-action",
+            "label": "Confirm",
+            "actionType": "confirm_file_action",
+            "variant": "primary",
+        },
+        {
+            "id": "cancel-file-action",
+            "label": "Cancel",
+            "actionType": "cancel_file_action",
+            "variant": "secondary",
+        },
+    ]
+    return answer, actions
+
+
+MANAGER_SPECIALIST_LABELS = {
+    "clickhouse_query": "ClickHouse Query",
+    "file_management": "File management",
+    "data_quality_tables": "Data quality - Tables",
+}
+MANAGER_CLICKHOUSE_FOLLOWUP_STAGES = {
+    "awaiting_table",
+    "awaiting_field",
+    "awaiting_date",
+    "awaiting_chart_offer",
+    "awaiting_chart_x",
+    "awaiting_chart_y",
+    "awaiting_chart_type",
+}
+
+
+def _default_manager_agent_state() -> dict[str, Any]:
+    return {
+        "active_delegate": None,
+        "last_routing_reason": "",
+        "last_delegate_label": "",
+    }
+
+
+def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    lowered = normalize_choice(value).lower()
+    aliases = {
+        "manager": "manager",
+        "agent manager": "manager",
+        "direct": "manager",
+        "direct answer": "manager",
+        "none": "manager",
+        "clickhouse query": "clickhouse_query",
+        "clickhouse_query": "clickhouse_query",
+        "clickhouse": "clickhouse_query",
+        "sql": "clickhouse_query",
+        "file management": "file_management",
+        "file manager": "file_management",
+        "file_management": "file_management",
+        "filesystem": "file_management",
+        "files": "file_management",
+        "data quality": "data_quality_tables",
+        "data quality tables": "data_quality_tables",
+        "data_quality_tables": "data_quality_tables",
+        "data-quality": "data_quality_tables",
+        "profiling": "data_quality_tables",
+        "quality profiling": "data_quality_tables",
+    }
+    resolved = aliases.get(lowered)
+    if resolved == "manager" and not allow_manager:
+        return None
+    return resolved
+
+
+def _normalize_manager_agent_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_manager_agent_state()
+    if not isinstance(payload, dict):
+        return state
+    state["active_delegate"] = _normalize_manager_delegate_role(
+        payload.get("active_delegate") or payload.get("activeDelegate"),
+        allow_manager=False,
+    )
+    state["last_routing_reason"] = str(
+        payload.get("last_routing_reason") or payload.get("lastRoutingReason") or ""
+    ).strip()
+    state["last_delegate_label"] = str(
+        payload.get("last_delegate_label") or payload.get("lastDelegateLabel") or ""
+    ).strip()
+    return state
+
+
+def _clickhouse_state_needs_followup(state: dict[str, Any]) -> bool:
+    return str(state.get("stage") or "").strip() in MANAGER_CLICKHOUSE_FOLLOWUP_STAGES
+
+
+def _file_manager_state_needs_followup(state: dict[str, Any]) -> bool:
+    return isinstance(state.get("pending_confirmation"), dict)
+
+
+def _manager_specialist_label(role: Optional[str]) -> str:
+    if not role:
+        return "Manager"
+    return MANAGER_SPECIALIST_LABELS.get(role, role.replace("_", " ").title())
+
+
+def _manager_trimmed_history(history: list[dict[str, Any]], limit: int = 10) -> list[dict[str, str]]:
+    return _normalized_history_messages(history, max_steps=limit)
+
+
+def _manager_specialist_state_summary(
+    clickhouse_state: dict[str, Any],
+    file_manager_state: dict[str, Any],
+    data_quality_state: dict[str, Any],
+) -> str:
+    clickhouse_summary = {
+        "stage": clickhouse_state.get("stage") or "idle",
+        "selected_table": clickhouse_state.get("selected_table"),
+        "has_last_sql": bool(clickhouse_state.get("last_sql")),
+        "has_last_rows": bool(clickhouse_state.get("last_result_rows")),
+    }
+    file_summary = {
+        "pending_confirmation": bool(file_manager_state.get("pending_confirmation")),
+        "last_visited_path": file_manager_state.get("last_visited_path") or "",
+        "last_tool_result": _truncate_text_preview(
+            str(file_manager_state.get("last_tool_result") or ""), 240
+        ),
+    }
+    data_quality_summary = {
+        "stage": data_quality_state.get("stage") or "idle",
+        "table": data_quality_state.get("table"),
+        "selected_columns": len(data_quality_state.get("columns") or []),
+        "has_final_answer": bool(data_quality_state.get("final_answer")),
+        "time_column": data_quality_state.get("time_column"),
+    }
+    return json.dumps(
+        {
+            "clickhouse": clickhouse_summary,
+            "file_management": file_summary,
+            "data_quality_tables": data_quality_summary,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _heuristic_manager_delegate(
+    user_message: str,
+    manager_state: dict[str, Any],
+    clickhouse_state: dict[str, Any],
+    file_manager_state: dict[str, Any],
+    data_quality_state: dict[str, Any],
+) -> Optional[tuple[str, str]]:
+    normalized = normalize_choice(user_message).lower()
+    active_delegate = manager_state.get("active_delegate")
+
+    if active_delegate == "file_management" and _file_manager_state_needs_followup(file_manager_state):
+        return "file_management", "Continuing the active file-management confirmation flow."
+    if active_delegate == "clickhouse_query" and _clickhouse_state_needs_followup(clickhouse_state):
+        return "clickhouse_query", "Continuing the active ClickHouse clarification flow."
+    if active_delegate == "data_quality_tables" and _data_quality_state_needs_followup(data_quality_state):
+        return "data_quality_tables", "Continuing the active data-quality setup flow."
+
+    if _file_manager_state_needs_followup(file_manager_state) and (
+        is_affirmative_response(user_message)
+        or is_negative_response(user_message)
+        or normalized in {"confirm", "confirm file action", "cancel", "cancel file action"}
+    ):
+        return "file_management", "The user is answering a pending file-management confirmation."
+
+    if _clickhouse_state_needs_followup(clickhouse_state):
+        return "clickhouse_query", "The user is continuing a ClickHouse clarification step."
+    if _data_quality_state_needs_followup(data_quality_state):
+        return "data_quality_tables", "The user is continuing a data-quality guided step."
+
+    if clickhouse_state.get("last_result_rows") and is_chart_followup_request(user_message):
+        return "clickhouse_query", "The user is continuing the latest ClickHouse result with a chart follow-up."
+
+    file_tokens = [
+        "file",
+        "folder",
+        "directory",
+        "path",
+        "csv",
+        "xlsx",
+        "xls",
+        "excel",
+        "docx",
+        "parquet",
+        "read",
+        "write",
+        "create",
+        "delete",
+        "remove",
+        "move",
+        "rename",
+        "list files",
+        "search files",
+    ]
+    clickhouse_tokens = [
+        "clickhouse",
+        "sql",
+        "table",
+        "column",
+        "database",
+        "query",
+        "chart",
+        "graph",
+        "rows",
+        "count",
+        "metrics",
+        "measure",
+        "aggregation",
+        "trend",
+        "schema",
+    ]
+    data_quality_tokens = [
+        "data quality",
+        "quality score",
+        "profiling",
+        "profile table",
+        "nulls",
+        "missing values",
+        "outliers",
+        "sentinel",
+        "duplicate values",
+        "cardinality",
+        "volumetric",
+        "data drift",
+        "column quality",
+    ]
+
+    file_hit = any(token in normalized for token in file_tokens)
+    clickhouse_hit = any(token in normalized for token in clickhouse_tokens)
+    data_quality_hit = any(token in normalized for token in data_quality_tokens)
+
+    if data_quality_hit and not file_hit:
+        return "data_quality_tables", "The request is explicitly about table profiling or data-quality analysis."
+    if file_hit and not clickhouse_hit and not data_quality_hit:
+        return "file_management", "The request is explicitly about filesystem or spreadsheet actions."
+    if clickhouse_hit and not file_hit and not data_quality_hit:
+        return "clickhouse_query", "The request is explicitly about database querying or charting."
+    return None
+
+
+async def analyze_manager_routing(
+    user_message: str,
+    history: list[dict[str, Any]],
+    manager_state: dict[str, Any],
+    clickhouse_state: dict[str, Any],
+    file_manager_state: dict[str, Any],
+    data_quality_state: dict[str, Any],
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+) -> dict[str, str]:
+    heuristic = _heuristic_manager_delegate(
+        user_message,
+        manager_state,
+        clickhouse_state,
+        file_manager_state,
+        data_quality_state,
+    )
+    if heuristic:
+        return {
+            "delegate": heuristic[0],
+            "reasoning": heuristic[1],
+            "handoff_message": user_message,
+        }
+
+    trimmed_history = _manager_trimmed_history(history)
+    prompt = f"""
+You are the routing brain of the RAGnarok Agent Manager.
+Choose which specialist should handle the next turn.
+
+Available delegates:
+- manager: use this when no specialist tool is needed and the manager can answer directly.
+- clickhouse_query: use this for SQL, schemas, tables, analytics, metrics, database exploration, and charts from ClickHouse data.
+- file_management: use this for filesystem actions, directories, files, CSV/Excel/Word/Parquet handling, create/edit/move/delete operations.
+- data_quality_tables: use this for table profiling, null/outlier/sentinel analysis, column health scoring, and volumetric data-quality checks.
+
+If more than one specialist could be relevant, choose the one that should act first.
+Return JSON only with this exact shape:
+{{
+  "delegate": "manager" | "clickhouse_query" | "file_management" | "data_quality_tables",
+  "reasoning": "short English explanation",
+  "handoff_message": "short English specialist instruction preserving the user's intent"
+}}
+
+Rules:
+- Keep the answer in English.
+- Prefer a specialist when the request depends on real filesystem state or ClickHouse data.
+- Keep `handoff_message` concise and actionable.
+- If the manager can answer directly, set `delegate` to `manager`.
+
+Current manager state:
+{json.dumps(manager_state, ensure_ascii=False, indent=2)}
+
+Current specialist state summary:
+{_manager_specialist_state_summary(clickhouse_state, file_manager_state, data_quality_state)}
+
+Recent conversation:
+{json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
+
+User message:
+{user_message}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    delegate = _normalize_manager_delegate_role(parsed.get("delegate"), allow_manager=True) or "manager"
+    handoff_message = str(parsed.get("handoff_message") or user_message).strip() or user_message
+    reasoning = str(parsed.get("reasoning") or "").strip() or "The manager selected the best available execution path."
+    return {
+        "delegate": delegate,
+        "reasoning": reasoning,
+        "handoff_message": handoff_message,
+    }
+
+
+async def _run_manager_direct_response(
+    history: list[dict[str, Any]],
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+    system_prompt: str,
+) -> str:
+    manager_system_prompt = (
+        f"{system_prompt}\n\n"
+        "You are the RAGnarok Agent Manager. Reply in English. Keep answers concise, "
+        "use specialist agents only when needed, and explain clearly when you can answer directly."
+    ).strip()
+    messages = [{"role": "system", "content": manager_system_prompt}]
+    messages.extend(_manager_trimmed_history(history, limit=12))
+    return await llm_chat(
+        messages,
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+    )
+
+
+def _prefix_agent_steps(
+    steps: list[dict[str, Any]],
+    specialist_role: str,
+) -> list[dict[str, Any]]:
+    label = _manager_specialist_label(specialist_role)
+    prefixed: list[dict[str, Any]] = []
+    for index, step in enumerate(steps):
+        prefixed.append(
+            {
+                **step,
+                "id": str(step.get("id") or f"{specialist_role}-{index}"),
+                "title": f"{label} · {step.get('title') or 'Step'}",
+            }
+        )
+    return prefixed
+
+
 # ── ClickHouse agent LLM helpers ──────────────────────────────────────────────
 
 async def analyze_clickhouse_schema(
     user_request: str,
     table_name: str,
     schema: list[dict[str, str]],
+    conversation_memory: str,
     llm_base_url: str,
     llm_model: str,
     llm_provider: str,
@@ -504,6 +3520,9 @@ Table: {table_name}
 Schema:
 {schema_lines}
 
+Recent conversation memory:
+{conversation_memory}
+
 User request:
 {user_request}
 """.strip()
@@ -535,12 +3554,72 @@ User request:
     }
 
 
+async def analyze_clickhouse_tables(
+    user_request: str,
+    available_tables: list[str],
+    conversation_memory: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    tables_text = "\n".join(f"- {table_name}" for table_name in available_tables[:200])
+    prompt = f"""
+You are routing a user analytics request to the best ClickHouse table.
+Return JSON only with this exact shape:
+{{
+  "selected_table": "orders",
+  "table_candidates": ["orders", "order_items"],
+  "table_choice_required": false,
+  "table_choice_prompt": "Which table should I use for this request?",
+  "reasoning": "short explanation"
+}}
+
+Rules:
+- Use only table names from the provided list.
+- If one table is clearly the best match, set selected_table and table_choice_required to false.
+- If several tables are plausible, set table_choice_required to true and return the best candidates.
+- Keep prompts in English.
+- Prefer not asking the user unless there is a real ambiguity.
+
+Available tables:
+{tables_text}
+
+Recent conversation memory:
+{conversation_memory}
+
+User request:
+{user_request}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    return {
+        "selected_table": str(parsed.get("selected_table", "") or ""),
+        "table_candidates": [
+            item for item in parsed.get("table_candidates", [])
+            if isinstance(item, str)
+        ],
+        "table_choice_required": bool(parsed.get("table_choice_required", False)),
+        "table_choice_prompt": str(parsed.get("table_choice_prompt", "") or ""),
+        "reasoning": str(parsed.get("reasoning", "") or ""),
+    }
+
+
 async def generate_clickhouse_sql(
     user_request: str,
     table_name: str,
     schema: list[dict[str, str]],
     selected_field: Optional[str],
     selected_date_field: Optional[str],
+    conversation_memory: str,
     llm_base_url: str,
     llm_model: str,
     llm_provider: str,
@@ -577,6 +3656,9 @@ Maximum row limit: {query_limit}
 Schema:
 {schema_lines}
 
+Recent conversation memory:
+{conversation_memory}
+
 User request:
 {user_request}
 
@@ -602,6 +3684,7 @@ async def summarize_clickhouse_result(
     executed_sql: str,
     reasoning: str,
     result_rows: list[dict[str, Any]],
+    conversation_memory: str,
     llm_base_url: str,
     llm_model: str,
     llm_provider: str,
@@ -625,6 +3708,8 @@ One short explanation of how the query was chosen.
 
 Context:
 - User request: {user_request}
+- Recent conversation memory:
+{conversation_memory}
 - Planner reasoning: {reasoning or "No extra reasoning provided."}
 - Result rows preview:
 {preview}
@@ -637,6 +3722,1025 @@ Context:
         llm_provider,
         llm_api_key,
     )
+
+
+# ── CrewAI planning helpers ───────────────────────────────────────────────────
+
+PLANNING_ROLE_PROMPTS = {
+    "manager": (
+        "You are an operations manager agent. Produce a concise operational brief with "
+        "clear priorities, risks, and next actions."
+    ),
+    "file_management": (
+        "You are a file management agent. Use filesystem facts only, keep answers concise, "
+        "and never imply that a destructive action ran without explicit confirmation."
+    ),
+}
+
+
+def _safe_zoneinfo(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name or "UTC")
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        text = value.strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _to_iso_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _parse_time_of_day(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", (value or "").strip())
+    if not match:
+        return 9, 0
+    hour = max(0, min(23, int(match.group(1))))
+    minute = max(0, min(59, int(match.group(2))))
+    return hour, minute
+
+
+def _weekday_to_index(day: str) -> int:
+    return PLANNER_WEEKDAYS.index(day) if day in PLANNER_WEEKDAYS else 0
+
+
+def _build_localized_datetime(date_value: datetime, time_of_day: str, timezone_name: str) -> datetime:
+    tz = _safe_zoneinfo(timezone_name)
+    localized = date_value.astimezone(tz)
+    hour, minute = _parse_time_of_day(time_of_day)
+    return localized.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _compute_plan_next_run_at(plan: dict, reference_dt: Optional[datetime] = None) -> Optional[str]:
+    trigger = plan.get("trigger") or {}
+    if plan.get("status") != "active":
+        return None
+
+    now_dt = (reference_dt or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    kind = trigger.get("kind")
+    timezone_name = str(trigger.get("timezone") or "UTC")
+
+    if kind == "once":
+        one_time = _parse_iso_datetime(trigger.get("oneTimeAt"))
+        return _to_iso_datetime(one_time) if one_time and one_time > now_dt else None
+
+    if kind == "daily":
+        candidate = _build_localized_datetime(now_dt, trigger.get("timeOfDay") or "09:00", timezone_name)
+        if candidate.astimezone(timezone.utc) <= now_dt:
+            candidate += timedelta(days=1)
+        return _to_iso_datetime(candidate.astimezone(timezone.utc))
+
+    if kind == "weekly":
+        weekdays = [
+            day for day in trigger.get("weekdays", [])
+            if isinstance(day, str) and day in PLANNER_WEEKDAYS
+        ] or ["mon"]
+        current_local = now_dt.astimezone(_safe_zoneinfo(timezone_name))
+        hour, minute = _parse_time_of_day(trigger.get("timeOfDay") or "09:00")
+        for offset in range(0, 8):
+            candidate_date = current_local + timedelta(days=offset)
+            candidate_day = PLANNER_WEEKDAYS[candidate_date.weekday()]
+            if candidate_day not in weekdays:
+                continue
+            candidate = candidate_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate.astimezone(timezone.utc) > now_dt:
+                return _to_iso_datetime(candidate.astimezone(timezone.utc))
+        fallback = current_local + timedelta(days=7)
+        fallback = fallback.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return _to_iso_datetime(fallback.astimezone(timezone.utc))
+
+    if kind == "interval":
+        interval_minutes = max(1, int(trigger.get("intervalMinutes") or 60))
+        last_run = _parse_iso_datetime(plan.get("lastRunAt"))
+        anchor = last_run or now_dt
+        if not last_run and plan.get("nextRunAt"):
+            return plan.get("nextRunAt")
+        return _to_iso_datetime(anchor + timedelta(minutes=interval_minutes))
+
+    return None
+
+
+def _refresh_planning_plan(plan: dict, reference_dt: Optional[datetime] = None) -> dict:
+    trigger = plan.get("trigger") or {}
+    if trigger.get("kind") in {"clickhouse_watch", "file_watch"}:
+        plan["nextRunAt"] = None
+        return plan
+
+    plan["nextRunAt"] = _compute_plan_next_run_at(plan, reference_dt)
+    return plan
+
+
+def _planning_state_from_db(state: dict) -> dict:
+    planning = _normalize_planning_state(state.get("planning"))
+    for plan in planning["plans"]:
+        _refresh_planning_plan(plan)
+    planning["runs"] = planning["runs"][:PLANNER_MAX_RUNS]
+    return planning
+
+
+def _default_planning_draft(timezone_name: str = "UTC") -> dict:
+    return {
+        "name": "",
+        "prompt": "",
+        "agents": [],
+        "status": "active",
+        "trigger": {
+            "kind": "daily",
+            "timezone": timezone_name or "UTC",
+            "oneTimeAt": "",
+            "timeOfDay": "09:00",
+            "weekdays": ["mon"],
+            "intervalMinutes": 60,
+            "pollMinutes": 5,
+            "watchSql": "",
+            "watchMode": "result_changes",
+            "directory": "",
+            "pattern": "*",
+            "recursive": False,
+        },
+    }
+
+
+def _normalize_planner_agent_role(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    lowered = normalize_choice(value).lower()
+    aliases = {
+        "manager": "manager",
+        "agent manager": "manager",
+        "clickhouse query": "clickhouse_query",
+        "clickhouse_query": "clickhouse_query",
+        "clickhouse": "clickhouse_query",
+        "file management": "file_management",
+        "file manager": "file_management",
+        "file_management": "file_management",
+    }
+    return aliases.get(lowered)
+
+
+def _merge_planning_draft(current_draft: Optional[dict], updates: Optional[dict], timezone_name: str = "UTC") -> dict:
+    current = _default_planning_draft(timezone_name)
+    if isinstance(current_draft, dict):
+        current.update({k: v for k, v in current_draft.items() if k != "trigger"})
+        current["trigger"].update((current_draft.get("trigger") or {}))
+
+    if not isinstance(updates, dict):
+        return current
+
+    if updates.get("name"):
+        current["name"] = str(updates.get("name")).strip()
+    if updates.get("prompt"):
+        current["prompt"] = str(updates.get("prompt")).strip()
+
+    if isinstance(updates.get("agents"), list):
+        existing_agents = [agent for agent in current.get("agents", []) if agent in PLANNER_AGENT_ROLES]
+        for agent in updates["agents"]:
+            normalized_agent = _normalize_planner_agent_role(agent)
+            if normalized_agent and normalized_agent not in existing_agents:
+                existing_agents.append(normalized_agent)
+        current["agents"] = existing_agents
+
+    if updates.get("status") in {"active", "paused"}:
+        current["status"] = updates["status"]
+
+    incoming_trigger = updates.get("trigger")
+    if isinstance(incoming_trigger, dict):
+        for key, value in incoming_trigger.items():
+            if value in (None, "", []):
+                continue
+            current["trigger"][key] = value
+
+    current["trigger"] = _normalize_planning_trigger(current["trigger"])
+    if not current["name"] and current["prompt"]:
+        prompt_words = current["prompt"].split()
+        current["name"] = " ".join(prompt_words[:6])[:64]
+
+    return current
+
+
+def _validate_planning_draft(draft: dict) -> list[str]:
+    missing: list[str] = []
+    if not draft.get("prompt"):
+        missing.append("prompt")
+    if not draft.get("agents"):
+        missing.append("agents")
+
+    trigger = draft.get("trigger") or {}
+    kind = trigger.get("kind")
+    if kind not in PLANNER_TRIGGER_KINDS:
+        missing.append("trigger_kind")
+        return missing
+
+    if kind == "once" and not trigger.get("oneTimeAt"):
+        missing.append("one_time_at")
+    elif kind == "daily" and not trigger.get("timeOfDay"):
+        missing.append("time_of_day")
+    elif kind == "weekly":
+        if not trigger.get("weekdays"):
+            missing.append("weekdays")
+        if not trigger.get("timeOfDay"):
+            missing.append("time_of_day")
+    elif kind == "interval" and int(trigger.get("intervalMinutes") or 0) <= 0:
+        missing.append("interval_minutes")
+    elif kind == "clickhouse_watch":
+        if not trigger.get("watchSql"):
+            missing.append("watch_sql")
+        if int(trigger.get("pollMinutes") or 0) <= 0:
+            missing.append("poll_minutes")
+    elif kind == "file_watch":
+        if not trigger.get("directory"):
+            missing.append("directory")
+        if int(trigger.get("pollMinutes") or 0) <= 0:
+            missing.append("poll_minutes")
+
+    return missing
+
+
+def _planning_missing_prompt(missing_fields: list[str]) -> str:
+    labels = {
+        "prompt": "what the automation should do",
+        "agents": "which existing agent(s) should run",
+        "trigger_kind": "what trigger type you want",
+        "one_time_at": "the exact date and time",
+        "time_of_day": "the time of day",
+        "weekdays": "which weekday(s) should run",
+        "interval_minutes": "the repeat interval in minutes",
+        "watch_sql": "the ClickHouse watch SQL",
+        "poll_minutes": "the polling frequency",
+        "directory": "the directory to watch",
+    }
+    readable = [labels.get(field, field.replace("_", " ")) for field in missing_fields]
+    if not readable:
+        return ""
+    if len(readable) == 1:
+        return readable[0]
+    return ", ".join(readable[:-1]) + f" and {readable[-1]}"
+
+
+def _planning_summary_markdown(draft: dict, missing_fields: list[str]) -> str:
+    trigger = draft.get("trigger") or {}
+    agents = draft.get("agents") or []
+    lines = [
+        "## Draft Summary",
+        f"- Name: {draft.get('name') or 'Untitled plan'}",
+        f"- Agents: {', '.join(agents) if agents else 'Not selected yet'}",
+        f"- Trigger: {trigger.get('kind') or 'Not selected yet'}",
+    ]
+    if trigger.get("kind") == "once":
+        lines.append(f"- Run at: {trigger.get('oneTimeAt') or 'Missing'}")
+    elif trigger.get("kind") == "daily":
+        lines.append(f"- Time: {trigger.get('timeOfDay') or 'Missing'} ({trigger.get('timezone') or 'UTC'})")
+    elif trigger.get("kind") == "weekly":
+        weekdays = ", ".join(trigger.get("weekdays") or []) or "Missing"
+        lines.append(f"- Weekdays: {weekdays}")
+        lines.append(f"- Time: {trigger.get('timeOfDay') or 'Missing'} ({trigger.get('timezone') or 'UTC'})")
+    elif trigger.get("kind") == "interval":
+        lines.append(f"- Every: {trigger.get('intervalMinutes') or 'Missing'} minute(s)")
+    elif trigger.get("kind") == "clickhouse_watch":
+        lines.append(f"- Watch SQL: `{(trigger.get('watchSql') or '').strip()[:100] or 'Missing'}`")
+        lines.append(f"- Polling: every {trigger.get('pollMinutes') or 'Missing'} minute(s)")
+    elif trigger.get("kind") == "file_watch":
+        lines.append(f"- Directory: `{trigger.get('directory') or 'Missing'}`")
+        lines.append(f"- Pattern: `{trigger.get('pattern') or '*'}`")
+        lines.append(f"- Polling: every {trigger.get('pollMinutes') or 'Missing'} minute(s)")
+
+    lines.extend(
+        [
+            "",
+            "## Objective",
+            draft.get("prompt") or "Missing",
+        ]
+    )
+
+    if missing_fields:
+        lines.extend(
+            [
+                "",
+                "## Next Step",
+                f"I still need { _planning_missing_prompt(missing_fields) } before this automation is ready.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Next Step",
+                "The draft is ready. Open the planner form to review and save it.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+async def analyze_planning_request(
+    user_message: str,
+    current_draft: dict,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    prompt = f"""
+You are helping a user configure an automation planner for existing agents.
+Return JSON only with this exact shape:
+{{
+  "draft": {{
+    "name": "Morning anomaly check",
+    "prompt": "Analyze new sales anomalies and write a short operational summary.",
+    "agents": ["manager", "clickhouse_query"],
+    "status": "active",
+    "trigger": {{
+      "kind": "daily",
+      "timezone": "Europe/Paris",
+      "oneTimeAt": "",
+      "timeOfDay": "09:00",
+      "weekdays": ["mon"],
+      "intervalMinutes": 60,
+      "pollMinutes": 5,
+      "watchSql": "",
+      "watchMode": "result_changes",
+      "directory": "",
+      "pattern": "*",
+      "recursive": false
+    }}
+  }},
+  "clarification_question": "short English question if something important is missing",
+  "should_open_form": false,
+  "reasoning": "short explanation"
+}}
+
+Allowed agents: manager, clickhouse_query, file_management.
+Allowed trigger kinds: once, daily, weekly, interval, clickhouse_watch, file_watch.
+Allowed watch modes: returns_rows, count_increases, result_changes.
+Allowed weekdays: mon, tue, wed, thu, fri, sat, sun.
+Keep the answer in English.
+If the user explicitly asks to open the form, set should_open_form to true.
+Do not invent unsupported trigger kinds or agent names.
+Only fill fields when the user clearly implies them or they already exist in the current draft.
+
+Current draft:
+{json.dumps(current_draft, ensure_ascii=False, indent=2)}
+
+User message:
+{user_message}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    return {
+        "draft": parsed.get("draft") if isinstance(parsed.get("draft"), dict) else {},
+        "clarification_question": str(parsed.get("clarification_question", "") or "").strip(),
+        "should_open_form": bool(parsed.get("should_open_form", False)),
+        "reasoning": str(parsed.get("reasoning", "") or "").strip(),
+    }
+
+
+def _planning_state_markdown(planning_state: dict) -> str:
+    plans = planning_state.get("plans", [])
+    if not plans:
+        return (
+            "## CrewAI Planning\n"
+            "No automation has been saved yet.\n\n"
+            "Use natural language to describe a schedule or open the planner form."
+        )
+
+    lines = [
+        "## Existing Plans",
+    ]
+    for plan in plans[:8]:
+        lines.append(
+            f"- **{plan.get('name') or 'Untitled plan'}** · {plan.get('status')} · "
+            f"{(plan.get('trigger') or {}).get('kind', 'unknown')}"
+        )
+    if len(plans) > 8:
+        lines.append(f"- ...and {len(plans) - 8} more plan(s)")
+    return "\n".join(lines)
+
+
+def _planning_trigger_label(trigger_context: dict) -> str:
+    kind = trigger_context.get("kind") or "manual"
+    if kind == "once":
+        return "One-time schedule"
+    if kind == "daily":
+        return "Daily schedule"
+    if kind == "weekly":
+        return "Weekly schedule"
+    if kind == "interval":
+        return "Interval schedule"
+    if kind == "clickhouse_watch":
+        return "ClickHouse watch"
+    if kind == "file_watch":
+        return "File watcher"
+    return "Manual run"
+
+
+def _truncate_json(value: Any, max_chars: int = 2000) -> str:
+    text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
+
+
+def _build_trigger_context_markdown(trigger_context: dict) -> str:
+    kind = trigger_context.get("kind") or "manual"
+    lines = [
+        f"Trigger kind: {kind}",
+        f"Trigger label: {_planning_trigger_label(trigger_context)}",
+    ]
+    if kind == "clickhouse_watch":
+        lines.append("Watch SQL:")
+        lines.append(str(trigger_context.get("sql") or "").strip() or "N/A")
+        preview = trigger_context.get("rows") or []
+        if preview:
+            lines.append("Watch result preview:")
+            lines.append(_truncate_json(preview[:5]))
+    elif kind == "file_watch":
+        files = trigger_context.get("files") or []
+        if files:
+            lines.append("New files:")
+            lines.extend(str(path) for path in files[:10])
+    return "\n".join(lines)
+
+
+def _app_llm_config(app_config: dict) -> dict:
+    return {
+        "llm_base_url": str(app_config.get("baseUrl") or "http://localhost:11434"),
+        "llm_model": str(app_config.get("model") or "llama3"),
+        "llm_provider": str(app_config.get("provider") or "ollama"),
+        "llm_api_key": app_config.get("apiKey") or None,
+    }
+
+
+def _app_clickhouse_config(app_config: dict) -> "ClickHouseConfig":
+    return ClickHouseConfig(
+        host=str(app_config.get("clickhouseHost") or "localhost"),
+        port=int(app_config.get("clickhousePort") or 8123),
+        database=str(app_config.get("clickhouseDatabase") or "default"),
+        username=str(app_config.get("clickhouseUsername") or "default"),
+        password=str(app_config.get("clickhousePassword") or ""),
+        secure=bool(app_config.get("clickhouseSecure", False)),
+        verify_ssl=bool(app_config.get("clickhouseVerifySsl", True)),
+        http_path=str(app_config.get("clickhouseHttpPath") or ""),
+        query_limit=int(app_config.get("clickhouseQueryLimit") or 200),
+    )
+
+
+def _app_file_manager_config(app_config: dict) -> dict[str, Any]:
+    return _normalize_file_manager_config(app_config.get("fileManagerConfig"))
+
+
+async def _run_local_role_agent(
+    role: str,
+    plan: dict,
+    trigger_context: dict,
+    app_config: dict,
+) -> dict[str, Any]:
+    llm_config = _app_llm_config(app_config)
+    system_prompt = PLANNING_ROLE_PROMPTS.get(role, PLANNING_ROLE_PROMPTS["manager"])
+    user_prompt = f"""
+You are executing a scheduled automation for RAGnarok.
+Write the answer in English and keep it concise but useful.
+
+Automation name: {plan.get("name") or "Untitled plan"}
+Automation objective:
+{plan.get("prompt") or ""}
+
+Trigger context:
+{_build_trigger_context_markdown(trigger_context)}
+""".strip()
+
+    content = await llm_chat(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        llm_config["llm_base_url"],
+        llm_config["llm_model"],
+        llm_config["llm_provider"],
+        llm_config["llm_api_key"],
+    )
+    return {"agent": role, "status": "success", "content": content}
+
+
+async def _run_file_management_planning_agent(
+    plan: dict,
+    trigger_context: dict,
+    app_config: dict,
+) -> dict[str, Any]:
+    llm_config = _app_llm_config(app_config)
+    file_manager_config = _app_file_manager_config(app_config)
+
+    request_text = (plan.get("prompt") or "").strip()
+    if trigger_context.get("kind") == "file_watch":
+        files = trigger_context.get("files") or []
+        if files:
+            request_text += (
+                "\n\nAdditional context from the file watcher:\n"
+                + "\n".join(str(path) for path in files[:10])
+            )
+    elif trigger_context.get("kind") == "clickhouse_watch":
+        request_text += (
+            "\n\nAdditional context from the ClickHouse watcher:\n"
+            f"{_truncate_json(trigger_context.get('rows') or [])}"
+        )
+
+    scratchpad: list[dict[str, Any]] = []
+    max_iterations = max(
+        1,
+        min(FILE_MANAGER_MAX_ITERATIONS, int(file_manager_config["maxIterations"])),
+    )
+    last_error = ""
+
+    for _ in range(max_iterations):
+        planned = await plan_file_manager_step(
+            request_text,
+            [],
+            scratchpad,
+            file_manager_config["basePath"],
+            file_manager_config["systemPrompt"],
+            llm_config["llm_base_url"],
+            llm_config["llm_model"],
+            llm_config["llm_provider"],
+            llm_config["llm_api_key"],
+        )
+
+        action = planned.get("action")
+        if action == "final":
+            content = planned.get("final_answer") or "## Answer\nThe scheduled file-management task is complete."
+            return {"agent": "file_management", "status": "success", "content": content}
+
+        tool_name = planned.get("tool_name") or ""
+        tool_input = dict(planned.get("tool_input") or {})
+        if action != "tool" or tool_name not in FILE_MANAGER_TOOLS:
+            last_error = "The file-management planner returned an invalid tool action."
+            scratchpad.append({"type": "error", "error": last_error})
+            continue
+
+        if tool_name in FILE_MANAGER_CONFIRMATION_TOOLS and "confirmed" not in tool_input:
+            tool_input["confirmed"] = False
+
+        try:
+            result = execute_file_manager_tool(tool_name, tool_input, file_manager_config["basePath"])
+        except Exception as exc:
+            last_error = str(exc)
+            scratchpad.append(
+                {
+                    "type": "tool_error",
+                    "tool": tool_name,
+                    "input": tool_input,
+                    "error": last_error,
+                }
+            )
+            continue
+
+        scratchpad.append(
+            {
+                "type": "tool_result",
+                "tool": tool_name,
+                "input": tool_input,
+                "summary": result.get("summary") or "",
+                "preview": result.get("preview") or "",
+            }
+        )
+
+        if result.get("requires_confirmation"):
+            preview = result.get("preview") or ""
+            content = (
+                "## Answer\n"
+                "The scheduled file-management task stopped because it requires explicit user confirmation.\n\n"
+                "## Reasoning\n"
+                f"{result.get('summary') or 'A destructive or overwrite action was requested.'}"
+            )
+            if preview:
+                content += f"\n\n## Preview\n{preview}"
+            return {"agent": "file_management", "status": "error", "content": content}
+
+    content = "## Answer\nThe scheduled file-management task reached its iteration limit."
+    if last_error:
+        content += f"\n\n```text\n{last_error}\n```"
+    return {"agent": "file_management", "status": "error", "content": content}
+
+
+async def _run_clickhouse_planning_agent(
+    plan: dict,
+    trigger_context: dict,
+    app_config: dict,
+) -> dict[str, Any]:
+    clickhouse = _app_clickhouse_config(app_config)
+    llm_config = _app_llm_config(app_config)
+    request_text = (plan.get("prompt") or "").strip()
+    if trigger_context.get("kind") == "clickhouse_watch":
+        request_text += (
+            "\n\nAdditional context from the trigger watch query:\n"
+            f"{_truncate_json(trigger_context.get('rows') or [])}"
+        )
+    elif trigger_context.get("kind") == "file_watch":
+        request_text += (
+            "\n\nAdditional context from new files:\n"
+            + "\n".join(str(path) for path in (trigger_context.get("files") or [])[:10])
+        )
+
+    tables = await list_clickhouse_tables(clickhouse)
+    if not tables:
+        raise ValueError("No ClickHouse tables are available for the scheduled ClickHouse agent.")
+
+    table_analysis = await analyze_clickhouse_tables(
+        request_text,
+        tables,
+        "No recent memory. This is a scheduled execution.",
+        llm_config["llm_base_url"],
+        llm_config["llm_model"],
+        llm_config["llm_provider"],
+        llm_config["llm_api_key"],
+    )
+    matched_selected = match_available_options([table_analysis.get("selected_table", "")], tables)
+    matched_candidates = match_available_options(table_analysis.get("table_candidates", []), tables)
+    selected_table = (
+        (matched_selected[0] if matched_selected else None)
+        or (matched_candidates[0] if matched_candidates else None)
+        or tables[0]
+    )
+
+    schema = await describe_clickhouse_table(clickhouse, selected_table)
+    if not schema:
+        raise ValueError(f"Table '{selected_table}' has no readable schema.")
+
+    analysis = await analyze_clickhouse_schema(
+        request_text,
+        selected_table,
+        schema,
+        "No recent memory. This is a scheduled execution.",
+        llm_config["llm_base_url"],
+        llm_config["llm_model"],
+        llm_config["llm_provider"],
+        llm_config["llm_api_key"],
+    )
+    candidate_fields = match_schema_columns(analysis["field_candidates"], schema)
+    date_fields = match_schema_columns(analysis["date_candidates"], schema) or find_date_columns(schema)
+    selected_field = candidate_fields[0] if candidate_fields else None
+    selected_date_field = date_fields[0] if date_fields else None
+
+    generated = await generate_clickhouse_sql(
+        request_text,
+        selected_table,
+        schema,
+        selected_field,
+        selected_date_field,
+        "No recent memory. This is a scheduled execution.",
+        llm_config["llm_base_url"],
+        llm_config["llm_model"],
+        llm_config["llm_provider"],
+        llm_config["llm_api_key"],
+        clickhouse.query_limit,
+    )
+
+    sql = generated["sql"]
+    if not is_safe_read_only_sql(sql):
+        raise ValueError("Scheduled ClickHouse SQL was rejected because it is not read-only.")
+
+    try:
+        await execute_clickhouse_sql(clickhouse, f"EXPLAIN SYNTAX {sql}", readonly=False, json_format=False)
+        result = await execute_clickhouse_sql(clickhouse, sql)
+    except Exception as first_error:
+        repaired = await generate_clickhouse_sql(
+            request_text,
+            selected_table,
+            schema,
+            selected_field,
+            selected_date_field,
+            "No recent memory. This is a scheduled execution.",
+            llm_config["llm_base_url"],
+            llm_config["llm_model"],
+            llm_config["llm_provider"],
+            llm_config["llm_api_key"],
+            clickhouse.query_limit,
+            error_feedback=str(first_error),
+        )
+        sql = repaired["sql"]
+        if not is_safe_read_only_sql(sql):
+            raise ValueError("Scheduled ClickHouse SQL repair was rejected because it is not read-only.")
+        generated["reasoning"] = repaired["reasoning"] or generated["reasoning"]
+        result = await execute_clickhouse_sql(clickhouse, sql)
+
+    content = await summarize_clickhouse_result(
+        request_text,
+        sql,
+        generated["reasoning"],
+        result.get("data", []),
+        "No recent memory. This is a scheduled execution.",
+        llm_config["llm_base_url"],
+        llm_config["llm_model"],
+        llm_config["llm_provider"],
+        llm_config["llm_api_key"],
+    )
+    return {"agent": "clickhouse_query", "status": "success", "content": content}
+
+
+async def _summarize_planning_outputs(
+    plan: dict,
+    outputs: list[dict[str, Any]],
+    trigger_context: dict,
+    app_config: dict,
+) -> str:
+    llm_config = _app_llm_config(app_config)
+    prompt = f"""
+You are summarizing the result of a scheduled automation.
+Write the answer in English with exactly these markdown sections:
+## Summary
+One concise summary.
+
+## Trigger
+One concise explanation of why it ran.
+
+## Agent Outputs
+One-line summary per agent.
+
+Automation name: {plan.get("name") or "Untitled plan"}
+Objective:
+{plan.get("prompt") or ""}
+
+Trigger context:
+{_build_trigger_context_markdown(trigger_context)}
+
+Outputs:
+{_truncate_json(outputs, max_chars=5000)}
+""".strip()
+
+    return await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_config["llm_base_url"],
+        llm_config["llm_model"],
+        llm_config["llm_provider"],
+        llm_config["llm_api_key"],
+    )
+
+
+def _clickhouse_watch_metric(result: dict[str, Any]) -> Optional[float]:
+    rows = result.get("data") or []
+    if not rows:
+        return 0.0
+    first_row = rows[0]
+    if isinstance(first_row, dict):
+        for value in first_row.values():
+            numeric = normalize_chart_value(value)
+            if numeric is not None:
+                return numeric
+    return float(len(rows))
+
+
+async def _evaluate_clickhouse_watch(plan: dict, app_config: dict, now_dt: datetime) -> Optional[dict[str, Any]]:
+    trigger = plan.get("trigger") or {}
+    runtime = plan.get("runtime") or _default_planning_runtime()
+    last_checked = _parse_iso_datetime(runtime.get("lastCheckedAt"))
+    poll_minutes = max(1, int(trigger.get("pollMinutes") or 5))
+    if last_checked and last_checked + timedelta(minutes=poll_minutes) > now_dt:
+        return None
+
+    sql = clean_sql_text(trigger.get("watchSql") or "")
+    runtime["lastCheckedAt"] = _to_iso_datetime(now_dt)
+    if not sql or not is_safe_read_only_sql(sql):
+        return None
+
+    clickhouse = _app_clickhouse_config(app_config)
+    result = await execute_clickhouse_sql(clickhouse, sql)
+    rows = result.get("data", [])[:10]
+    fingerprint = hashlib.sha256(
+        json.dumps(rows, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    metric = _clickhouse_watch_metric(result)
+
+    previous_fingerprint = str(runtime.get("lastSeenFingerprint") or "")
+    previous_metric = runtime.get("lastSeenMetric")
+    runtime["lastSeenFingerprint"] = fingerprint
+    runtime["lastSeenMetric"] = metric
+    plan["runtime"] = runtime
+
+    watch_mode = trigger.get("watchMode") or "result_changes"
+    if previous_fingerprint == "" and previous_metric is None:
+        return None
+    if watch_mode == "returns_rows":
+        if rows and previous_fingerprint != fingerprint:
+            return {"kind": "clickhouse_watch", "sql": sql, "rows": rows}
+        return None
+    if watch_mode == "count_increases":
+        if (
+            metric is not None
+            and isinstance(previous_metric, (int, float))
+            and metric > previous_metric
+        ):
+            return {"kind": "clickhouse_watch", "sql": sql, "rows": rows, "metric": metric}
+        return None
+    if previous_fingerprint != fingerprint:
+        return {"kind": "clickhouse_watch", "sql": sql, "rows": rows}
+    return None
+
+
+def _scan_directory_files(directory: str, pattern: str, recursive: bool) -> list[str]:
+    root = Path(directory).expanduser()
+    if not root.exists() or not root.is_dir():
+        return []
+
+    matched: list[str] = []
+    iterator = root.rglob("*") if recursive else root.glob("*")
+    for path in iterator:
+        if not path.is_file():
+            continue
+        relative_name = str(path.relative_to(root))
+        if fnmatch.fnmatch(relative_name, pattern) or fnmatch.fnmatch(path.name, pattern):
+            matched.append(str(path.resolve()))
+        if len(matched) >= PLANNER_MAX_KNOWN_FILES:
+            break
+    return sorted(matched)
+
+
+def _evaluate_file_watch(plan: dict, now_dt: datetime) -> Optional[dict[str, Any]]:
+    trigger = plan.get("trigger") or {}
+    runtime = plan.get("runtime") or _default_planning_runtime()
+    last_checked = _parse_iso_datetime(runtime.get("lastCheckedAt"))
+    poll_minutes = max(1, int(trigger.get("pollMinutes") or 5))
+    if last_checked and last_checked + timedelta(minutes=poll_minutes) > now_dt:
+        return None
+
+    runtime["lastCheckedAt"] = _to_iso_datetime(now_dt)
+    current_files = _scan_directory_files(
+        str(trigger.get("directory") or ""),
+        str(trigger.get("pattern") or "*"),
+        bool(trigger.get("recursive", False)),
+    )
+    previous_files = set(runtime.get("knownFiles") or [])
+    runtime["knownFiles"] = current_files[:PLANNER_MAX_KNOWN_FILES]
+    plan["runtime"] = runtime
+
+    if not previous_files:
+        return None
+
+    new_files = [path for path in current_files if path not in previous_files]
+    if new_files:
+        return {"kind": "file_watch", "files": new_files[:20]}
+    return None
+
+
+async def _due_trigger_context(plan: dict, app_config: dict, now_dt: datetime) -> Optional[dict[str, Any]]:
+    trigger = plan.get("trigger") or {}
+    kind = trigger.get("kind")
+    if plan.get("status") != "active":
+        return None
+
+    if kind in {"once", "daily", "weekly", "interval"}:
+        next_run = _parse_iso_datetime(plan.get("nextRunAt"))
+        if next_run and next_run <= now_dt:
+            return {"kind": kind}
+        return None
+    if kind == "clickhouse_watch":
+        return await _evaluate_clickhouse_watch(plan, app_config, now_dt)
+    if kind == "file_watch":
+        return _evaluate_file_watch(plan, now_dt)
+    return None
+
+
+async def execute_planning_run(
+    plan_id: str,
+    trigger_context: Optional[dict[str, Any]] = None,
+    manual: bool = False,
+) -> dict[str, Any]:
+    initial_state = await read_db_state()
+    planning = _planning_state_from_db(initial_state)
+    plan = next((item for item in planning["plans"] if item.get("id") == plan_id), None)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Planning job not found.")
+    if plan.get("status") != "active" and not manual:
+        raise HTTPException(status_code=400, detail="The selected planning job is paused.")
+
+    app_config = initial_state.get("config") or {}
+    now_dt = datetime.now(timezone.utc)
+    context = trigger_context or {"kind": "manual"}
+    run_id = uuid.uuid4().hex
+    run_record = {
+        "id": run_id,
+        "planId": plan.get("id"),
+        "planName": plan.get("name") or "Untitled plan",
+        "triggerKind": context.get("kind") or "manual",
+        "triggerLabel": _planning_trigger_label(context),
+        "startedAt": _to_iso_datetime(now_dt),
+        "finishedAt": None,
+        "status": "running",
+        "summary": "",
+        "outputs": [],
+    }
+
+    planning["runs"].insert(0, run_record)
+    planning["runs"] = planning["runs"][:PLANNER_MAX_RUNS]
+    plan["lastStatus"] = "running"
+    initial_state["planning"] = planning
+    await write_db_state(initial_state)
+
+    outputs: list[dict[str, Any]] = []
+    overall_status = "success"
+    try:
+        for agent in plan.get("agents") or []:
+            try:
+                if agent == "clickhouse_query":
+                    output = await _run_clickhouse_planning_agent(plan, context, app_config)
+                elif agent == "file_management":
+                    output = await _run_file_management_planning_agent(plan, context, app_config)
+                else:
+                    output = await _run_local_role_agent(agent, plan, context, app_config)
+            except Exception as agent_error:
+                output = {
+                    "agent": agent,
+                    "status": "error",
+                    "content": f"Agent execution failed: {agent_error}",
+                }
+                overall_status = "error"
+            outputs.append(output)
+
+        summary = await _summarize_planning_outputs(plan, outputs, context, app_config)
+    except Exception as execution_error:
+        overall_status = "error"
+        summary = f"## Summary\nThe automation failed.\n\n## Trigger\n{_planning_trigger_label(context)}\n\n## Agent Outputs\n{execution_error}"
+
+    latest_state = await read_db_state()
+    latest_planning = _planning_state_from_db(latest_state)
+    latest_plan = next((item for item in latest_planning["plans"] if item.get("id") == plan_id), None)
+    latest_run = next((item for item in latest_planning["runs"] if item.get("id") == run_id), None)
+    if not latest_plan or not latest_run:
+        return {"status": overall_status, "summary": summary, "outputs": outputs}
+
+    finished_at = _to_iso_datetime(datetime.now(timezone.utc))
+    latest_run["finishedAt"] = finished_at
+    latest_run["status"] = overall_status
+    latest_run["summary"] = summary
+    latest_run["outputs"] = outputs
+
+    latest_plan["lastRunAt"] = finished_at
+    latest_plan["lastStatus"] = overall_status
+    latest_plan["lastSummary"] = summary
+    if (latest_plan.get("trigger") or {}).get("kind") == "once":
+        latest_plan["status"] = "paused"
+        latest_plan["nextRunAt"] = None
+    else:
+        latest_plan["nextRunAt"] = _compute_plan_next_run_at(latest_plan, datetime.now(timezone.utc))
+
+    latest_state["planning"] = latest_planning
+    await write_db_state(latest_state)
+    return {"status": overall_status, "summary": summary, "outputs": outputs}
+
+
+async def process_planning_jobs() -> None:
+    state = await read_db_state()
+    original_snapshot = json.dumps(
+        _normalize_planning_state(state.get("planning")),
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    planning = _planning_state_from_db(state)
+    now_dt = datetime.now(timezone.utc)
+    app_config = state.get("config") or {}
+    due_runs: list[tuple[str, dict[str, Any]]] = []
+
+    for plan in planning["plans"]:
+        context = await _due_trigger_context(plan, app_config, now_dt)
+        if context:
+            due_runs.append((plan.get("id"), context))
+
+    updated_snapshot = json.dumps(planning, sort_keys=True, ensure_ascii=False, default=str)
+    if updated_snapshot != original_snapshot:
+        state["planning"] = planning
+        await write_db_state(state)
+
+    for plan_id, trigger_context in due_runs:
+        try:
+            await execute_planning_run(plan_id, trigger_context=trigger_context, manual=False)
+        except Exception:
+            continue
+
+
+async def planning_scheduler_loop(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            await process_planning_jobs()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=PLANNER_LOOP_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            continue
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
@@ -729,6 +4833,18 @@ class ClickHouseAgentState(BaseModel):
     selected_date_field: Optional[str] = None
     clarification_prompt: str = ""
     clarification_options: list[str] = Field(default_factory=list)
+    last_sql: str = ""
+    last_result_meta: list[dict] = Field(default_factory=list)
+    last_result_rows: list[dict] = Field(default_factory=list)
+    chart_requested: bool = False
+    chart_suggested: bool = False
+    chart_offer_options: list[str] = Field(default_factory=list)
+    chart_x_options: list[str] = Field(default_factory=list)
+    chart_y_options: list[str] = Field(default_factory=list)
+    chart_type_options: list[str] = Field(default_factory=list)
+    selected_chart_x: Optional[str] = None
+    selected_chart_y: Optional[str] = None
+    selected_chart_type: Optional[str] = None
 
 
 class ClickHouseAgentRequest(BaseModel):
@@ -740,6 +4856,108 @@ class ClickHouseAgentRequest(BaseModel):
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
     agent_state: ClickHouseAgentState = Field(default_factory=ClickHouseAgentState)
+
+
+class ManagerAgentStateModel(BaseModel):
+    active_delegate: Optional[str] = None
+    last_routing_reason: str = ""
+    last_delegate_label: str = ""
+
+
+class FileManagerAgentConfigModel(BaseModel):
+    base_path: str = ""
+    max_iterations: int = 10
+    system_prompt: str = DEFAULT_APP_CONFIG["fileManagerConfig"]["systemPrompt"]
+
+
+class FileManagerAgentStateModel(BaseModel):
+    pending_confirmation: Optional[dict] = None
+    last_tool_result: str = ""
+    last_visited_path: str = ""
+
+
+class FileManagerAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    agent_state: FileManagerAgentStateModel = Field(default_factory=FileManagerAgentStateModel)
+    file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
+
+
+class DataQualityAgentStateModel(BaseModel):
+    stage: str = "idle"
+    table: Optional[str] = None
+    columns: list[str] = Field(default_factory=list)
+    sample_size: int = DATA_QUALITY_DEFAULT_SAMPLE_SIZE
+    row_filter: str = ""
+    time_column: Optional[str] = None
+    db_type: str = "clickhouse"
+    schema_info: list[dict] = Field(default_factory=list)
+    column_stats: dict = Field(default_factory=dict)
+    volumetric_stats: Optional[dict] = None
+    llm_analysis: str = ""
+    final_answer: str = ""
+    agent_id: str = "data_quality_tables"
+    session_id: str = ""
+    last_error: str = ""
+    available_tables: list[str] = Field(default_factory=list)
+    available_columns: list[str] = Field(default_factory=list)
+    date_columns: list[str] = Field(default_factory=list)
+
+
+class DataQualityAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    clickhouse: ClickHouseConfig
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    agent_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
+
+
+class ManagerAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    clickhouse: ClickHouseConfig = Field(default_factory=ClickHouseConfig)
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    system_prompt: str = DEFAULT_APP_CONFIG["systemPrompt"]
+    manager_state: ManagerAgentStateModel = Field(default_factory=ManagerAgentStateModel)
+    clickhouse_state: ClickHouseAgentState = Field(default_factory=ClickHouseAgentState)
+    file_manager_state: FileManagerAgentStateModel = Field(default_factory=FileManagerAgentStateModel)
+    data_quality_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
+    file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
+
+
+class PlanningAgentStateModel(BaseModel):
+    draft: dict = Field(default_factory=lambda: _default_planning_draft("UTC"))
+    missing_fields: list[str] = Field(default_factory=list)
+    last_question: str = ""
+    ready_to_review: bool = False
+
+
+class PlanningChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    agent_state: PlanningAgentStateModel = Field(default_factory=PlanningAgentStateModel)
+
+
+class PlanningPlanRequest(BaseModel):
+    plan: dict
+
+
+class PlanningPlanStatusRequest(BaseModel):
+    status: str
 
 
 class EmbeddingTestRequest(BaseModel):
@@ -774,10 +4992,13 @@ async def get_app_state():
 
 @app.put("/api/db/state")
 async def save_app_state(req: PersistedStateRequest):
+    existing_state = await read_db_state()
     payload = {
+        "schemaVersion": existing_state.get("schemaVersion", 1),
         "config": req.config,
         "conversations": req.conversations,
         "preferences": req.preferences.model_dump(),
+        "planning": existing_state.get("planning", _default_planning_state()),
     }
     return await write_db_state(payload)
 
@@ -799,6 +5020,1367 @@ async def import_app_state(payload: dict):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON payload for DB import.")
     return await write_db_state(payload)
+
+
+@app.get("/api/planning/state")
+async def get_planning_state():
+    state = await read_db_state()
+    planning = _planning_state_from_db(state)
+    if json.dumps(planning, sort_keys=True, ensure_ascii=False, default=str) != json.dumps(
+        _normalize_planning_state(state.get("planning")),
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    ):
+        state["planning"] = planning
+        await write_db_state(state)
+    return planning
+
+
+@app.post("/api/planning/plans")
+async def upsert_planning_plan(req: PlanningPlanRequest):
+    normalized_plan = _normalize_planning_plan(req.plan)
+    if not normalized_plan.get("prompt"):
+        raise HTTPException(status_code=400, detail="A planning job objective is required.")
+    if not normalized_plan.get("agents"):
+        raise HTTPException(status_code=400, detail="Select at least one existing agent.")
+
+    trigger = normalized_plan.get("trigger") or {}
+    kind = trigger.get("kind")
+    if kind == "clickhouse_watch" and not is_safe_read_only_sql(trigger.get("watchSql") or ""):
+        raise HTTPException(status_code=400, detail="The ClickHouse watch SQL must be a safe read-only query.")
+    if kind == "file_watch" and not trigger.get("directory"):
+        raise HTTPException(status_code=400, detail="A directory is required for file watch jobs.")
+
+    state = await read_db_state()
+    planning = _planning_state_from_db(state)
+    now_iso = _utc_now_iso()
+    existing_plan = next((plan for plan in planning["plans"] if plan.get("id") == normalized_plan["id"]), None)
+    if existing_plan:
+        normalized_plan["createdAt"] = existing_plan.get("createdAt") or now_iso
+    else:
+        normalized_plan["createdAt"] = now_iso
+    normalized_plan["updatedAt"] = now_iso
+    normalized_plan["nextRunAt"] = _compute_plan_next_run_at(normalized_plan, datetime.now(timezone.utc))
+    normalized_plan["runtime"] = existing_plan.get("runtime") if existing_plan else _default_planning_runtime()
+    if kind in {"clickhouse_watch", "file_watch"}:
+        normalized_plan["nextRunAt"] = None
+
+    if existing_plan:
+        index = planning["plans"].index(existing_plan)
+        planning["plans"][index] = normalized_plan
+    else:
+        planning["plans"].insert(0, normalized_plan)
+
+    state["planning"] = planning
+    await write_db_state(state)
+    return planning
+
+
+@app.post("/api/planning/plans/{plan_id}/status")
+async def set_planning_plan_status(plan_id: str, req: PlanningPlanStatusRequest):
+    if req.status not in {"active", "paused"}:
+        raise HTTPException(status_code=400, detail="Invalid planning job status.")
+
+    state = await read_db_state()
+    planning = _planning_state_from_db(state)
+    plan = next((item for item in planning["plans"] if item.get("id") == plan_id), None)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Planning job not found.")
+
+    plan["status"] = req.status
+    plan["updatedAt"] = _utc_now_iso()
+    plan["nextRunAt"] = _compute_plan_next_run_at(plan, datetime.now(timezone.utc))
+    if (plan.get("trigger") or {}).get("kind") in {"clickhouse_watch", "file_watch"}:
+        plan["nextRunAt"] = None
+
+    state["planning"] = planning
+    await write_db_state(state)
+    return planning
+
+
+@app.delete("/api/planning/plans/{plan_id}")
+async def delete_planning_plan(plan_id: str):
+    state = await read_db_state()
+    planning = _planning_state_from_db(state)
+    existing = next((item for item in planning["plans"] if item.get("id") == plan_id), None)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Planning job not found.")
+
+    planning["plans"] = [plan for plan in planning["plans"] if plan.get("id") != plan_id]
+    state["planning"] = planning
+    await write_db_state(state)
+    return planning
+
+
+@app.post("/api/planning/plans/{plan_id}/run")
+async def run_planning_plan_now(plan_id: str):
+    await execute_planning_run(plan_id, trigger_context={"kind": "manual"}, manual=True)
+    state = await read_db_state()
+    return _planning_state_from_db(state)
+
+
+@app.post("/api/chat/crewai-planning")
+async def chat_crewai_planning(req: PlanningChatRequest):
+    user_message = (req.message or "").strip()
+    timezone_name = str(
+        ((req.agent_state.draft or {}).get("trigger") or {}).get("timezone") or "UTC"
+    )
+    current_draft = _merge_planning_draft(req.agent_state.draft, None, timezone_name)
+    planning_state = _planning_state_from_db(await read_db_state())
+    open_form_action = {
+        "id": "open-planning-form",
+        "label": "Open planning form",
+        "actionType": "open_planning_form",
+        "variant": "primary",
+    }
+
+    if not user_message:
+        missing_fields = _validate_planning_draft(current_draft)
+        return {
+            "answer": (
+                "## CrewAI Planning\n"
+                "Describe the automation you want in natural language, or open the planner form "
+                "to configure triggers, existing agents, and monitoring rules step by step."
+            ),
+            "agent_state": {
+                "draft": current_draft,
+                "missing_fields": missing_fields,
+                "last_question": "",
+                "ready_to_review": len(missing_fields) == 0,
+            },
+            "actions": [open_form_action],
+            "steps": [
+                {
+                    "id": "planning-ready",
+                    "title": "Planner ready",
+                    "status": "success",
+                    "details": "The planner can work from natural language or from the full-screen form.",
+                }
+            ],
+        }
+
+    lowered = user_message.lower()
+    if any(token in lowered for token in ["reset", "start over", "clear draft"]):
+        fresh_draft = _default_planning_draft(timezone_name)
+        return {
+            "answer": "## CrewAI Planning\nThe planning draft has been reset. Tell me what you want to automate, or open the form.",
+            "agent_state": {
+                "draft": fresh_draft,
+                "missing_fields": _validate_planning_draft(fresh_draft),
+                "last_question": "",
+                "ready_to_review": False,
+            },
+            "actions": [open_form_action],
+            "steps": [
+                {
+                    "id": "planning-reset",
+                    "title": "Reset planning draft",
+                    "status": "success",
+                    "details": "The previous draft was cleared.",
+                }
+            ],
+        }
+
+    if any(token in lowered for token in ["list plans", "show plans", "existing plans", "what plans"]):
+        return {
+            "answer": _planning_state_markdown(planning_state),
+            "agent_state": {
+                "draft": current_draft,
+                "missing_fields": _validate_planning_draft(current_draft),
+                "last_question": "",
+                "ready_to_review": len(_validate_planning_draft(current_draft)) == 0,
+            },
+            "actions": [open_form_action],
+            "steps": [
+                {
+                    "id": "planning-list",
+                    "title": "Loaded existing plans",
+                    "status": "success",
+                    "details": f"Found {len(planning_state.get('plans', []))} saved planning job(s).",
+                }
+            ],
+        }
+
+    if any(token in lowered for token in ["open form", "open planner", "planner form", "show form"]):
+        missing_fields = _validate_planning_draft(current_draft)
+        return {
+            "answer": _planning_summary_markdown(current_draft, missing_fields),
+            "agent_state": {
+                "draft": current_draft,
+                "missing_fields": missing_fields,
+                "last_question": "",
+                "ready_to_review": len(missing_fields) == 0,
+            },
+            "actions": [open_form_action],
+            "steps": [
+                {
+                    "id": "planning-open-form",
+                    "title": "Prepared planner form",
+                    "status": "success",
+                    "details": "The current draft is ready to be reviewed in the planner form.",
+                }
+            ],
+        }
+
+    analysis = await analyze_planning_request(
+        user_message,
+        current_draft,
+        req.llm_base_url,
+        req.llm_model,
+        req.llm_provider,
+        req.llm_api_key,
+    )
+    merged_draft = _merge_planning_draft(current_draft, analysis.get("draft"), timezone_name)
+    missing_fields = _validate_planning_draft(merged_draft)
+    ready_to_review = len(missing_fields) == 0
+    clarification_question = (
+        analysis.get("clarification_question")
+        or (
+            f"Please tell me { _planning_missing_prompt(missing_fields) }."
+            if missing_fields else
+            "The draft is ready. Open the planner form to review and save it."
+        )
+    )
+    answer = (
+        f"{_planning_summary_markdown(merged_draft, missing_fields)}\n\n"
+        "## Guidance\n"
+        f"{clarification_question}"
+    )
+
+    return {
+        "answer": answer,
+        "agent_state": {
+            "draft": merged_draft,
+            "missing_fields": missing_fields,
+            "last_question": clarification_question,
+            "ready_to_review": ready_to_review,
+        },
+        "actions": [open_form_action],
+        "steps": [
+            {
+                "id": "planning-parse",
+                "title": "Parsed planning request",
+                "status": "success",
+                "details": analysis.get("reasoning") or "The local LLM extracted the planning intent into a structured draft.",
+            },
+            {
+                "id": "planning-review",
+                "title": "Draft readiness",
+                "status": "success" if ready_to_review else "running",
+                "details": (
+                    "The draft is complete and ready for form review."
+                    if ready_to_review
+                    else f"Still missing { _planning_missing_prompt(missing_fields) }."
+                ),
+            },
+        ],
+    }
+
+
+@app.post("/api/chat/file-manager-agent")
+async def chat_file_manager_agent(req: FileManagerAgentRequest):
+    user_message = (req.message or "").strip()
+    state = _normalize_file_manager_state(req.agent_state.model_dump())
+    config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+    normalized_choice = normalize_choice(user_message).lower()
+
+    if not user_message:
+        return {
+            "answer": (
+                "## File Management Agent\n"
+                "Ask me to inspect, search, create, edit, move, or delete files.\n\n"
+                f"Current sandbox base path: `{config['basePath'] or 'not restricted'}`"
+            ),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "fm-ready",
+                    "title": "Ready for file operations",
+                    "status": "success",
+                    "details": "The agent is ready to reason over filesystem tasks with tool calls.",
+                }
+            ],
+        }
+
+    if state.get("pending_confirmation"):
+        if is_negative_response(user_message) or normalized_choice in {"cancel", "cancel file action"}:
+            state["pending_confirmation"] = None
+            return {
+                "answer": "## Answer\nThe pending file operation was cancelled.",
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "fm-cancel",
+                        "title": "Cancelled pending action",
+                        "status": "success",
+                        "details": "The destructive or overwrite operation was not executed.",
+                    }
+                ],
+            }
+
+        if is_affirmative_response(user_message) or normalized_choice in {"confirm", "confirm file action"}:
+            pending = state["pending_confirmation"] or {}
+            tool_name = str(pending.get("tool_name") or "").strip()
+            tool_input = dict(pending.get("tool_input") or {})
+            tool_input["confirmed"] = True
+            try:
+                result = execute_file_manager_tool(tool_name, tool_input, config["basePath"])
+            except Exception as exc:
+                state["pending_confirmation"] = None
+                return {
+                    "answer": f"## Answer\nI could not complete the confirmed action.\n\n```text\n{exc}\n```",
+                    "agent_state": state,
+                    "steps": [
+                        {
+                            "id": "fm-confirm-error",
+                            "title": "Confirmed action failed",
+                            "status": "error",
+                            "details": str(exc),
+                        }
+                    ],
+                }
+
+            state["pending_confirmation"] = None
+            state["last_tool_result"] = result["summary"]
+            state["last_visited_path"] = result.get("visited_path") or state.get("last_visited_path", "")
+            preview = result.get("preview") or ""
+            answer = f"## Answer\n{result['summary']}"
+            if preview:
+                answer += f"\n\n## Preview\n{preview}"
+            return {
+                "answer": answer,
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "fm-confirmed-action",
+                        "title": f"Executed `{tool_name}`",
+                        "status": "success",
+                        "details": result["summary"],
+                    }
+                ],
+            }
+
+        answer, actions = _file_manager_confirmation_answer(state)
+        return {
+            "answer": answer,
+            "actions": actions,
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "fm-await-confirmation",
+                    "title": "Waiting for confirmation",
+                    "status": "running",
+                    "details": "The requested file operation needs explicit user confirmation.",
+                }
+            ],
+        }
+
+    scratchpad: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    last_error = ""
+    max_iterations = max(1, min(FILE_MANAGER_MAX_ITERATIONS, int(config["maxIterations"])))
+
+    for iteration in range(max_iterations):
+        planned = await plan_file_manager_step(
+            user_message,
+            req.history,
+            scratchpad,
+            config["basePath"],
+            config["systemPrompt"],
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+        reasoning = planned.get("reasoning") or "The local LLM selected the next best action."
+        action = planned.get("action")
+
+        if action == "final":
+            final_answer = planned.get("final_answer") or "## Answer\nThe file-management task is complete."
+            steps.append(
+                {
+                    "id": f"fm-final-{iteration}",
+                    "title": "Prepared final answer",
+                    "status": "success",
+                    "details": reasoning,
+                }
+            )
+            state["last_tool_result"] = final_answer
+            return {
+                "answer": final_answer,
+                "agent_state": state,
+                "steps": steps,
+            }
+
+        tool_name = planned.get("tool_name") or ""
+        tool_input = dict(planned.get("tool_input") or {})
+        if action != "tool" or tool_name not in FILE_MANAGER_TOOLS:
+            last_error = "The planner returned an invalid tool action."
+            scratchpad.append({"type": "error", "error": last_error})
+            steps.append(
+                {
+                    "id": f"fm-invalid-{iteration}",
+                    "title": "Planner action invalid",
+                    "status": "error",
+                    "details": last_error,
+                }
+            )
+            continue
+
+        if tool_name in FILE_MANAGER_CONFIRMATION_TOOLS and "confirmed" not in tool_input:
+            tool_input["confirmed"] = False
+
+        try:
+            result = execute_file_manager_tool(tool_name, tool_input, config["basePath"])
+        except Exception as exc:
+            last_error = str(exc)
+            scratchpad.append(
+                {
+                    "type": "tool_error",
+                    "tool": tool_name,
+                    "input": tool_input,
+                    "error": last_error,
+                }
+            )
+            steps.append(
+                {
+                    "id": f"fm-tool-error-{iteration}",
+                    "title": f"Tool `{tool_name}` failed",
+                    "status": "error",
+                    "details": last_error,
+                }
+            )
+            continue
+
+        state["last_tool_result"] = result["summary"]
+        state["last_visited_path"] = result.get("visited_path") or state.get("last_visited_path", "")
+        scratchpad.append(
+            {
+                "type": "tool_result",
+                "tool": tool_name,
+                "input": tool_input,
+                "summary": result["summary"],
+                "preview": result.get("preview") or "",
+            }
+        )
+        steps.append(
+            {
+                "id": f"fm-tool-{iteration}",
+                "title": f"Used `{tool_name}`",
+                "status": "success",
+                "details": result["summary"],
+            }
+        )
+
+        if result.get("requires_confirmation"):
+            pending_action = dict(result.get("pending_action") or {})
+            state["pending_confirmation"] = {
+                "tool_name": pending_action.get("tool_name"),
+                "tool_input": pending_action.get("tool_input") or {},
+                "preview": result.get("preview") or "",
+                "summary": result.get("summary") or "",
+                "requested_at": _utc_now_iso(),
+            }
+            answer, actions = _file_manager_confirmation_answer(state)
+            steps.append(
+                {
+                    "id": f"fm-confirm-{iteration}",
+                    "title": "Confirmation required",
+                    "status": "running",
+                    "details": result["summary"],
+                }
+            )
+            return {
+                "answer": answer,
+                "actions": actions,
+                "agent_state": state,
+                "steps": steps,
+            }
+
+    answer = (
+        "## Answer\n"
+        "I reached the file-management iteration limit before I could finish the task."
+    )
+    if last_error:
+        answer += f"\n\n```text\n{last_error}\n```"
+    return {
+        "answer": answer,
+        "agent_state": state,
+        "steps": steps or [
+            {
+                "id": "fm-timeout",
+                "title": "Reached iteration limit",
+                "status": "error",
+                "details": "The agent stopped to avoid an infinite loop.",
+            }
+        ],
+    }
+
+
+@app.post("/api/chat/data-quality-agent")
+async def chat_data_quality_agent(req: DataQualityAgentRequest):
+    user_message = (req.message or "").strip()
+    normalized_choice = normalize_choice(user_message)
+    normalized_lower = normalized_choice.lower()
+    state = _normalize_data_quality_state(req.agent_state.model_dump())
+    state["agent_id"] = "data_quality_tables"
+    state["db_type"] = "clickhouse"
+    state["session_id"] = state.get("session_id") or uuid.uuid4().hex
+    state["last_error"] = ""
+
+    async def _reload_tables(current_state: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await data_quality_schema_node(req.clickhouse, current_state)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"ClickHouse schema discovery failed: {exc}") from exc
+
+    async def _run_data_quality_analysis(current_state: dict[str, Any]) -> dict[str, Any]:
+        execution_state = dict(current_state)
+        steps = [
+            {
+                "id": "dq-schema-node",
+                "title": "schema_node",
+                "status": "success",
+                "details": f"Loaded schema metadata for `{execution_state.get('table')}`.",
+            }
+        ]
+
+        execution_state = await data_quality_stats_node(req.clickhouse, execution_state)
+        steps.append(
+            {
+                "id": "dq-stats-node",
+                "title": "stats_node",
+                "status": "success",
+                "details": f"Profiled {len(execution_state.get('columns') or [])} column(s) with statistical SQL.",
+            }
+        )
+
+        if execution_state.get("time_column"):
+            execution_state = await data_quality_volumetric_node(req.clickhouse, execution_state)
+            steps.append(
+                {
+                    "id": "dq-volumetric-node",
+                    "title": "volumetric_node",
+                    "status": "success",
+                    "details": (
+                        "Computed volumetric patterns for the selected time column."
+                        if execution_state.get("volumetric_stats")
+                        else "Volumetric analysis was requested, but no usable time buckets were found."
+                    ),
+                }
+            )
+
+        llm_analysis = await data_quality_llm_analysis_node(
+            execution_state,
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+        steps.append(
+            {
+                "id": "dq-llm-analysis-node",
+                "title": "llm_analysis_node",
+                "status": "success",
+                "details": "The local LLM scored the dataset and generated recommendations.",
+            }
+        )
+
+        execution_state["final_answer"] = data_quality_synthesizer_node(execution_state, llm_analysis)
+        execution_state["stage"] = "ready"
+        execution_state["last_error"] = ""
+        steps.append(
+            {
+                "id": "dq-synthesizer-node",
+                "title": "synthesizer_node",
+                "status": "success",
+                "details": "Built the final Markdown report in English.",
+            }
+        )
+        return {
+            "answer": execution_state["final_answer"],
+            "agent_state": execution_state,
+            "steps": steps,
+        }
+
+    start_over_requested = any(
+        token in normalized_lower for token in ["start over", "reset", "new analysis", "clear analysis"]
+    )
+    if start_over_requested:
+        state = _default_data_quality_state()
+        state["agent_id"] = "data_quality_tables"
+        state["db_type"] = "clickhouse"
+        state["session_id"] = uuid.uuid4().hex
+
+    state = await _reload_tables(state)
+    if not state.get("available_tables"):
+        raise HTTPException(status_code=400, detail="No tables were found in the configured ClickHouse database.")
+
+    direct_payload = _try_extract_data_quality_payload(user_message)
+    if direct_payload:
+        table_name = str(direct_payload.get("table") or "").strip()
+        if not table_name:
+            raise HTTPException(status_code=400, detail="The structured data-quality payload must include a table.")
+        matched_table = _data_quality_guess_table_from_message(table_name, state["available_tables"])
+        if not matched_table:
+            raise HTTPException(status_code=400, detail=f"Unknown table in the data-quality payload: {table_name}")
+
+        state["table"] = matched_table
+        payload_sample_size = direct_payload.get("sample_size")
+        if isinstance(payload_sample_size, (int, float)):
+            state["sample_size"] = max(0, min(DATA_QUALITY_MAX_SAMPLE_ROWS, int(payload_sample_size)))
+        else:
+            state["sample_size"] = DATA_QUALITY_DEFAULT_SAMPLE_SIZE
+        state["row_filter"] = str(direct_payload.get("row_filter") or "").strip()
+        validation_error = _validate_data_quality_row_filter(state["row_filter"])
+        if validation_error:
+            raise HTTPException(status_code=400, detail=validation_error)
+
+        state = await _reload_tables(state)
+        requested_columns = direct_payload.get("columns")
+        if isinstance(requested_columns, list) and requested_columns:
+            state["columns"] = _match_data_quality_columns(
+                [str(item).strip() for item in requested_columns if isinstance(item, str)],
+                state["schema_info"],
+            )
+            if not state["columns"]:
+                raise HTTPException(status_code=400, detail="None of the requested columns were found in the selected table.")
+        else:
+            state["columns"] = [column["name"] for column in state.get("schema_info") or [] if column.get("name")]
+            if not state["columns"]:
+                raise HTTPException(status_code=400, detail="The selected table has no readable columns.")
+
+        requested_time_column = str(direct_payload.get("time_column") or "").strip()
+        if requested_time_column:
+            matched_time = resolve_user_choice(requested_time_column, state.get("date_columns") or [])
+            if not matched_time:
+                raise HTTPException(status_code=400, detail="The structured time_column must match a date-like column in the selected table.")
+            state["time_column"] = matched_time
+        else:
+            state["time_column"] = None
+
+        return await _run_data_quality_analysis(state)
+
+    if state.get("stage") == "ready" and user_message:
+        state = _default_data_quality_state()
+        state["agent_id"] = "data_quality_tables"
+        state["db_type"] = "clickhouse"
+        state["session_id"] = uuid.uuid4().hex
+        state = await _reload_tables(state)
+
+    table_options = _data_quality_table_options(state)
+
+    if not user_message or normalized_lower in {"start guided setup", "guide me", "guided setup", "start setup", "start"}:
+        state["stage"] = "awaiting_table"
+        answer = append_choice_markdown(
+            _data_quality_intro_markdown(req.clickhouse.database, table_options, len(state["available_tables"])),
+            "Table Selection",
+            "Choose the table you want to profile first.",
+            table_options,
+        )
+        return {
+            "answer": answer,
+            "agent_state": state,
+            "steps": _data_quality_agent_steps(
+                "dq-guided-start",
+                "Started guided setup",
+                "running",
+                f"Loaded {len(state['available_tables'])} table(s) and waiting for the table selection.",
+            ),
+        }
+
+    if not state.get("table"):
+        guessed_table = _data_quality_guess_table_from_message(user_message, state["available_tables"])
+        if guessed_table:
+            state["table"] = guessed_table
+            state["stage"] = "awaiting_columns_mode"
+            state["columns"] = []
+            state["column_stats"] = {}
+            state["volumetric_stats"] = None
+            state["llm_analysis"] = ""
+            state["final_answer"] = ""
+            state["time_column"] = None
+            state = await _reload_tables(state)
+        else:
+            state["stage"] = "awaiting_table"
+            answer = append_choice_markdown(
+                _data_quality_intro_markdown(req.clickhouse.database, table_options, len(state["available_tables"])),
+                "Table Selection",
+                "Choose the table you want to profile first.",
+                table_options,
+            )
+            return {
+                "answer": answer,
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-await-table",
+                    "Waiting for table",
+                    "running",
+                    "The agent needs the target table before it can configure profiling parameters.",
+                ),
+            }
+
+    if state.get("table") and not state.get("schema_info"):
+        state = await _reload_tables(state)
+    if state.get("table") and not state.get("schema_info"):
+        raise HTTPException(status_code=400, detail=f"Table '{state['table']}' has no readable schema.")
+
+    if state.get("stage") == "awaiting_table":
+        selected_table = _data_quality_guess_table_from_message(user_message, state["available_tables"])
+        if not selected_table:
+            return {
+                "answer": append_choice_markdown(
+                    _data_quality_intro_markdown(req.clickhouse.database, table_options, len(state["available_tables"])),
+                    "Table Selection",
+                    "Choose the table you want to profile first.",
+                    table_options,
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-await-table",
+                    "Waiting for table",
+                    "running",
+                    "The selected agent is waiting for the table choice.",
+                ),
+            }
+        state["table"] = selected_table
+        state["stage"] = "awaiting_columns_mode"
+        state["columns"] = []
+        state["column_stats"] = {}
+        state["volumetric_stats"] = None
+        state["llm_analysis"] = ""
+        state["final_answer"] = ""
+        state["time_column"] = None
+        state = await _reload_tables(state)
+
+    guessed_columns = []
+    if state.get("stage") in {"idle", "awaiting_columns_mode"}:
+        guessed_columns = _data_quality_guess_columns_from_message(user_message, state.get("schema_info") or [])
+        if guessed_columns and not state.get("columns"):
+            state["columns"] = guessed_columns
+            state["stage"] = "awaiting_sample_size"
+
+    if state.get("stage") == "awaiting_columns_mode" and not state.get("columns"):
+        column_mode_options = _data_quality_column_mode_options(state)
+        selected_mode = resolve_user_choice(user_message, column_mode_options)
+        if selected_mode == DATA_QUALITY_CUSTOM_COLUMNS_OPTION:
+            state["stage"] = "awaiting_custom_columns"
+            preview_columns = (state.get("available_columns") or [])[:20]
+            answer = (
+                "## Custom Column Selection\n"
+                "Type the exact column names separated by commas or new lines.\n\n"
+                "Available columns preview:\n"
+                + "\n".join(f"- `{column}`" for column in preview_columns)
+            )
+            return {
+                "answer": answer,
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-custom-columns",
+                    "Waiting for custom columns",
+                    "running",
+                    "The user chose to provide a custom column list.",
+                ),
+            }
+
+        if not selected_mode and not guessed_columns:
+            return {
+                "answer": build_choice_markdown(
+                    "Column Scope",
+                    f"I loaded `{len(state.get('available_columns') or [])}` column(s) from `{state['table']}`. Choose the profiling scope.",
+                    column_mode_options,
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-columns-mode",
+                    "Waiting for column scope",
+                    "running",
+                    "The agent is waiting for the user to define which columns should be profiled.",
+                ),
+            }
+
+        if selected_mode:
+            selected_columns = _data_quality_columns_for_mode(selected_mode, state.get("schema_info") or [])
+            if not selected_columns:
+                return {
+                    "answer": (
+                        "## Column Scope\n"
+                        "The selected scope did not resolve to any column in this table. Please choose another option."
+                    ),
+                    "agent_state": state,
+                    "steps": _data_quality_agent_steps(
+                        "dq-columns-empty",
+                        "Column scope empty",
+                        "error",
+                        "The selected column category returned no usable column.",
+                    ),
+                }
+            state["columns"] = selected_columns
+            state["stage"] = "awaiting_sample_size"
+
+    if state.get("stage") == "awaiting_custom_columns":
+        matched_columns = _match_data_quality_columns(
+            _parse_custom_column_input(user_message),
+            state.get("schema_info") or [],
+        )
+        if not matched_columns:
+            preview_columns = (state.get("available_columns") or [])[:20]
+            answer = (
+                "## Custom Column Selection\n"
+                "I could not match those names to the selected table. Please type exact column names separated by commas or new lines.\n\n"
+                "Available columns preview:\n"
+                + "\n".join(f"- `{column}`" for column in preview_columns)
+            )
+            return {
+                "answer": answer,
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-custom-columns",
+                    "Waiting for custom columns",
+                    "running",
+                    "The provided custom columns did not match the table schema.",
+                ),
+            }
+        state["columns"] = matched_columns
+        state["stage"] = "awaiting_sample_size"
+
+    if state.get("stage") == "awaiting_sample_size":
+        sample_options = list(DATA_QUALITY_SAMPLE_OPTIONS.keys()) + [DATA_QUALITY_CUSTOM_SAMPLE_OPTION]
+        selected_sample = resolve_user_choice(user_message, sample_options)
+        if not selected_sample:
+            number_match = re.search(r"\b(\d[\d\s_,]*)\b", user_message)
+            if number_match:
+                parsed_number = int(re.sub(r"[^\d]", "", number_match.group(1)))
+                state["sample_size"] = max(0, min(DATA_QUALITY_MAX_SAMPLE_ROWS, parsed_number))
+                state["stage"] = "awaiting_row_filter"
+                return {
+                    "answer": (
+                        "## Row Filter\n"
+                        "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+                    ),
+                    "agent_state": state,
+                    "steps": _data_quality_agent_steps(
+                        "dq-row-filter",
+                        "Waiting for row filter",
+                        "running",
+                        "The sampling strategy is set, and the agent is waiting for the optional row filter.",
+                    ),
+                }
+            else:
+                return {
+                    "answer": build_choice_markdown(
+                        "Sample Size",
+                        "Choose how many rows should be profiled. Full scans are safety-capped.",
+                        sample_options,
+                    ),
+                    "agent_state": state,
+                    "steps": _data_quality_agent_steps(
+                        "dq-sample",
+                        "Waiting for sample size",
+                        "running",
+                        "The agent is waiting for the sampling strategy.",
+                    ),
+                }
+        elif selected_sample == DATA_QUALITY_CUSTOM_SAMPLE_OPTION:
+            state["stage"] = "awaiting_custom_sample_size"
+            return {
+                "answer": (
+                    "## Custom Sample Size\n"
+                    f"Type the number of rows to profile. Use `0` for a capped full scan up to {DATA_QUALITY_MAX_SAMPLE_ROWS:,} rows."
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-custom-sample",
+                    "Waiting for custom sample size",
+                    "running",
+                    "The user chose to enter a custom sample size.",
+                ),
+            }
+        else:
+            state["sample_size"] = DATA_QUALITY_SAMPLE_OPTIONS[selected_sample]
+            state["stage"] = "awaiting_row_filter"
+            return {
+                "answer": (
+                    "## Row Filter\n"
+                    "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-row-filter",
+                    "Waiting for row filter",
+                    "running",
+                    "The sampling strategy is set, and the agent is waiting for the optional row filter.",
+                ),
+            }
+
+    if state.get("stage") == "awaiting_custom_sample_size":
+        number_match = re.search(r"\b(\d[\d\s_,]*)\b", user_message)
+        if not number_match and normalized_lower not in {"0", "full scan"}:
+            return {
+                "answer": (
+                    "## Custom Sample Size\n"
+                    f"Please enter a numeric row count. Use `0` for a capped full scan up to {DATA_QUALITY_MAX_SAMPLE_ROWS:,} rows."
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-custom-sample",
+                    "Waiting for custom sample size",
+                    "running",
+                    "The custom sample size must be numeric.",
+                ),
+            }
+        parsed_number = 0 if normalized_lower in {"0", "full scan"} else int(re.sub(r"[^\d]", "", number_match.group(1)))
+        state["sample_size"] = max(0, min(DATA_QUALITY_MAX_SAMPLE_ROWS, parsed_number))
+        state["stage"] = "awaiting_row_filter"
+        return {
+            "answer": (
+                "## Row Filter\n"
+                "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+            ),
+            "agent_state": state,
+            "steps": _data_quality_agent_steps(
+                "dq-row-filter",
+                "Waiting for row filter",
+                "running",
+                "The custom sampling strategy is set, and the agent is waiting for the optional row filter.",
+            ),
+        }
+
+    if state.get("stage") == "awaiting_row_filter":
+        if not user_message or normalized_lower in {"skip", "no filter", "without filter", "none", "all rows"}:
+            state["row_filter"] = ""
+            state["stage"] = "awaiting_time_column" if state.get("date_columns") else "awaiting_review"
+        else:
+            validation_error = _validate_data_quality_row_filter(user_message)
+            if validation_error:
+                return {
+                    "answer": (
+                        "## Row Filter\n"
+                        f"{validation_error}\n\n"
+                        "Please type a safe boolean expression, or answer `skip` to profile all rows."
+                    ),
+                    "agent_state": state,
+                    "steps": _data_quality_agent_steps(
+                        "dq-row-filter",
+                        "Waiting for row filter",
+                        "running",
+                        "The proposed row filter did not pass the safety validation.",
+                    ),
+                }
+            state["row_filter"] = user_message.strip()
+            state["stage"] = "awaiting_time_column" if state.get("date_columns") else "awaiting_review"
+
+        if state.get("stage") == "awaiting_time_column":
+            time_options = [DATA_QUALITY_SKIP_TIME_OPTION] + list(state.get("date_columns") or [])
+            return {
+                "answer": build_choice_markdown(
+                    "Volumetric Analysis",
+                    "Choose a time column if you also want a volume-over-time analysis.",
+                    time_options,
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-time-column",
+                    "Waiting for time column",
+                    "running",
+                    "The agent is waiting for the optional volumetric-analysis choice.",
+                ),
+            }
+
+    if state.get("stage") == "awaiting_time_column":
+        time_options = [DATA_QUALITY_SKIP_TIME_OPTION] + list(state.get("date_columns") or [])
+        selected_time = resolve_user_choice(user_message, time_options)
+        if not selected_time:
+            return {
+                "answer": build_choice_markdown(
+                    "Volumetric Analysis",
+                    "Choose a time column if you also want a volume-over-time analysis.",
+                    time_options,
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-time-column",
+                    "Waiting for time column",
+                    "running",
+                    "The agent is waiting for the optional volumetric-analysis choice.",
+                ),
+            }
+        state["time_column"] = None if selected_time == DATA_QUALITY_SKIP_TIME_OPTION else selected_time
+        state["stage"] = "awaiting_review"
+        return {
+            "answer": append_choice_markdown(
+                _data_quality_review_markdown(state),
+                "Review Actions",
+                "Choose the next action for this data-quality run.",
+                DATA_QUALITY_REVIEW_OPTIONS,
+            ),
+            "agent_state": state,
+            "steps": _data_quality_agent_steps(
+                "dq-review",
+                "Ready to launch",
+                "running",
+                "The optional volumetric-analysis choice is complete, and the run is ready for review.",
+            ),
+        }
+
+    if state.get("stage") == "awaiting_review":
+        launch_tokens = {"launch analysis", "run analysis", "launch", "run", "go", "analyze"}
+        selected_review_action = resolve_user_choice(user_message, DATA_QUALITY_REVIEW_OPTIONS)
+        if not selected_review_action and normalized_lower in launch_tokens:
+            selected_review_action = "Launch analysis"
+
+        if selected_review_action == "Launch analysis":
+            return await _run_data_quality_analysis(state)
+        if selected_review_action == "Edit table":
+            state["stage"] = "awaiting_table"
+            return {
+                "answer": append_choice_markdown(
+                    _data_quality_intro_markdown(req.clickhouse.database, table_options, len(state["available_tables"])),
+                    "Table Selection",
+                    "Choose the table you want to profile first.",
+                    table_options,
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-edit-table",
+                    "Editing table",
+                    "running",
+                    "The user chose to change the target table.",
+                ),
+            }
+        if selected_review_action == "Edit columns":
+            state["columns"] = []
+            state["stage"] = "awaiting_columns_mode"
+        elif selected_review_action == "Edit sample size":
+            state["stage"] = "awaiting_sample_size"
+        elif selected_review_action == "Edit row filter":
+            state["stage"] = "awaiting_row_filter"
+        elif selected_review_action == "Edit time column":
+            if state.get("date_columns"):
+                state["stage"] = "awaiting_time_column"
+            else:
+                state["time_column"] = None
+        elif selected_review_action == "Start over":
+            state = _default_data_quality_state()
+            state["agent_id"] = "data_quality_tables"
+            state["db_type"] = "clickhouse"
+            state["session_id"] = uuid.uuid4().hex
+            state = await _reload_tables(state)
+            state["stage"] = "awaiting_table"
+            table_options = _data_quality_table_options(state)
+            return {
+                "answer": append_choice_markdown(
+                    _data_quality_intro_markdown(req.clickhouse.database, table_options, len(state["available_tables"])),
+                    "Table Selection",
+                    "Choose the table you want to profile first.",
+                    table_options,
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-restart",
+                    "Restarted setup",
+                    "running",
+                    "The guided data-quality setup was reset.",
+                ),
+            }
+
+        if state.get("stage") == "awaiting_columns_mode":
+            return {
+                "answer": build_choice_markdown(
+                    "Column Scope",
+                    f"I loaded `{len(state.get('available_columns') or [])}` column(s) from `{state['table']}`. Choose the profiling scope.",
+                    _data_quality_column_mode_options(state),
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-columns-mode",
+                    "Waiting for column scope",
+                    "running",
+                    "The agent is waiting for the user to redefine the profiling scope.",
+                ),
+            }
+        if state.get("stage") == "awaiting_sample_size":
+            return {
+                "answer": build_choice_markdown(
+                    "Sample Size",
+                    "Choose how many rows should be profiled. Full scans are safety-capped.",
+                    list(DATA_QUALITY_SAMPLE_OPTIONS.keys()) + [DATA_QUALITY_CUSTOM_SAMPLE_OPTION],
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-sample",
+                    "Waiting for sample size",
+                    "running",
+                    "The agent is waiting for a new sample size.",
+                ),
+            }
+        if state.get("stage") == "awaiting_row_filter":
+            return {
+                "answer": (
+                    "## Row Filter\n"
+                    "Type a safe boolean expression such as `region = 'FR'`, or answer `skip` to profile all rows."
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-row-filter",
+                    "Waiting for row filter",
+                    "running",
+                    "The agent is waiting for the optional row filter.",
+                ),
+            }
+        if state.get("stage") == "awaiting_time_column":
+            return {
+                "answer": build_choice_markdown(
+                    "Volumetric Analysis",
+                    "Choose a time column if you also want a volume-over-time analysis.",
+                    [DATA_QUALITY_SKIP_TIME_OPTION] + list(state.get("date_columns") or []),
+                ),
+                "agent_state": state,
+                "steps": _data_quality_agent_steps(
+                    "dq-time-column",
+                    "Waiting for time column",
+                    "running",
+                    "The agent is waiting for the optional volumetric-analysis choice.",
+                ),
+            }
+
+        return {
+            "answer": append_choice_markdown(
+                _data_quality_review_markdown(state),
+                "Review Actions",
+                "Choose the next action for this data-quality run.",
+                DATA_QUALITY_REVIEW_OPTIONS,
+            ),
+            "agent_state": state,
+            "steps": _data_quality_agent_steps(
+                "dq-review",
+                "Ready to launch",
+                "running",
+                "The analysis parameters are ready and waiting for the final launch decision.",
+            ),
+        }
+
+    if state.get("columns") and state.get("stage") == "awaiting_sample_size":
+        return {
+            "answer": build_choice_markdown(
+                "Sample Size",
+                "Choose how many rows should be profiled. Full scans are safety-capped.",
+                list(DATA_QUALITY_SAMPLE_OPTIONS.keys()) + [DATA_QUALITY_CUSTOM_SAMPLE_OPTION],
+            ),
+            "agent_state": state,
+            "steps": _data_quality_agent_steps(
+                "dq-sample",
+                "Waiting for sample size",
+                "running",
+                "The agent is waiting for the sampling strategy.",
+            ),
+        }
+
+    state["stage"] = "awaiting_review"
+    return {
+        "answer": append_choice_markdown(
+            _data_quality_review_markdown(state),
+            "Review Actions",
+            "Choose the next action for this data-quality run.",
+            DATA_QUALITY_REVIEW_OPTIONS,
+        ),
+        "agent_state": state,
+        "steps": _data_quality_agent_steps(
+            "dq-review",
+            "Ready to launch",
+            "running",
+            "The analysis parameters are ready and waiting for the final launch decision.",
+        ),
+    }
+
+
+@app.post("/api/chat/manager-agent")
+async def chat_manager_agent(req: ManagerAgentRequest):
+    user_message = (req.message or "").strip()
+    manager_state = _normalize_manager_agent_state(req.manager_state.model_dump())
+    clickhouse_state = req.clickhouse_state.model_dump()
+    file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
+    data_quality_state = _normalize_data_quality_state(req.data_quality_state.model_dump())
+    file_manager_config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+
+    if not user_message:
+        manager_state["active_delegate"] = None
+        return {
+            "answer": (
+                "## Agent Manager\n"
+                "Describe the outcome you want, and I will either answer directly or route the task "
+                "to ClickHouse Query, File management, or Data quality - Tables when a specialist is needed."
+            ),
+            "agent_state": {
+                "manager": manager_state,
+                "clickhouse": clickhouse_state,
+                "fileManager": file_manager_state,
+                "dataQuality": data_quality_state,
+            },
+            "steps": [
+                {
+                    "id": "manager-ready",
+                    "title": "Manager ready",
+                    "status": "success",
+                    "details": "The manager can orchestrate all specialist agents currently available in RAGnarok.",
+                }
+            ],
+        }
+
+    routing = await analyze_manager_routing(
+        user_message,
+        req.history,
+        manager_state,
+        clickhouse_state,
+        file_manager_state,
+        data_quality_state,
+        req.llm_base_url,
+        req.llm_model,
+        req.llm_provider,
+        req.llm_api_key,
+    )
+    delegate = routing["delegate"]
+    manager_state["last_routing_reason"] = routing["reasoning"]
+    manager_state["last_delegate_label"] = _manager_specialist_label(delegate)
+
+    base_steps = [
+        {
+            "id": "manager-analyze",
+            "title": "Analyzed request",
+            "status": "success",
+            "details": routing["reasoning"],
+        }
+    ]
+
+    if delegate == "manager":
+        manager_state["active_delegate"] = None
+        answer = await _run_manager_direct_response(
+            req.history,
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+            req.system_prompt,
+        )
+        return {
+            "answer": answer,
+            "agent_state": {
+                "manager": manager_state,
+                "clickhouse": clickhouse_state,
+                "fileManager": file_manager_state,
+                "dataQuality": data_quality_state,
+            },
+            "steps": base_steps + [
+                {
+                    "id": "manager-direct",
+                    "title": "Answered directly",
+                    "status": "success",
+                    "details": "No specialist tool was needed for this turn.",
+                }
+            ],
+        }
+
+    try:
+        if delegate == "clickhouse_query":
+            delegated = await chat_clickhouse_agent(
+                ClickHouseAgentRequest(
+                    message=routing["handoff_message"],
+                    history=req.history,
+                    clickhouse=req.clickhouse,
+                    llm_base_url=req.llm_base_url,
+                    llm_model=req.llm_model,
+                    llm_api_key=req.llm_api_key,
+                    llm_provider=req.llm_provider,
+                    agent_state=ClickHouseAgentState(**clickhouse_state),
+                )
+            )
+            clickhouse_state = (
+                delegated.get("agent_state")
+                if isinstance(delegated.get("agent_state"), dict)
+                else clickhouse_state
+            )
+            manager_state["active_delegate"] = (
+                "clickhouse_query" if _clickhouse_state_needs_followup(clickhouse_state) else None
+            )
+        elif delegate == "file_management":
+            delegated = await chat_file_manager_agent(
+                FileManagerAgentRequest(
+                    message=routing["handoff_message"],
+                    history=req.history,
+                    llm_base_url=req.llm_base_url,
+                    llm_model=req.llm_model,
+                    llm_api_key=req.llm_api_key,
+                    llm_provider=req.llm_provider,
+                    agent_state=FileManagerAgentStateModel(**file_manager_state),
+                    file_manager_config=FileManagerAgentConfigModel(
+                        base_path=file_manager_config["basePath"],
+                        max_iterations=file_manager_config["maxIterations"],
+                        system_prompt=file_manager_config["systemPrompt"],
+                    ),
+                )
+            )
+            file_manager_state = _normalize_file_manager_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "file_management" if _file_manager_state_needs_followup(file_manager_state) else None
+            )
+        elif delegate == "data_quality_tables":
+            delegated = await chat_data_quality_agent(
+                DataQualityAgentRequest(
+                    message=routing["handoff_message"],
+                    history=req.history,
+                    clickhouse=req.clickhouse,
+                    llm_base_url=req.llm_base_url,
+                    llm_model=req.llm_model,
+                    llm_api_key=req.llm_api_key,
+                    llm_provider=req.llm_provider,
+                    agent_state=DataQualityAgentStateModel(**data_quality_state),
+                )
+            )
+            data_quality_state = _normalize_data_quality_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "data_quality_tables" if _data_quality_state_needs_followup(data_quality_state) else None
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported manager delegate: {delegate}")
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=f"Manager delegation to {_manager_specialist_label(delegate)} failed: {exc.detail}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Manager delegation to {_manager_specialist_label(delegate)} failed: {exc}",
+        ) from exc
+
+    specialist_label = _manager_specialist_label(delegate)
+    specialist_steps = _prefix_agent_steps(delegated.get("steps") or [], delegate)
+    manager_steps = base_steps + [
+        {
+            "id": "manager-route",
+            "title": f"Delegated to {specialist_label}",
+            "status": "running" if manager_state.get("active_delegate") else "success",
+            "details": (
+                "The specialist needs more user input to continue."
+                if manager_state.get("active_delegate")
+                else "The specialist completed its turn and returned the result."
+            ),
+        }
+    ]
+
+    return {
+        "answer": delegated.get("answer") or "## Answer\nThe delegated agent completed its turn.",
+        "actions": delegated.get("actions"),
+        "chart": delegated.get("chart"),
+        "agent_state": {
+            "manager": manager_state,
+            "clickhouse": clickhouse_state,
+            "fileManager": file_manager_state,
+            "dataQuality": data_quality_state,
+        },
+        "steps": manager_steps + specialist_steps,
+    }
 
 
 # ── ClickHouse endpoints ──────────────────────────────────────────────────────
@@ -828,6 +6410,11 @@ def build_choice_markdown(title: str, prompt: str, options: list[str]) -> str:
     return f"## {title}\n{prompt}\n\n{bullet_list}"
 
 
+def append_choice_markdown(base_answer: str, title: str, prompt: str, options: list[str]) -> str:
+    choice = build_choice_markdown(title, prompt, options)
+    return f"{base_answer}\n\n---\n\n{choice}" if base_answer else choice
+
+
 def reset_clickhouse_clarification(state: ClickHouseAgentState) -> None:
     state.clarification_prompt = ""
     state.clarification_options = []
@@ -837,6 +6424,12 @@ def reset_clickhouse_clarification(state: ClickHouseAgentState) -> None:
 async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     state = req.agent_state
     user_message = (req.message or "").strip()
+    memory_anchor = state.pending_request or user_message
+    conversation_memory = _conversation_memory_markdown(
+        req.history,
+        current_message=memory_anchor,
+        max_steps=CHAT_MEMORY_MAX_STEPS,
+    )
 
     try:
         state.available_tables = state.available_tables or await list_clickhouse_tables(req.clickhouse)
@@ -851,20 +6444,245 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         state.selected_table = explicit_table_switch
         state.schema = []
         state.pending_request = ""
-        state.candidate_fields = []
-        state.date_fields = []
-        state.selected_field = None
-        state.selected_date_field = None
+        reset_clickhouse_query_resolution(state)
+        state.stage = "ready"
+
+    if state.stage == "ready" and not state.pending_request and state.last_result_rows and is_chart_followup_request(user_message):
+        state.chart_requested = True
+        state.stage = "awaiting_chart_x"
+
+    chart_flow_cancelled = False
+
+    if state.last_result_rows and state.last_result_meta and (
+        state.chart_requested
+        or state.stage in {"awaiting_chart_offer", "awaiting_chart_x", "awaiting_chart_y", "awaiting_chart_type"}
+    ):
+        chart_context = infer_chart_options(state.last_result_meta, state.last_result_rows)
+        if not chart_context["can_chart"]:
+            reset_clickhouse_chart_state(state)
+            state.stage = "ready"
+        else:
+            state.chart_x_options = state.chart_x_options or chart_context["x_options"]
+            state.chart_y_options = state.chart_y_options or chart_context["y_options"]
+            state.chart_type_options = state.chart_type_options or chart_context["type_options"]
+
+            if state.stage == "awaiting_chart_offer":
+                chart_offer_choice = resolve_user_choice(
+                    user_message,
+                    state.chart_offer_options or [CHART_CREATE_OPTION, CHART_SKIP_OPTION],
+                )
+                if not chart_offer_choice and is_affirmative_response(user_message):
+                    chart_offer_choice = CHART_CREATE_OPTION
+                if not chart_offer_choice and is_negative_response(user_message):
+                    chart_offer_choice = CHART_SKIP_OPTION
+                if chart_offer_choice == CHART_SKIP_OPTION:
+                    reset_clickhouse_chart_state(state)
+                    state.stage = "ready"
+                    return {
+                        "answer": "## Answer\nUnderstood. I will keep the latest result in text form only.",
+                        "agent_state": state.model_dump(),
+                        "steps": [
+                            {
+                                "id": "ch-chart-skip",
+                                "title": "Skipped chart generation",
+                                "status": "success",
+                                "details": "The user chose to keep the tabular/text answer only.",
+                            }
+                        ],
+                    }
+                if chart_offer_choice == CHART_CREATE_OPTION:
+                    state.chart_requested = True
+                    state.stage = "awaiting_chart_x"
+                elif user_message:
+                    reset_clickhouse_chart_state(state)
+                    state.stage = "ready"
+
+            if state.chart_requested or state.stage in {"awaiting_chart_x", "awaiting_chart_y", "awaiting_chart_type"}:
+                requested_chart_type = detect_requested_chart_type(user_message)
+                x_options = state.chart_x_options
+                y_options = [
+                    option for option in state.chart_y_options
+                    if option != state.selected_chart_x
+                ] or state.chart_y_options
+
+                if not state.selected_chart_x:
+                    x_choice = resolve_user_choice(user_message, x_options) if state.stage == "awaiting_chart_x" else None
+                    if len(x_options) == 1:
+                        state.selected_chart_x = x_options[0]
+                    elif x_choice:
+                        state.selected_chart_x = x_choice
+                    elif state.stage == "awaiting_chart_x" and user_message:
+                        reset_clickhouse_chart_state(state)
+                        state.stage = "ready"
+                        chart_flow_cancelled = True
+                    else:
+                        state.stage = "awaiting_chart_x"
+                        return {
+                            "answer": build_choice_markdown(
+                                "Chart X Axis",
+                                "Choose the field to use on the X axis.",
+                                x_options,
+                            ),
+                            "agent_state": state.model_dump(),
+                            "steps": [
+                                {
+                                    "id": "ch-chart-x",
+                                    "title": "Waiting for X axis selection",
+                                    "status": "running",
+                                    "details": "The user must choose which field should drive the horizontal axis.",
+                                }
+                            ],
+                        }
+
+                if chart_flow_cancelled:
+                    pass
+                elif not state.selected_chart_y:
+                    y_choice = resolve_user_choice(user_message, y_options) if state.stage == "awaiting_chart_y" else None
+                    if len(y_options) == 1:
+                        state.selected_chart_y = y_options[0]
+                    elif y_choice:
+                        state.selected_chart_y = y_choice
+                    elif state.stage == "awaiting_chart_y" and user_message:
+                        reset_clickhouse_chart_state(state)
+                        state.stage = "ready"
+                        chart_flow_cancelled = True
+                    else:
+                        state.stage = "awaiting_chart_y"
+                        return {
+                            "answer": build_choice_markdown(
+                                "Chart Y Axis",
+                                "Choose the metric to use on the Y axis.",
+                                y_options,
+                            ),
+                            "agent_state": state.model_dump(),
+                            "steps": [
+                                {
+                                    "id": "ch-chart-y",
+                                    "title": "Waiting for Y axis selection",
+                                    "status": "running",
+                                    "details": "The user must choose the metric to visualize.",
+                                }
+                            ],
+                        }
+
+                if chart_flow_cancelled:
+                    pass
+                elif not state.selected_chart_type:
+                    chart_type_choice = None
+                    if requested_chart_type and CHART_TYPE_LABELS.get(requested_chart_type) in state.chart_type_options:
+                        chart_type_choice = requested_chart_type
+                    elif state.stage == "awaiting_chart_type":
+                        resolved_type_label = resolve_user_choice(user_message, state.chart_type_options)
+                        if resolved_type_label:
+                            chart_type_choice = CHART_TYPE_BY_LABEL.get(resolved_type_label.lower())
+
+                    if len(state.chart_type_options) == 1:
+                        chart_type_choice = CHART_TYPE_BY_LABEL.get(state.chart_type_options[0].lower())
+
+                    if chart_type_choice:
+                        state.selected_chart_type = chart_type_choice
+                    elif state.stage == "awaiting_chart_type" and user_message:
+                        reset_clickhouse_chart_state(state)
+                        state.stage = "ready"
+                        chart_flow_cancelled = True
+                    else:
+                        state.stage = "awaiting_chart_type"
+                        return {
+                            "answer": build_choice_markdown(
+                                "Chart Type",
+                                "Choose the chart type.",
+                                state.chart_type_options,
+                            ),
+                            "agent_state": state.model_dump(),
+                            "steps": [
+                                {
+                                    "id": "ch-chart-type",
+                                    "title": "Waiting for chart type",
+                                    "status": "running",
+                                    "details": "The user must choose how to visualize the selected axes.",
+                                }
+                            ],
+                        }
+
+                if not chart_flow_cancelled:
+                    chart = build_chart(
+                        state.last_result_rows,
+                        state.selected_chart_x,
+                        state.selected_chart_y,
+                        state.selected_chart_type,
+                    )
+                    if not chart:
+                        reset_clickhouse_chart_state(state)
+                        state.stage = "ready"
+                        return {
+                            "answer": (
+                                "## Answer\nI could not build a usable chart from the latest result because "
+                                "the selected axes do not produce enough numeric points."
+                            ),
+                            "agent_state": state.model_dump(),
+                            "steps": [
+                                {
+                                    "id": "ch-chart-failed",
+                                    "title": "Chart generation failed",
+                                    "status": "error",
+                                    "details": "Not enough valid data points remained after filtering null or non-numeric values.",
+                                }
+                            ],
+                        }
+
+                    chart_type_label = CHART_TYPE_LABELS.get(state.selected_chart_type, "Chart")
+                    answer = (
+                        "## Answer\n"
+                        f"Here is the {chart_type_label.lower()} for `{state.selected_chart_y}` by `{state.selected_chart_x}`.\n\n"
+                        "## SQL\n"
+                        f"```sql\n{state.last_sql}\n```\n\n"
+                        "## Reasoning\n"
+                        f"I reused the latest ClickHouse result and plotted `{state.selected_chart_y}` against "
+                        f"`{state.selected_chart_x}` with a {chart_type_label.lower()}."
+                    )
+                    reset_clickhouse_chart_state(state)
+                    state.stage = "ready"
+                    return {
+                        "answer": answer,
+                        "chart": chart,
+                        "agent_state": state.model_dump(),
+                        "steps": [
+                            {
+                                "id": "ch-chart-built",
+                                "title": "Generated chart",
+                                "status": "success",
+                                "details": f"Built a {chart_type_label.lower()} from the latest ClickHouse query result.",
+                            }
+                        ],
+                    }
+
+    if state.stage == "awaiting_table":
+        table_options = state.clarification_options or state.available_tables
+        selected_table = resolve_user_choice(user_message, table_options) or resolve_user_choice(user_message, state.available_tables)
+        if not selected_table:
+            return {
+                "answer": build_choice_markdown(
+                    "Table Clarification",
+                    state.clarification_prompt or "Which table should I use for this request?",
+                    table_options,
+                ),
+                "agent_state": state.model_dump(),
+                "steps": [
+                    {
+                        "id": "ch-await-table",
+                        "title": "Waiting for table selection",
+                        "status": "running",
+                        "details": "Multiple tables remain plausible for the current request.",
+                    }
+                ],
+            }
+        state.selected_table = selected_table
         state.stage = "ready"
         reset_clickhouse_clarification(state)
 
     if state.stage == "ready" and user_message and not explicit_table_switch:
         state.pending_request = user_message
-        state.candidate_fields = []
-        state.date_fields = []
-        state.selected_field = None
-        state.selected_date_field = None
-        reset_clickhouse_clarification(state)
+        reset_clickhouse_query_resolution(state)
 
     if not state.selected_table:
         selected_table = resolve_user_choice(user_message, state.available_tables)
@@ -874,34 +6692,88 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
             reset_clickhouse_clarification(state)
             if not state.pending_request:
                 state.pending_request = ""
+        elif len(state.available_tables) == 1:
+            state.selected_table = state.available_tables[0]
+            state.stage = "ready"
+            reset_clickhouse_clarification(state)
         else:
             if user_message and not state.pending_request:
                 state.pending_request = user_message
-            state.stage = "awaiting_table"
-            return {
-                "answer": build_choice_markdown(
-                    "ClickHouse Query Agent",
-                    "Choose the table you want me to inspect before I build the SQL for your request.",
-                    state.available_tables,
-                ),
-                "agent_state": state.model_dump(),
-                "steps": [
-                    {
-                        "id": "ch-tables",
-                        "title": "Loaded ClickHouse tables",
-                        "status": "success",
-                        "details": f"Found {len(state.available_tables)} table(s) in database `{req.clickhouse.database}`.",
-                    },
-                    {
-                        "id": "ch-await-table",
-                        "title": "Waiting for table selection",
-                        "status": "running",
-                        "details": "The user must choose one table before the agent can inspect the schema.",
-                    },
-                ],
-            }
+            if not state.pending_request:
+                return {
+                    "answer": (
+                        "## ClickHouse Query Agent\n"
+                        "Ask your question directly. I will infer the best table when the intent is clear, "
+                        "and I will only ask you to choose if the request stays ambiguous."
+                    ),
+                    "agent_state": state.model_dump(),
+                    "steps": [
+                        {
+                            "id": "ch-ready",
+                            "title": "Ready for direct query",
+                            "status": "success",
+                            "details": f"Loaded {len(state.available_tables)} table(s) from `{req.clickhouse.database}`.",
+                        }
+                    ],
+                }
 
-    if state.selected_table and not state.pending_request:
+            table_analysis = await analyze_clickhouse_tables(
+                state.pending_request,
+                state.available_tables,
+                conversation_memory,
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+            )
+            matched_candidates = match_available_options(
+                table_analysis["table_candidates"],
+                state.available_tables,
+            )
+            matched_selected_table = match_available_options(
+                [table_analysis["selected_table"]],
+                state.available_tables,
+            )
+
+            if matched_selected_table and not table_analysis["table_choice_required"]:
+                state.selected_table = matched_selected_table[0]
+                state.stage = "ready"
+                reset_clickhouse_clarification(state)
+            elif len(matched_candidates) == 1 and not table_analysis["table_choice_required"]:
+                state.selected_table = matched_candidates[0]
+                state.stage = "ready"
+                reset_clickhouse_clarification(state)
+            else:
+                state.stage = "awaiting_table"
+                state.clarification_options = matched_candidates or state.available_tables
+                state.clarification_prompt = (
+                    table_analysis["table_choice_prompt"]
+                    or "Which table should I use for this request?"
+                )
+                return {
+                    "answer": build_choice_markdown(
+                        "Table Clarification",
+                        state.clarification_prompt,
+                        state.clarification_options,
+                    ),
+                    "agent_state": state.model_dump(),
+                    "steps": [
+                        {
+                            "id": "ch-tables",
+                            "title": "Loaded ClickHouse tables",
+                            "status": "success",
+                            "details": f"Found {len(state.available_tables)} table(s) in database `{req.clickhouse.database}`.",
+                        },
+                        {
+                            "id": "ch-table-routing",
+                            "title": "Need table confirmation",
+                            "status": "running",
+                            "details": table_analysis["reasoning"] or "Several tables look plausible for the current request.",
+                        },
+                    ],
+                }
+
+    if state.selected_table and not state.pending_request and not explicit_table_switch:
         state.pending_request = user_message
 
     if not state.pending_request:
@@ -980,6 +6852,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         state.pending_request,
         state.selected_table,
         state.schema,
+        conversation_memory,
         req.llm_base_url,
         req.llm_model,
         req.llm_provider,
@@ -1057,6 +6930,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         state.schema,
         state.selected_field,
         state.selected_date_field,
+        conversation_memory,
         req.llm_base_url,
         req.llm_model,
         req.llm_provider,
@@ -1078,6 +6952,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
             state.schema,
             state.selected_field,
             state.selected_date_field,
+            conversation_memory,
             req.llm_base_url,
             req.llm_model,
             req.llm_provider,
@@ -1091,18 +6966,113 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         generated["reasoning"] = repaired["reasoning"] or generated["reasoning"]
         result = await execute_clickhouse_sql(req.clickhouse, sql)
 
+    original_request = state.pending_request
     answer = await summarize_clickhouse_result(
-        state.pending_request,
+        original_request,
         sql,
         generated["reasoning"],
         result.get("data", []),
+        conversation_memory,
         req.llm_base_url,
         req.llm_model,
         req.llm_provider,
         req.llm_api_key,
     )
 
-    state.stage = "ready"
+    state.last_sql = sql
+    state.last_result_meta = result.get("meta", [])
+    state.last_result_rows = result.get("data", [])[:200]
+
+    chart_context = infer_chart_options(state.last_result_meta, state.last_result_rows)
+    requested_chart = detect_chart_request(original_request)
+    if chart_context["can_chart"] and (requested_chart or chart_context["recommended"]):
+        reset_clickhouse_chart_state(state)
+        if requested_chart:
+            initialize_chart_selection(
+                state,
+                chart_context["x_options"],
+                chart_context["y_options"],
+                chart_context["type_options"],
+                requested_chart_type=detect_requested_chart_type(original_request),
+            )
+            prompt = next_chart_prompt(state)
+            if prompt:
+                answer = append_choice_markdown(
+                    answer,
+                    prompt["title"],
+                    prompt["prompt"],
+                    prompt["options"],
+                )
+            else:
+                chart = build_chart(
+                    state.last_result_rows,
+                    state.selected_chart_x,
+                    state.selected_chart_y,
+                    state.selected_chart_type,
+                )
+                if chart:
+                    state.stage = "ready"
+                    answer = (
+                        f"{answer}\n\n---\n\n"
+                        "## Visualization\n"
+                        f"I also generated a {CHART_TYPE_LABELS.get(state.selected_chart_type, 'chart').lower()} "
+                        f"for `{state.selected_chart_y}` by `{state.selected_chart_x}`."
+                    )
+                    reset_clickhouse_chart_state(state)
+                    return {
+                        "answer": answer,
+                        "chart": chart,
+                        "agent_state": state.model_dump(),
+                        "sql": sql,
+                        "steps": [
+                            {
+                                "id": "ch-selected-table",
+                                "title": "Selected ClickHouse table",
+                                "status": "success",
+                                "details": f"Using table `{state.selected_table}`.",
+                            },
+                            {
+                                "id": "ch-inspect-schema",
+                                "title": "Inspected schema",
+                                "status": "success",
+                                "details": f"Loaded {len(state.schema)} columns to map the request safely.",
+                            },
+                            {
+                                "id": "ch-generate-sql",
+                                "title": "Generated safe SQL",
+                                "status": "success",
+                                "details": generated["reasoning"] or "Built a read-only ClickHouse query with the configured local LLM.",
+                            },
+                            {
+                                "id": "ch-execute",
+                                "title": "Executed query",
+                                "status": "success",
+                                "details": f"Returned {len(result.get('data', []))} row(s).",
+                            },
+                            {
+                                "id": "ch-chart-auto",
+                                "title": "Generated chart",
+                                "status": "success",
+                                "details": "The chart request had only one clear X/Y/type combination, so it was generated directly.",
+                            },
+                        ],
+                    }
+        else:
+            state.chart_suggested = True
+            state.chart_offer_options = [CHART_CREATE_OPTION, CHART_SKIP_OPTION]
+            state.chart_x_options = chart_context["x_options"]
+            state.chart_y_options = chart_context["y_options"]
+            state.chart_type_options = chart_context["type_options"]
+            state.stage = "awaiting_chart_offer"
+            answer = append_choice_markdown(
+                answer,
+                "Visualization",
+                "This result would work well as a chart. If you want, I can let you choose X, Y, and the chart type.",
+                state.chart_offer_options,
+            )
+
+    if state.stage not in {"awaiting_chart_offer", "awaiting_chart_x", "awaiting_chart_y", "awaiting_chart_type"}:
+        state.stage = "ready"
     state.pending_request = ""
     reset_clickhouse_clarification(state)
 
@@ -1182,12 +7152,17 @@ async def chat_mcp(req: MCPChatRequest):
                 await session.initialize()
                 tools_result = await session.list_tools()
                 openai_tools = [_mcp_tool_to_openai(t) for t in tools_result.tools]
+                memory_history = _normalized_history_messages(
+                    req.history,
+                    current_message=req.message,
+                    max_steps=CHAT_MEMORY_MAX_STEPS,
+                )
 
                 # Build initial messages
                 messages: list[dict] = []
                 if req.system_prompt:
                     messages.append({"role": "system", "content": req.system_prompt})
-                for m in req.history:
+                for m in memory_history:
                     role = "user" if m.get("role") == "user" else "assistant"
                     messages.append({"role": role, "content": m.get("content", "")})
                 messages.append({"role": "user", "content": req.message})
@@ -1472,7 +7447,11 @@ async def ingest_document(req: IngestRequest):
 @app.post("/api/chat/rag")
 async def chat_rag(req: ChatRequest):
     message = req.message
-    history = req.history
+    history = _normalized_history_messages(
+        req.history,
+        current_message=message,
+        max_steps=CHAT_MEMORY_MAX_STEPS,
+    )
 
     # 1. HyDE — generate a hypothetical answer to improve semantic recall
     try:

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, CircleDashed, Loader2, XCircle, BrainCircuit, File, Database, Copy, Check } from "lucide-react";
-import { Message, cn, AgentStep } from "../lib/utils";
+import { Message, cn, AgentStep, ChartSpec, ChatAction } from "../lib/utils";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -11,6 +11,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 interface ChatMessageProps {
   message: Message;
   onCheckboxToggle?: (messageId: string, text: string, checked: boolean) => void;
+  onAction?: (action: ChatAction, message: Message) => void;
   showSteps?: boolean;
 }
 
@@ -41,6 +42,181 @@ function isHtmlContent(content: string): boolean {
   const stripped = content.trim();
   // If it starts with an HTML tag and contains closing tags, treat as HTML
   return /^<[a-zA-Z][\s\S]*>[\s\S]*<\/[a-zA-Z]>/.test(stripped);
+}
+
+function ChartPreview({ chart }: { chart: ChartSpec }) {
+  const width = 760;
+  const height = 280;
+  const margin = { top: 20, right: 20, bottom: 54, left: 52 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const maxPoints = 24;
+  const points = chart.points.slice(0, maxPoints);
+
+  if (points.length < 2) return null;
+
+  const allNumericX = points.every((point) => Number.isFinite(Number(point.x)));
+  const xNumericValues = allNumericX ? points.map((point) => Number(point.x)) : points.map((_, index) => index);
+  const minX = Math.min(...xNumericValues);
+  const maxX = Math.max(...xNumericValues);
+  const yValues = points.map((point) => point.y);
+  const minY = Math.min(0, ...yValues);
+  const maxY = Math.max(...yValues);
+  const safeYSpan = maxY - minY || 1;
+  const safeXSpan = maxX - minX || 1;
+
+  const toX = (value: number) => margin.left + ((value - minX) / safeXSpan) * innerWidth;
+  const toY = (value: number) => margin.top + innerHeight - ((value - minY) / safeYSpan) * innerHeight;
+  const baselineY = toY(0);
+
+  const svgPoints = points.map((point, index) => ({
+    ...point,
+    svgX: toX(xNumericValues[index]),
+    svgY: toY(point.y),
+  }));
+
+  const linePath = svgPoints
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.svgX} ${point.svgY}`)
+    .join(" ");
+  const areaPath = `${linePath} L ${svgPoints[svgPoints.length - 1].svgX} ${baselineY} L ${svgPoints[0].svgX} ${baselineY} Z`;
+
+  const tickCount = Math.min(6, points.length);
+  const tickIndexes = Array.from({ length: tickCount }, (_, i) =>
+    Math.round((i * (points.length - 1)) / Math.max(1, tickCount - 1))
+  );
+  const uniqueTickIndexes = Array.from(new Set(tickIndexes));
+  const yTicks = Array.from({ length: 4 }, (_, i) => minY + (safeYSpan * i) / 3);
+
+  return (
+    <div className="mt-4 rounded-2xl border border-gray-200/70 dark:border-gray-700/70 bg-white/80 dark:bg-gray-900/50 p-4 shadow-sm">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{chart.title}</h4>
+          <p className="text-[11px] text-gray-500 dark:text-gray-400">
+            X: {chart.xField} · Y: {chart.yField} · Type: {chart.type}
+          </p>
+        </div>
+      </div>
+      <div className="w-full overflow-x-auto">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full min-w-[620px]">
+          <rect x="0" y="0" width={width} height={height} rx="18" className="fill-slate-50 dark:fill-slate-950/60" />
+
+          {yTicks.map((tick) => (
+            <g key={tick}>
+              <line
+                x1={margin.left}
+                x2={width - margin.right}
+                y1={toY(tick)}
+                y2={toY(tick)}
+                className="stroke-gray-200 dark:stroke-gray-800"
+                strokeDasharray="4 6"
+              />
+              <text
+                x={margin.left - 10}
+                y={toY(tick) + 4}
+                textAnchor="end"
+                className="fill-gray-500 dark:fill-gray-400 text-[10px]"
+              >
+                {Number(tick.toFixed(2)).toString()}
+              </text>
+            </g>
+          ))}
+
+          <line
+            x1={margin.left}
+            x2={width - margin.right}
+            y1={baselineY}
+            y2={baselineY}
+            className="stroke-gray-300 dark:stroke-gray-700"
+          />
+
+          {chart.type === 'bar' && svgPoints.map((point) => {
+            const barWidth = Math.max(12, innerWidth / Math.max(1, svgPoints.length * 1.8));
+            const barHeight = Math.abs(point.svgY - baselineY);
+            const y = point.y >= 0 ? point.svgY : baselineY;
+            return (
+              <g key={`${point.x}-${point.y}`}>
+                <rect
+                  x={point.svgX - barWidth / 2}
+                  y={y}
+                  width={barWidth}
+                  height={Math.max(1, barHeight)}
+                  rx="8"
+                  className="fill-sky-500/85 dark:fill-sky-400/80"
+                />
+              </g>
+            );
+          })}
+
+          {(chart.type === 'line' || chart.type === 'area') && (
+            <>
+              {chart.type === 'area' && (
+                <path d={areaPath} className="fill-cyan-400/20 dark:fill-cyan-300/20" />
+              )}
+              <path
+                d={linePath}
+                fill="none"
+                className="stroke-cyan-600 dark:stroke-cyan-300"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              {svgPoints.map((point) => (
+                <circle
+                  key={`${point.x}-${point.y}`}
+                  cx={point.svgX}
+                  cy={point.svgY}
+                  r="4"
+                  className="fill-white dark:fill-slate-950 stroke-cyan-600 dark:stroke-cyan-300"
+                  strokeWidth="2"
+                />
+              ))}
+            </>
+          )}
+
+          {chart.type === 'scatter' && svgPoints.map((point) => (
+            <circle
+              key={`${point.x}-${point.y}`}
+              cx={point.svgX}
+              cy={point.svgY}
+              r="5"
+              className="fill-fuchsia-500/80 dark:fill-fuchsia-400/80"
+            />
+          ))}
+
+          {uniqueTickIndexes.map((index) => {
+            const point = svgPoints[index];
+            if (!point) return null;
+            const label = point.x.length > 16 ? `${point.x.slice(0, 16)}…` : point.x;
+            return (
+              <g key={`${point.x}-${index}`}>
+                <line
+                  x1={point.svgX}
+                  x2={point.svgX}
+                  y1={baselineY}
+                  y2={baselineY + 6}
+                  className="stroke-gray-300 dark:stroke-gray-700"
+                />
+                <text
+                  x={point.svgX}
+                  y={height - 20}
+                  textAnchor="middle"
+                  className="fill-gray-500 dark:fill-gray-400 text-[10px]"
+                >
+                  {label}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+      {chart.points.length > maxPoints && (
+        <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+          Showing the first {maxPoints} points out of {chart.points.length}.
+        </p>
+      )}
+    </div>
+  );
 }
 
 // ── Markdown components ───────────────────────────────────────────────────────
@@ -165,17 +341,26 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
         };
         text = extractText(children).trim();
         return (
-          <li
-            className="flex items-start gap-2 text-[14px] text-gray-800 dark:text-gray-200 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/5 rounded-lg px-2 py-1 -mx-2 transition-colors"
-            onClick={(e) => {
-              if ((e.target as HTMLElement).tagName !== 'INPUT') {
-                const input = e.currentTarget.querySelector('input');
-                if (input) { input.checked = !input.checked; onCheckboxToggle?.(messageId, text, input.checked); }
-              }
-            }}
-            {...props}
-          >
-            {children}
+          <li className="list-none my-2" {...props}>
+            <button
+              type="button"
+              onClick={() => onCheckboxToggle?.(messageId, text, true)}
+              className="group w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/85 dark:bg-gray-900/70 px-4 py-3 text-left shadow-sm hover:border-blue-300 hover:bg-blue-50/70 dark:hover:border-blue-600 dark:hover:bg-blue-900/20 transition-all"
+            >
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300 border border-blue-100 dark:border-blue-800/60 flex-shrink-0">
+                  <ChevronRight className="w-4 h-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[14px] font-medium text-gray-900 dark:text-gray-100 leading-relaxed">
+                    {children}
+                  </div>
+                  <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    Click to choose
+                  </div>
+                </div>
+              </div>
+            </button>
           </li>
         );
       }
@@ -190,18 +375,7 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
     // Checkbox inputs
     input({ node, checked, type, ...props }: any) {
       if (type === 'checkbox') {
-        return (
-          <input
-            type="checkbox"
-            defaultChecked={checked}
-            onChange={(e) => {
-              const li = e.target.closest('li');
-              onCheckboxToggle?.(messageId, (li?.textContent || '').trim(), e.target.checked);
-            }}
-            className="mt-1 w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-500 cursor-pointer flex-shrink-0"
-            {...props}
-          />
-        );
+        return null;
       }
       return <input type={type} {...props} />;
     },
@@ -234,7 +408,7 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: ChatMessageProps) {
+export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = true }: ChatMessageProps) {
   const isUser = message.role === "user";
 
   const [isStepsExpanded, setIsStepsExpanded] = useState(false);
@@ -339,6 +513,30 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
             >
               {content}
             </ReactMarkdown>
+          </div>
+        )}
+
+        {!isUser && message.chart && (
+          <ChartPreview chart={message.chart} />
+        )}
+
+        {!isUser && message.actions && message.actions.length > 0 && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {message.actions.map((action) => (
+              <button
+                key={action.id}
+                type="button"
+                onClick={() => onAction?.(action, message)}
+                className={cn(
+                  "inline-flex items-center gap-2 px-4 py-2 rounded-2xl text-sm font-medium transition-colors",
+                  action.variant === 'primary'
+                    ? "bg-black text-white hover:bg-gray-800"
+                    : "border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
+                )}
+              >
+                {action.label}
+              </button>
+            ))}
           </div>
         )}
 

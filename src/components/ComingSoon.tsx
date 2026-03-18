@@ -31,7 +31,7 @@ const PAGE_CONFIG = {
     name: 'Agents & Tools',
     tagline: 'Orchestration Multi-Agents',
     description:
-      "Une plateforme pour concevoir, déployer et superviser des réseaux d'agents IA capables de collaborer sur des tâches complexes.",
+      'A workflow is a fixed, "If This, Then That" sequence designed for predictable, repetitive tasks like data entry or status updates. In contrast, an AI agent uses reasoning to independently choose tools and adapt its steps to reach a goal.',
     gradient: 'linear-gradient(135deg, #ede9fe 0%, #ddd6fe 60%, #fae8ff 100%)',
     orb1: 'rgba(139,92,246,0.25)',
     orb2: 'rgba(167,139,250,0.20)',

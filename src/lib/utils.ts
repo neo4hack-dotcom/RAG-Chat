@@ -16,6 +16,14 @@ export type AgentStep = {
   details?: string;
 };
 
+export type ChatAction = {
+  id: string;
+  label: string;
+  actionType: 'open_planning_form' | 'edit_planning_plan' | 'refresh_planning_state' | 'confirm_file_action' | 'cancel_file_action';
+  variant?: 'primary' | 'secondary';
+  payload?: Record<string, unknown>;
+};
+
 /**
  * Represents a file attachment uploaded by the user.
  */
@@ -36,9 +44,23 @@ export type Message = {
   content: string;
   timestamp: number;
   steps?: AgentStep[];
+  actions?: ChatAction[];
   attachments?: Attachment[];
   sources?: { id: string; docName: string; text: string; score: number }[];
   confidence?: number;
+  chart?: ChartSpec;
+};
+
+export type ConversationMemoryStep = {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+};
+
+export type ConversationMemory = {
+  steps: ConversationMemoryStep[];
+  keptSteps: number;
+  updatedAt: number;
 };
 
 export type ClickHouseSchemaColumn = {
@@ -48,8 +70,148 @@ export type ClickHouseSchemaColumn = {
   defaultExpression?: string;
 };
 
+export type ClickHouseResultColumn = {
+  name: string;
+  type: string;
+};
+
+export type ChartType = 'bar' | 'line' | 'area' | 'scatter';
+
+export type ChartPoint = {
+  x: string;
+  y: number;
+};
+
+export type ChartSpec = {
+  type: ChartType;
+  title: string;
+  xField: string;
+  yField: string;
+  points: ChartPoint[];
+};
+
+export type PlanningTriggerKind = 'once' | 'daily' | 'weekly' | 'interval' | 'clickhouse_watch' | 'file_watch';
+
+export type PlanningWeekday = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+export type ClickHouseWatchMode = 'returns_rows' | 'count_increases' | 'result_changes';
+
+export type CrewPlanTrigger = {
+  kind: PlanningTriggerKind;
+  timezone: string;
+  oneTimeAt: string;
+  timeOfDay: string;
+  weekdays: PlanningWeekday[];
+  intervalMinutes: number;
+  pollMinutes: number;
+  watchSql: string;
+  watchMode: ClickHouseWatchMode;
+  directory: string;
+  pattern: string;
+  recursive: boolean;
+};
+
+export type CrewPlanDraft = {
+  name: string;
+  prompt: string;
+  agents: AgentRole[];
+  status: 'active' | 'paused';
+  trigger: CrewPlanTrigger;
+};
+
+export type CrewPlan = CrewPlanDraft & {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastStatus: 'success' | 'error' | 'running' | null;
+  lastSummary: string;
+  runtime?: Record<string, unknown>;
+};
+
+export type CrewPlanRunOutput = {
+  agent: AgentRole;
+  status: 'success' | 'error';
+  content: string;
+};
+
+export type CrewPlanRun = {
+  id: string;
+  planId: string;
+  planName: string;
+  triggerKind: PlanningTriggerKind | 'manual';
+  triggerLabel: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'running' | 'success' | 'error';
+  summary: string;
+  outputs: CrewPlanRunOutput[];
+};
+
+export type PlanningBackendState = {
+  plans: CrewPlan[];
+  runs: CrewPlanRun[];
+};
+
+export type PlanningAgentState = {
+  draft: CrewPlanDraft;
+  missingFields: string[];
+  lastQuestion: string;
+  readyToReview: boolean;
+};
+
+export type FileManagerPendingAction = {
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  preview: string;
+  summary: string;
+  requestedAt: string;
+};
+
+export type FileManagerAgentState = {
+  pendingConfirmation: FileManagerPendingAction | null;
+  lastToolResult: string;
+  lastVisitedPath: string;
+};
+
+export type DataQualitySchemaColumn = {
+  name: string;
+  type: string;
+  category: 'numeric' | 'string' | 'date' | 'other';
+};
+
+export type DataQualityState = {
+  stage: string;
+  table: string | null;
+  columns: string[];
+  sampleSize: number;
+  rowFilter: string;
+  timeColumn: string | null;
+  dbType: 'clickhouse' | 'oracle';
+  schemaInfo: DataQualitySchemaColumn[];
+  columnStats: Record<string, unknown>;
+  volumetricStats: Record<string, unknown> | null;
+  llmAnalysis: string;
+  finalAnswer: string;
+  agentId: string;
+  sessionId: string;
+  lastError: string;
+  availableTables: string[];
+  availableColumns: string[];
+  dateColumns: string[];
+};
+
+export type ManagerDelegateRole = 'clickhouse_query' | 'file_management' | 'data_quality_tables';
+
+export type ManagerAgentState = {
+  activeDelegate: ManagerDelegateRole | null;
+  lastRoutingReason: string;
+  lastDelegateLabel: string;
+};
+
 export type ClickHouseAgentState = {
-  stage: 'idle' | 'awaiting_table' | 'awaiting_field' | 'awaiting_date' | 'ready';
+  stage: 'idle' | 'awaiting_table' | 'awaiting_field' | 'awaiting_date' | 'awaiting_chart_offer' | 'awaiting_chart_x' | 'awaiting_chart_y' | 'awaiting_chart_type' | 'ready';
   pendingRequest: string;
   availableTables: string[];
   selectedTable: string | null;
@@ -60,10 +222,26 @@ export type ClickHouseAgentState = {
   selectedDateField: string | null;
   clarificationPrompt: string;
   clarificationOptions: string[];
+  lastSql: string;
+  lastResultMeta: ClickHouseResultColumn[];
+  lastResultRows: Record<string, unknown>[];
+  chartRequested: boolean;
+  chartSuggested: boolean;
+  chartOfferOptions: string[];
+  chartXOptions: string[];
+  chartYOptions: string[];
+  chartTypeOptions: string[];
+  selectedChartX: string | null;
+  selectedChartY: string | null;
+  selectedChartType: ChartType | null;
 };
 
 export type ConversationAgentState = {
+  manager?: ManagerAgentState;
   clickhouse?: ClickHouseAgentState;
+  planning?: PlanningAgentState;
+  fileManager?: FileManagerAgentState;
+  dataQuality?: DataQualityState;
 };
 
 /**
@@ -73,15 +251,22 @@ export type Conversation = {
   id: string;
   title: string;
   messages: Message[];
+  memory?: ConversationMemory;
   updatedAt: number;
   agentState?: ConversationAgentState;
 };
 
-export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP';
+export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP' | 'CREWAI';
 
-export type AgentRole = 'manager' | 'analyst' | 'researcher' | 'clickhouse_query';
+export type AgentRole = 'manager' | 'clickhouse_query' | 'file_management' | 'data_quality_tables';
 
 export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
+
+const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'file_management', 'data_quality_tables'];
+
+function isValidAgentRole(value: unknown): value is AgentRole {
+  return typeof value === 'string' && VALID_AGENT_ROLES.includes(value as AgentRole);
+}
 
 /**
  * Represents a single MCP tool entry configurable by the user.
@@ -114,6 +299,7 @@ export type AppConfig = {
   knnNeighbors: number;
   mcpTools: McpTool[];
   documentationUrl: string;
+  settingsAccessPassword: string;
   clickhouseHost: string;
   clickhousePort: number;
   clickhouseDatabase: string;
@@ -123,6 +309,13 @@ export type AppConfig = {
   clickhouseVerifySsl: boolean;
   clickhouseHttpPath: string;
   clickhouseQueryLimit: number;
+  fileManagerConfig: FileManagerAgentConfig;
+};
+
+export type FileManagerAgentConfig = {
+  basePath: string;
+  maxIterations: number;
+  systemPrompt: string;
 };
 
 export type AppPreferences = {
@@ -166,6 +359,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
   ],
   documentationUrl: '',
+  settingsAccessPassword: 'MM@2026',
   clickhouseHost: 'localhost',
   clickhousePort: 8123,
   clickhouseDatabase: 'default',
@@ -175,6 +369,12 @@ export const DEFAULT_CONFIG: AppConfig = {
   clickhouseVerifySsl: true,
   clickhouseHttpPath: '',
   clickhouseQueryLimit: 200,
+  fileManagerConfig: {
+    basePath: '',
+    maxIterations: 10,
+    systemPrompt:
+      'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, and ask for confirmation before destructive or overwrite actions.',
+  },
 };
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
@@ -192,10 +392,217 @@ export const DEFAULT_PERSISTED_STATE: PersistedAppState = {
   preferences: DEFAULT_PREFERENCES,
 };
 
+export const CHAT_MEMORY_MIN_STEPS = 5;
+export const CHAT_MEMORY_MAX_STEPS = 10;
+
+export function buildConversationMemory(messages: Message[], keptSteps = CHAT_MEMORY_MAX_STEPS): ConversationMemory {
+  const safeKeptSteps = Math.max(CHAT_MEMORY_MIN_STEPS, keptSteps);
+  const steps = messages
+    .filter((message): message is Message & { role: 'user' | 'assistant' } => (
+      message.role === 'user' || message.role === 'assistant'
+    ))
+    .slice(-safeKeptSteps)
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp,
+    }));
+
+  return {
+    steps,
+    keptSteps: safeKeptSteps,
+    updatedAt: Date.now(),
+  };
+}
+
+export function createEmptyCrewPlanDraft(timezone = 'UTC'): CrewPlanDraft {
+  return {
+    name: '',
+    prompt: '',
+    agents: [],
+    status: 'active',
+    trigger: {
+      kind: 'daily',
+      timezone,
+      oneTimeAt: '',
+      timeOfDay: '09:00',
+      weekdays: ['mon'],
+      intervalMinutes: 60,
+      pollMinutes: 5,
+      watchSql: '',
+      watchMode: 'result_changes',
+      directory: '',
+      pattern: '*',
+      recursive: false,
+    },
+  };
+}
+
+export function normalizeCrewPlanDraft(
+  draft?: Partial<CrewPlanDraft> | null,
+  timezone = 'UTC'
+): CrewPlanDraft {
+  const base = createEmptyCrewPlanDraft(timezone);
+  const incomingTrigger: Partial<CrewPlanTrigger> = draft?.trigger ?? {};
+  return {
+    ...base,
+    ...(draft ?? {}),
+    agents: Array.isArray(draft?.agents) ? draft!.agents.filter(isValidAgentRole) : [],
+    trigger: {
+      ...base.trigger,
+      ...incomingTrigger,
+      weekdays: Array.isArray(incomingTrigger.weekdays)
+        ? incomingTrigger.weekdays.filter(Boolean) as PlanningWeekday[]
+        : base.trigger.weekdays,
+    },
+  };
+}
+
+export function normalizePlanningAgentState(
+  state?: Partial<PlanningAgentState> | null,
+  timezone = 'UTC'
+): PlanningAgentState {
+  const draft = (state as any)?.draft ?? (state as any)?.draft;
+  const missingFields = (state as any)?.missingFields ?? (state as any)?.missing_fields;
+  const lastQuestion = (state as any)?.lastQuestion ?? (state as any)?.last_question;
+  const readyToReview = (state as any)?.readyToReview ?? (state as any)?.ready_to_review;
+  return {
+    draft: normalizeCrewPlanDraft(draft, timezone),
+    missingFields: Array.isArray(missingFields) ? missingFields.filter(Boolean) : [],
+    lastQuestion: lastQuestion || '',
+    readyToReview: Boolean(readyToReview),
+  };
+}
+
+export function normalizePlanningBackendState(
+  state?: Partial<PlanningBackendState> | null,
+  timezone = 'UTC'
+): PlanningBackendState {
+  const plans = Array.isArray(state?.plans) ? state!.plans : [];
+  const runs = Array.isArray(state?.runs) ? state!.runs : [];
+
+  return {
+    plans: plans.map((plan) => ({
+      ...normalizeCrewPlanDraft(plan, timezone),
+      id: plan.id || `plan_${Date.now()}`,
+      createdAt: plan.createdAt || '',
+      updatedAt: plan.updatedAt || '',
+      nextRunAt: plan.nextRunAt ?? null,
+      lastRunAt: plan.lastRunAt ?? null,
+      lastStatus: plan.lastStatus ?? null,
+      lastSummary: plan.lastSummary || '',
+      runtime: plan.runtime ?? {},
+    })),
+    runs: runs.map((run) => ({
+      id: run.id || `run_${Date.now()}`,
+      planId: run.planId || '',
+      planName: run.planName || 'Unnamed plan',
+      triggerKind: run.triggerKind || 'manual',
+      triggerLabel: run.triggerLabel || '',
+      startedAt: run.startedAt || '',
+      finishedAt: run.finishedAt ?? null,
+      status: run.status || 'running',
+      summary: run.summary || '',
+      outputs: Array.isArray(run.outputs)
+        ? run.outputs.filter((output): output is CrewPlanRunOutput => (
+            Boolean(output)
+            && isValidAgentRole((output as CrewPlanRunOutput).agent)
+            && ((output as CrewPlanRunOutput).status === 'success' || (output as CrewPlanRunOutput).status === 'error')
+          ))
+        : [],
+    })),
+  };
+}
+
+export function normalizeFileManagerAgentState(
+  state?: Partial<FileManagerAgentState> | null
+): FileManagerAgentState {
+  const pending = (state as any)?.pendingConfirmation ?? (state as any)?.pending_confirmation;
+  return {
+    pendingConfirmation: pending && typeof pending === 'object'
+      ? {
+          toolName: (pending as any).toolName ?? (pending as any).tool_name ?? '',
+          toolInput: ((pending as any).toolInput ?? (pending as any).tool_input ?? {}) as Record<string, unknown>,
+          preview: (pending as any).preview ?? '',
+          summary: (pending as any).summary ?? '',
+          requestedAt: (pending as any).requestedAt ?? (pending as any).requested_at ?? '',
+        }
+      : null,
+    lastToolResult: (state as any)?.lastToolResult ?? (state as any)?.last_tool_result ?? '',
+    lastVisitedPath: (state as any)?.lastVisitedPath ?? (state as any)?.last_visited_path ?? '',
+  };
+}
+
+export function normalizeManagerAgentState(
+  state?: Partial<ManagerAgentState> | null
+): ManagerAgentState {
+  const activeDelegate = (state as any)?.activeDelegate ?? (state as any)?.active_delegate;
+  return {
+    activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'file_management' || activeDelegate === 'data_quality_tables'
+      ? activeDelegate
+      : null,
+    lastRoutingReason: (state as any)?.lastRoutingReason ?? (state as any)?.last_routing_reason ?? '',
+    lastDelegateLabel: (state as any)?.lastDelegateLabel ?? (state as any)?.last_delegate_label ?? '',
+  };
+}
+
+export function normalizeDataQualityState(
+  state?: Partial<DataQualityState> | null
+): DataQualityState {
+  const schemaInfoRaw = (state as any)?.schemaInfo ?? (state as any)?.schema_info;
+  const rawSampleSize = (state as any)?.sampleSize ?? (state as any)?.sample_size;
+  return {
+    stage: (state as any)?.stage ?? 'idle',
+    table: (state as any)?.table ?? null,
+    columns: Array.isArray((state as any)?.columns) ? (state as any).columns.filter(Boolean) : [],
+    sampleSize: rawSampleSize === 0 ? 0 : (Number(rawSampleSize ?? 50000) || 50000),
+    rowFilter: (state as any)?.rowFilter ?? (state as any)?.row_filter ?? '',
+    timeColumn: (state as any)?.timeColumn ?? (state as any)?.time_column ?? null,
+    dbType: (state as any)?.dbType === 'oracle' || (state as any)?.db_type === 'oracle' ? 'oracle' : 'clickhouse',
+    schemaInfo: Array.isArray(schemaInfoRaw)
+      ? schemaInfoRaw
+          .filter(Boolean)
+          .map((column: any) => ({
+            name: column?.name ?? '',
+            type: column?.type ?? '',
+            category: column?.category === 'numeric' || column?.category === 'string' || column?.category === 'date' || column?.category === 'other'
+              ? column.category
+              : 'other',
+          }))
+          .filter((column: DataQualitySchemaColumn) => Boolean(column.name))
+      : [],
+    columnStats: ((state as any)?.columnStats ?? (state as any)?.column_stats ?? {}) as Record<string, unknown>,
+    volumetricStats: ((state as any)?.volumetricStats ?? (state as any)?.volumetric_stats ?? null) as Record<string, unknown> | null,
+    llmAnalysis: (state as any)?.llmAnalysis ?? (state as any)?.llm_analysis ?? '',
+    finalAnswer: (state as any)?.finalAnswer ?? (state as any)?.final_answer ?? '',
+    agentId: (state as any)?.agentId ?? (state as any)?.agent_id ?? 'data_quality_tables',
+    sessionId: (state as any)?.sessionId ?? (state as any)?.session_id ?? '',
+    lastError: (state as any)?.lastError ?? (state as any)?.last_error ?? '',
+    availableTables: Array.isArray((state as any)?.availableTables ?? (state as any)?.available_tables)
+      ? ((state as any)?.availableTables ?? (state as any)?.available_tables).filter(Boolean)
+      : [],
+    availableColumns: Array.isArray((state as any)?.availableColumns ?? (state as any)?.available_columns)
+      ? ((state as any)?.availableColumns ?? (state as any)?.available_columns).filter(Boolean)
+      : [],
+    dateColumns: Array.isArray((state as any)?.dateColumns ?? (state as any)?.date_columns)
+      ? ((state as any)?.dateColumns ?? (state as any)?.date_columns).filter(Boolean)
+      : [],
+  };
+}
+
 export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfig {
+  const incomingFileManager = config?.fileManagerConfig;
   return {
     ...DEFAULT_CONFIG,
     ...(config ?? {}),
+    settingsAccessPassword: config?.settingsAccessPassword || DEFAULT_CONFIG.settingsAccessPassword,
+    fileManagerConfig: {
+      ...DEFAULT_CONFIG.fileManagerConfig,
+      ...(incomingFileManager ?? {}),
+      basePath: incomingFileManager?.basePath ?? DEFAULT_CONFIG.fileManagerConfig.basePath,
+      maxIterations: Math.min(15, Math.max(1, incomingFileManager?.maxIterations ?? DEFAULT_CONFIG.fileManagerConfig.maxIterations)),
+      systemPrompt: incomingFileManager?.systemPrompt ?? DEFAULT_CONFIG.fileManagerConfig.systemPrompt,
+    },
     mcpTools: Array.isArray(config?.mcpTools)
       ? config!.mcpTools.map((tool) => ({
           id: tool.id || `mcp_${Date.now()}`,
@@ -207,9 +614,14 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
 }
 
 export function normalizeAppPreferences(preferences?: Partial<AppPreferences> | null): AppPreferences {
+  const nextAgentRole =
+    preferences?.agentRole === 'clickhouse_query' || preferences?.agentRole === 'file_management' || preferences?.agentRole === 'data_quality_tables'
+      ? preferences.agentRole
+      : 'manager';
   return {
     ...DEFAULT_PREFERENCES,
     ...(preferences ?? {}),
+    agentRole: nextAgentRole,
   };
 }
 

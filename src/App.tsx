@@ -375,7 +375,12 @@ export default function App() {
             transition={pageTransition}
             style={{ position: 'fixed', inset: 0, overflow: 'auto' }}
           >
-            <LandingPage onNavigate={navigate} documentationUrl={appState.config.documentationUrl} />
+            <LandingPage
+              onNavigate={navigate}
+              documentationUrl={appState.config.documentationUrl}
+              settingsAccessPassword={appState.config.settingsAccessPassword}
+              onOpenSettings={() => setIsSettingsOpen(true)}
+            />
           </motion.div>
         )}
 
@@ -401,7 +406,7 @@ export default function App() {
               onWorkflowChange={(workflow) => updatePreferences({ workflow })}
               onAgentRoleChange={(agentRole) => updatePreferences({ agentRole })}
               onMcpToolIdChange={(selectedMcpToolId) => updatePreferences({ selectedMcpToolId })}
-              onOpenSettings={() => setIsSettingsOpen(true)}
+              onConfigChange={setConfig}
               isDark={isDark}
               onToggleDark={() => updatePreferences((prev) => ({ ...prev, darkMode: !prev.darkMode }))}
               onGoHome={() => navigate('landing')}

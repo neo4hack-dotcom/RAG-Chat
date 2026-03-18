@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, Users, BarChart, Search, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole } from "../lib/utils";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3 } from "lucide-react";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
+import { PlanningModal } from "./PlanningModal";
+import { FileManagerConfigModal } from "./FileManagerConfigModal";
 
 interface ChatInterfaceProps {
   config: AppConfig;
@@ -15,7 +17,7 @@ interface ChatInterfaceProps {
   onWorkflowChange: (workflow: WorkflowMode) => void;
   onAgentRoleChange: (role: AgentRole) => void;
   onMcpToolIdChange: (id: string) => void;
-  onOpenSettings: () => void;
+  onConfigChange: (config: AppConfig) => void;
   isDark: boolean;
   onToggleDark: () => void;
   onGoHome?: () => void;
@@ -33,7 +35,7 @@ export function ChatInterface({
   onWorkflowChange,
   onAgentRoleChange,
   onMcpToolIdChange,
-  onOpenSettings,
+  onConfigChange,
   isDark,
   onToggleDark,
   onGoHome,
@@ -51,9 +53,15 @@ export function ChatInterface({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const dataQualityBootstrapRef = useRef<string | null>(null);
+  const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   const currentConversation = conversations.find(c => c.id === currentId);
+  const managerAgentState = normalizeManagerAgentState((currentConversation?.agentState as any)?.manager);
   const clickhouseAgentState = currentConversation?.agentState?.clickhouse;
+  const planningAgentState = normalizePlanningAgentState((currentConversation?.agentState as any)?.planning, browserTimeZone);
+  const fileManagerAgentState = normalizeFileManagerAgentState((currentConversation?.agentState as any)?.fileManager);
+  const dataQualityAgentState = normalizeDataQualityState((currentConversation?.agentState as any)?.dataQuality);
   const messages = currentConversation?.messages || [
     {
       id: "1",
@@ -66,6 +74,14 @@ export function ChatInterface({
       ]
     },
   ];
+  const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
+  const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
+  const [plannerDraft, setPlannerDraft] = useState<CrewPlanDraft>(() => normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
+  const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
+  const [planningBusy, setPlanningBusy] = useState(false);
+  const [planningError, setPlanningError] = useState<string | null>(null);
+  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'data_quality_tables');
+  const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
 
   // --- ACTIONS ---
   
@@ -89,7 +105,12 @@ export function ChatInterface({
               { id: 'init-1', title: 'System Initialization', status: 'success', details: 'Loaded configuration and connected to local environment.' },
               { id: 'init-2', title: 'Ready for Instructions', status: 'success', details: 'Awaiting your commands to orchestrate sub-agents or query the RAG database.' }
             ]
-          }], updatedAt: Date.now(), agentState: undefined } 
+          }], memory: buildConversationMemory([{
+            id: Date.now().toString(),
+            role: "assistant",
+            content: "# Welcome to RAGnarok ⚡️\n\nI'm your AI assistant, ready to connect to your LLMs, RAG system, or agents.",
+            timestamp: Date.now(),
+          }]), updatedAt: Date.now(), agentState: undefined } 
         : c
     ));
   };
@@ -124,6 +145,346 @@ export function ChatInterface({
       onMcpToolIdChange(config.mcpTools[0]?.id ?? '');
     }
   }, [config.mcpTools, mcpToolId, onMcpToolIdChange]);
+
+  useEffect(() => {
+    if (editingPlanningPlanId) return;
+    setPlannerDraft(normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
+  }, [planningAgentState.draft, browserTimeZone, editingPlanningPlanId]);
+
+  const updatePlanningConversationState = (nextPlanningState: unknown) => {
+    if (!currentId) return;
+    const normalizedState = normalizePlanningAgentState(nextPlanningState as any, browserTimeZone);
+    onConversationsChange(prev => prev.map((conversation) =>
+      conversation.id === currentId
+        ? {
+            ...conversation,
+            agentState: {
+              ...(conversation.agentState ?? {}),
+              planning: normalizedState,
+            },
+            updatedAt: Date.now(),
+          }
+        : conversation
+    ));
+  };
+
+  const loadPlanningState = async () => {
+    setPlanningBusy(true);
+    try {
+      const response = await fetch('/api/planning/state');
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Planning state error: ${response.status}`);
+      }
+      const data = await response.json();
+      setPlanningState(normalizePlanningBackendState(data, browserTimeZone));
+      setPlanningError(null);
+    } catch (error) {
+      setPlanningError(error instanceof Error ? error.message : 'Unable to load planning state.');
+    } finally {
+      setPlanningBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (workflow === 'CREWAI' || isPlanningModalOpen) {
+      void loadPlanningState();
+    }
+  }, [workflow, isPlanningModalOpen]);
+
+  useEffect(() => {
+    if (workflow === 'AGENT' && (agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'data_quality_tables')) {
+      setIsOtherAgentsOpen(true);
+    }
+  }, [workflow, agentRole]);
+
+  useEffect(() => {
+    if (workflow !== 'AGENT' || agentRole !== 'data_quality_tables' || isLoading) return;
+
+    const hasStartedSetup =
+      dataQualityAgentState.stage !== 'idle' ||
+      Boolean(dataQualityAgentState.table) ||
+      Boolean(dataQualityAgentState.finalAnswer);
+    const hasGuidanceMessage = messages.some(
+      (message) =>
+        message.role === 'assistant' &&
+        (
+          message.content.includes('## Data quality - Tables') ||
+          message.content.includes('## Data Quality Review') ||
+          message.content.includes('## Table Selection')
+        )
+    );
+    const bootstrapKey = `${currentId ?? 'new'}:${currentConversation?.updatedAt ?? 0}`;
+    if (hasStartedSetup || hasGuidanceMessage || dataQualityBootstrapRef.current === bootstrapKey) {
+      return;
+    }
+
+    dataQualityBootstrapRef.current = bootstrapKey;
+
+    void (async () => {
+      try {
+        const response = await fetch('/api/chat/data-quality-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: '',
+            history: currentConversation?.memory?.steps ?? [],
+            agent_state: dataQualityAgentState ?? undefined,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: config.clickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          return;
+        }
+
+        const data = await response.json();
+        const assistantMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: data.answer,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+        const nextState = normalizeDataQualityState(data.agent_state);
+
+        if (!currentId) {
+          const conversationId = Date.now().toString();
+          const newConversation: Conversation = {
+            id: conversationId,
+            title: 'Data quality - Tables',
+            messages: [assistantMsg],
+            memory: buildConversationMemory([assistantMsg]),
+            updatedAt: Date.now(),
+            agentState: {
+              dataQuality: nextState,
+            },
+          };
+          onConversationsChange((prev) => [newConversation, ...prev]);
+          onCurrentIdChange(conversationId);
+          return;
+        }
+
+        onConversationsChange((prev) =>
+          prev.map((conversation) =>
+            conversation.id === currentId
+              ? {
+                  ...conversation,
+                  messages: [...conversation.messages, assistantMsg],
+                  memory: buildConversationMemory([...conversation.messages, assistantMsg]),
+                  updatedAt: Date.now(),
+                  agentState: {
+                    ...(conversation.agentState ?? {}),
+                    dataQuality: nextState,
+                  },
+                }
+              : conversation
+          )
+        );
+      } catch {
+        // Keep the UI responsive even if the backend onboarding call fails.
+      }
+    })();
+  }, [
+    workflow,
+    agentRole,
+    isLoading,
+    currentId,
+    currentConversation,
+    messages,
+    dataQualityAgentState,
+    config.clickhouseHost,
+    config.clickhousePort,
+    config.clickhouseDatabase,
+    config.clickhouseUsername,
+    config.clickhousePassword,
+    config.clickhouseSecure,
+    config.clickhouseVerifySsl,
+    config.clickhouseHttpPath,
+    config.clickhouseQueryLimit,
+    config.baseUrl,
+    config.model,
+    config.apiKey,
+    config.provider,
+    onConversationsChange,
+    onCurrentIdChange,
+  ]);
+
+  const openPlanningModal = (nextDraft?: Partial<CrewPlanDraft> | null) => {
+    if (nextDraft) {
+      setPlannerDraft(normalizeCrewPlanDraft(nextDraft, browserTimeZone));
+      setEditingPlanningPlanId(null);
+    }
+    setPlanningError(null);
+    setIsPlanningModalOpen(true);
+    void loadPlanningState();
+  };
+
+  const startNewPlanningDraft = () => {
+    const emptyDraft = createEmptyCrewPlanDraft(browserTimeZone);
+    setEditingPlanningPlanId(null);
+    setPlannerDraft(emptyDraft);
+    updatePlanningConversationState({
+      draft: emptyDraft,
+      missing_fields: [],
+      last_question: '',
+      ready_to_review: false,
+    });
+  };
+
+  const savePlanningPlan = async (draft: CrewPlanDraft, editingPlanId: string | null) => {
+    setPlanningBusy(true);
+    try {
+      const response = await fetch('/api/planning/plans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          plan: {
+            ...draft,
+            id: editingPlanId || undefined,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Planning save error: ${response.status}`);
+      }
+      const data = await response.json();
+      setPlanningState(normalizePlanningBackendState(data, browserTimeZone));
+      setPlanningError(null);
+      setEditingPlanningPlanId(null);
+      const emptyDraft = createEmptyCrewPlanDraft(browserTimeZone);
+      setPlannerDraft(emptyDraft);
+      updatePlanningConversationState({
+        draft: emptyDraft,
+        missing_fields: [],
+        last_question: '',
+        ready_to_review: false,
+      });
+    } catch (error) {
+      setPlanningError(error instanceof Error ? error.message : 'Unable to save the planning job.');
+      throw error;
+    } finally {
+      setPlanningBusy(false);
+    }
+  };
+
+  const editPlanningPlan = (plan: CrewPlan) => {
+    setEditingPlanningPlanId(plan.id);
+    setPlannerDraft(normalizeCrewPlanDraft(plan, browserTimeZone));
+    setPlanningError(null);
+    setIsPlanningModalOpen(true);
+  };
+
+  const togglePlanningPlanStatus = async (plan: CrewPlan) => {
+    setPlanningBusy(true);
+    try {
+      const response = await fetch(`/api/planning/plans/${plan.id}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: plan.status === 'active' ? 'paused' : 'active',
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Planning status error: ${response.status}`);
+      }
+      const data = await response.json();
+      setPlanningState(normalizePlanningBackendState(data, browserTimeZone));
+      setPlanningError(null);
+    } catch (error) {
+      setPlanningError(error instanceof Error ? error.message : 'Unable to update the planning status.');
+    } finally {
+      setPlanningBusy(false);
+    }
+  };
+
+  const deletePlanningPlan = async (planId: string) => {
+    setPlanningBusy(true);
+    try {
+      const response = await fetch(`/api/planning/plans/${planId}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Planning delete error: ${response.status}`);
+      }
+      const data = await response.json();
+      setPlanningState(normalizePlanningBackendState(data, browserTimeZone));
+      setPlanningError(null);
+      if (editingPlanningPlanId === planId) {
+        setEditingPlanningPlanId(null);
+        setPlannerDraft(createEmptyCrewPlanDraft(browserTimeZone));
+      }
+    } catch (error) {
+      setPlanningError(error instanceof Error ? error.message : 'Unable to delete the planning job.');
+    } finally {
+      setPlanningBusy(false);
+    }
+  };
+
+  const runPlanningPlan = async (planId: string) => {
+    setPlanningBusy(true);
+    try {
+      const response = await fetch(`/api/planning/plans/${planId}/run`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Planning run error: ${response.status}`);
+      }
+      const data = await response.json();
+      setPlanningState(normalizePlanningBackendState(data, browserTimeZone));
+      setPlanningError(null);
+    } catch (error) {
+      setPlanningError(error instanceof Error ? error.message : 'Unable to run the planning job.');
+    } finally {
+      setPlanningBusy(false);
+    }
+  };
+
+  const handleChatAction = (action: ChatAction) => {
+    if (action.actionType === 'open_planning_form') {
+      openPlanningModal(planningAgentState.draft);
+      return;
+    }
+    if (action.actionType === 'edit_planning_plan') {
+      const planId = String(action.payload?.planId || '');
+      const existingPlan = planningState.plans.find((plan) => plan.id === planId);
+      if (existingPlan) {
+        editPlanningPlan(existingPlan);
+      } else {
+        openPlanningModal(planningAgentState.draft);
+      }
+      return;
+    }
+    if (action.actionType === 'refresh_planning_state') {
+      void loadPlanningState();
+      return;
+    }
+    if (action.actionType === 'confirm_file_action') {
+      void handleSend('confirm');
+      return;
+    }
+    if (action.actionType === 'cancel_file_action') {
+      void handleSend('cancel');
+    }
+  };
 
   // Handle file selection for attachments
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -181,6 +542,7 @@ export function ChatInterface({
         id: activeConvId,
         title: text.slice(0, 30) + (text.length > 30 ? '...' : ''),
         messages: activeMessages,
+        memory: buildConversationMemory(activeMessages),
         updatedAt: Date.now()
       };
       onConversationsChange(prev => [newConv, ...prev]);
@@ -194,6 +556,7 @@ export function ChatInterface({
         updated[idx] = {
           ...updated[idx],
           messages: activeMessages,
+          memory: buildConversationMemory(activeMessages),
           updatedAt: Date.now()
         };
         const [conv] = updated.splice(idx, 1);
@@ -211,10 +574,18 @@ export function ChatInterface({
     setIsLoading(true);
 
     try {
+      const memoryHistory = buildConversationMemory(activeMessages).steps.map((step) => ({
+        role: step.role,
+        content: step.content,
+      }));
       let reply = "";
       let sources = undefined;
       let confidence = undefined;
+      let nextManagerAgentState = managerAgentState;
       let nextClickhouseAgentState = clickhouseAgentState;
+      let nextPlanningAgentState = planningAgentState;
+      let nextFileManagerAgentState = fileManagerAgentState;
+      let nextDataQualityAgentState = dataQualityAgentState;
 
       // Route the request based on the selected workflow
       if (workflow === 'RAG') {
@@ -224,7 +595,7 @@ export function ChatInterface({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: text,
-            history: activeMessages.filter(m => m.role !== 'system'),
+            history: memoryHistory,
             opensearch: {
               url:      config.elasticsearchUrl,
               index:    config.elasticsearchIndex,
@@ -259,7 +630,7 @@ export function ChatInterface({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: text,
-            history: activeMessages.filter(m => m.role !== 'system'),
+            history: memoryHistory,
             mcp_url: activeTool.url,
             llm_base_url: config.baseUrl,
             llm_model: config.model,
@@ -295,7 +666,141 @@ export function ChatInterface({
           const idx = prev.findIndex(c => c.id === activeConvId);
           if (idx === -1) return prev;
           const updated = [...prev];
-          updated[idx] = { ...updated[idx], messages: [...updated[idx].messages, assistantMcpMsg], updatedAt: Date.now() };
+          const nextMessages = [...updated[idx].messages, assistantMcpMsg];
+          updated[idx] = { ...updated[idx], messages: nextMessages, memory: buildConversationMemory(nextMessages), updatedAt: Date.now() };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (workflow === 'CREWAI') {
+        const response = await fetch('/api/chat/crewai-planning', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: nextPlanningAgentState ?? undefined,
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `CrewAI Planning error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextPlanningAgentState = normalizePlanningAgentState(data.agent_state, browserTimeZone);
+        setIsConnected(true);
+        setPlannerDraft(nextPlanningAgentState.draft);
+        setEditingPlanningPlanId(null);
+
+        const assistantPlanningMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+          actions: data.actions,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              planning: nextPlanningAgentState,
+            },
+            messages: [...updated[idx].messages, assistantPlanningMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantPlanningMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (workflow === 'AGENT' && agentRole === 'manager') {
+        const response = await fetch('/api/chat/manager-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            manager_state: managerAgentState ?? undefined,
+            clickhouse_state: clickhouseAgentState ?? undefined,
+            file_manager_state: fileManagerAgentState ?? undefined,
+            data_quality_state: dataQualityAgentState ?? undefined,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: config.clickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            file_manager_config: {
+              base_path: config.fileManagerConfig.basePath,
+              max_iterations: config.fileManagerConfig.maxIterations,
+              system_prompt: config.fileManagerConfig.systemPrompt,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            system_prompt: config.systemPrompt,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Manager Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextManagerAgentState = normalizeManagerAgentState((data.agent_state as any)?.manager);
+        nextClickhouseAgentState = (data.agent_state as any)?.clickhouse ?? nextClickhouseAgentState;
+        nextFileManagerAgentState = normalizeFileManagerAgentState((data.agent_state as any)?.fileManager);
+        nextDataQualityAgentState = normalizeDataQualityState((data.agent_state as any)?.dataQuality);
+        setIsConnected(true);
+
+        const assistantManagerMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+          actions: data.actions,
+          chart: data.chart,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              manager: nextManagerAgentState,
+              clickhouse: nextClickhouseAgentState,
+              fileManager: nextFileManagerAgentState,
+              dataQuality: nextDataQualityAgentState,
+            },
+            messages: [...updated[idx].messages, assistantManagerMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantManagerMsg]),
+            updatedAt: Date.now(),
+          };
           return updated;
         });
         setIsLoading(false);
@@ -306,7 +811,7 @@ export function ChatInterface({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: text,
-            history: activeMessages.filter(m => m.role !== 'system'),
+            history: memoryHistory,
             agent_state: clickhouseAgentState ?? undefined,
             clickhouse: {
               host: config.clickhouseHost,
@@ -342,6 +847,7 @@ export function ChatInterface({
           content: reply,
           timestamp: Date.now(),
           steps: data.steps,
+          chart: data.chart,
         };
 
         onConversationsChange(prev => {
@@ -355,6 +861,126 @@ export function ChatInterface({
               clickhouse: nextClickhouseAgentState,
             },
             messages: [...updated[idx].messages, assistantClickHouseMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantClickHouseMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (workflow === 'AGENT' && agentRole === 'file_management') {
+        const response = await fetch('/api/chat/file-manager-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: fileManagerAgentState ?? undefined,
+            file_manager_config: {
+              base_path: config.fileManagerConfig.basePath,
+              max_iterations: config.fileManagerConfig.maxIterations,
+              system_prompt: config.fileManagerConfig.systemPrompt,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `File Management Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextFileManagerAgentState = normalizeFileManagerAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantFileManagerMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+          actions: data.actions,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              fileManager: nextFileManagerAgentState,
+            },
+            messages: [...updated[idx].messages, assistantFileManagerMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantFileManagerMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (workflow === 'AGENT' && agentRole === 'data_quality_tables') {
+        const response = await fetch('/api/chat/data-quality-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: dataQualityAgentState ?? undefined,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: config.clickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Data Quality Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextDataQualityAgentState = normalizeDataQualityState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantDataQualityMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              dataQuality: nextDataQualityAgentState,
+            },
+            messages: [...updated[idx].messages, assistantDataQualityMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantDataQualityMsg]),
             updatedAt: Date.now(),
           };
           return updated;
@@ -454,15 +1080,6 @@ export function ChatInterface({
         confidence,
       };
 
-      // Mock steps for Agent Manager to showcase the UI for LangGraph integration
-      if (workflow === 'AGENT' && agentRole === 'manager') {
-        assistantMsg.steps = [
-          { id: 'step-1', title: 'Analyzing Request', status: 'success', details: 'Parsed user intent and identified required sub-tasks.' },
-          { id: 'step-2', title: 'Delegating to Sub-Agents', status: 'success', details: 'Dispatched tasks to Researcher and Analyst nodes via LangGraph.' },
-          { id: 'step-3', title: 'Synthesizing Results', status: 'success', details: 'Aggregated outputs and formulated final response.' }
-        ];
-      }
-
         onConversationsChange(prev => {
           const idx = prev.findIndex(c => c.id === activeConvId);
           if (idx === -1) return prev;
@@ -476,6 +1093,7 @@ export function ChatInterface({
                 }
               : updated[idx].agentState,
             messages: [...updated[idx].messages, assistantMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantMsg]),
             updatedAt: Date.now()
           };
         return updated;
@@ -496,6 +1114,7 @@ export function ChatInterface({
         updated[idx] = {
           ...updated[idx],
           messages: [...updated[idx].messages, errorMsg],
+          memory: buildConversationMemory([...updated[idx].messages, errorMsg]),
           updatedAt: Date.now()
         };
         return updated;
@@ -519,6 +1138,21 @@ export function ChatInterface({
       handleSend(`I choose: ${text}`);
     }
   };
+
+  const inputPlaceholder =
+    workflow === 'CREWAI'
+      ? "Describe the automation you want to schedule..."
+      : workflow === 'AGENT' && agentRole === 'clickhouse_query'
+        ? "Ask a ClickHouse question or request a chart..."
+        : workflow === 'AGENT' && agentRole === 'file_management'
+          ? "Ask to list, read, create, move, edit, or delete files..."
+        : workflow === 'AGENT' && agentRole === 'data_quality_tables'
+          ? "Start the guided setup or paste a structured data-quality JSON payload..."
+        : workflow === 'AGENT' && agentRole === 'manager'
+          ? "Describe the outcome you want, and the Manager will route it if needed..."
+        : workflow === 'MCP'
+          ? "Message your MCP tool..."
+          : "Message your AI agent...";
 
   return (
     <div className="flex h-screen relative overflow-hidden bg-[#f5f5f5] dark:bg-[#0f0f13] transition-colors duration-300">
@@ -622,13 +1256,6 @@ export function ChatInterface({
           >
             {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
-          <button
-            onClick={onOpenSettings}
-            className="glass-button p-2 rounded-xl text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
-            title="Configuration"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
           {onGoHome && (
             <button
               onClick={onGoHome}
@@ -649,7 +1276,8 @@ export function ChatInterface({
               key={msg.id}
               message={msg}
               onCheckboxToggle={handleCheckboxToggle}
-              showSteps={workflow === 'AGENT'}
+              onAction={handleChatAction}
+              showSteps={workflow === 'AGENT' || workflow === 'CREWAI'}
             />
           ))}
           
@@ -674,11 +1302,11 @@ export function ChatInterface({
               <div className="text-[11px] text-amber-800/90 dark:text-amber-300/90 leading-relaxed space-y-1">
                 <p>Welcome to the <strong>Agent Manager</strong> mode. Here is what you can do:</p>
                 <ul className="list-disc pl-4 space-y-0.5">
-                  <li>Orchestrate multiple sub-agents to solve complex tasks.</li>
-                  <li>Delegate research, analysis, and coding to specialized AI roles.</li>
-                  <li>Review and synthesize the final output from all agents.</li>
+                  <li>Route a request to the best specialist when ClickHouse querying, table quality analysis, or file operations are needed.</li>
+                  <li>Keep the conversation context while following clarifications from delegated agents.</li>
+                  <li>Answer directly when no specialist tool is necessary.</li>
                 </ul>
-                <p className="italic mt-1 text-amber-700/70">Tip: Start by describing your overarching goal, and the Manager will handle the rest.</p>
+                <p className="italic mt-1 text-amber-700/70">Tip: Ask for the business outcome you want, and the Manager will decide whether to answer directly or orchestrate a specialist.</p>
               </div>
             </div>
           )}
@@ -692,10 +1320,103 @@ export function ChatInterface({
               <div className="text-[11px] text-cyan-900/85 dark:text-cyan-300/90 leading-relaxed space-y-1">
                 <p>This agent works in English and guides the analysis safely before running SQL.</p>
                 <ul className="list-disc pl-4 space-y-0.5">
-                  <li>It starts by asking you to choose a ClickHouse table.</li>
-                  <li>It inspects the schema and asks for clarification when multiple fields or date columns are plausible.</li>
+                  <li>It tries to infer the best table automatically from your question whenever the intent is clear.</li>
+                  <li>It only asks you to choose a table, field, or date column when the request stays ambiguous.</li>
+                  <li>It can generate charts on demand and also suggests a visualization when the result deserves one.</li>
                   <li>It returns a short final answer, the executed SQL, and a concise reasoning summary.</li>
                 </ul>
+              </div>
+            </div>
+          )}
+
+          {workflow === 'AGENT' && agentRole === 'file_management' && (
+            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-emerald-50 to-lime-50 dark:from-emerald-900/20 dark:to-lime-900/20 border border-emerald-200/60 dark:border-emerald-700/40 shadow-sm animate-fade-in-up">
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <FolderOpen className="w-4 h-4 text-emerald-600 dark:text-emerald-300" />
+                    <h3 className="font-semibold text-emerald-900 dark:text-emerald-200 text-[13px]">File Management Agent</h3>
+                  </div>
+                  <div className="text-[11px] text-emerald-900/85 dark:text-emerald-300/90 leading-relaxed space-y-1">
+                    <p>This agent works in English and uses backend Python tools to inspect and manage files safely.</p>
+                    <ul className="list-disc pl-4 space-y-0.5">
+                      <li>Use it to browse folders, read files, summarize CSV or Excel data, and create or edit supported files.</li>
+                      <li>Overwrite, move, and delete operations always require an explicit confirmation step before execution.</li>
+                      <li>Double-click the agent chip below to configure the sandbox base path, iteration limit, or custom system prompt.</li>
+                    </ul>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsFileManagerConfigOpen(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors flex-shrink-0"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  Configure
+                </button>
+              </div>
+            </div>
+          )}
+
+          {workflow === 'AGENT' && agentRole === 'data_quality_tables' && (
+            <div className="max-w-[67rem] mx-auto mb-4 p-4 rounded-xl bg-gradient-to-br from-fuchsia-50 to-rose-50 dark:from-fuchsia-900/20 dark:to-rose-900/20 border border-fuchsia-200/60 dark:border-fuchsia-700/40 shadow-sm animate-fade-in-up">
+              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <BarChart3 className="w-4 h-4 text-fuchsia-600 dark:text-fuchsia-300" />
+                    <h3 className="font-semibold text-fuchsia-900 dark:text-fuchsia-200 text-[13px]">Data quality - Tables</h3>
+                  </div>
+                  <div className="text-[11px] text-fuchsia-900/85 dark:text-fuchsia-300/90 leading-relaxed space-y-1">
+                    <p>This agent profiles table columns statistically, then uses the local LLM to score data quality and recommend fixes.</p>
+                    <ul className="list-disc pl-4 space-y-0.5">
+                      <li>It guides you through table, columns, sample size, optional row filter, and optional time column.</li>
+                      <li>It accepts a structured JSON payload with <code>__dq__</code> if you want to launch directly.</li>
+                      <li>It currently runs on the configured ClickHouse connection and returns the full report in English.</li>
+                    </ul>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleSend('start guided setup')}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors flex-shrink-0"
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Start guided setup
+                </button>
+              </div>
+            </div>
+          )}
+
+          {workflow === 'CREWAI' && (
+            <div className="max-w-[67rem] mx-auto mb-4 p-4 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 dark:from-emerald-900/20 dark:via-teal-900/20 dark:to-cyan-900/20 border border-emerald-200/60 dark:border-emerald-700/40 shadow-sm animate-fade-in-up">
+              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <CalendarDays className="w-4 h-4 text-emerald-600 dark:text-emerald-300" />
+                    <h3 className="font-semibold text-emerald-900 dark:text-emerald-200 text-[13px]">CrewAI - Planning</h3>
+                  </div>
+                  <div className="text-[11px] text-emerald-900/85 dark:text-emerald-300/90 leading-relaxed space-y-1">
+                    <p>This mode schedules existing agents from natural language or from a guided planner form.</p>
+                    <ul className="list-disc pl-4 space-y-0.5">
+                      <li>Use natural language to describe what should run, when it should run, and which agents should execute.</li>
+                      <li>Open the planner form to configure fixed schedules, ClickHouse watches, or file-arrival triggers.</li>
+                      <li>Saved plans are persisted in the backend and executed automatically by the Python server.</li>
+                    </ul>
+                  </div>
+                </div>
+                <div className="flex flex-col items-start md:items-end gap-2">
+                  <div className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
+                    {planningState.plans.length} plan(s) · {planningState.runs.length} run(s)
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => openPlanningModal(planningAgentState.draft)}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                  >
+                    <CalendarDays className="w-3.5 h-3.5" />
+                    Open planner form
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -767,7 +1488,7 @@ export function ChatInterface({
               value={input}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
-              placeholder="Message your AI agent..."
+              placeholder={inputPlaceholder}
               className="w-full min-h-[56px] bg-transparent border-none resize-none focus:ring-0 px-2 py-4 text-[14px] leading-relaxed text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 outline-none overflow-y-auto"
               rows={1}
             />
@@ -808,6 +1529,12 @@ export function ChatInterface({
             >
               <Cpu className="w-3.5 h-3.5" /> MCP
             </button>
+            <button
+              onClick={() => onWorkflowChange('CREWAI')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'CREWAI' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
+            >
+              <CalendarDays className="w-3.5 h-3.5" /> CrewAI - Planning
+            </button>
           </div>
 
           {/* Sub-options for MCP */}
@@ -830,32 +1557,48 @@ export function ChatInterface({
           </div>
 
           {/* Sub-options for AGENT */}
-          <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'AGENT' ? 'max-h-10 opacity-100' : 'max-h-0 opacity-0'}`}>
-            <div className="flex items-center gap-2 pl-2 border-l-2 border-purple-200 overflow-x-auto pb-1 scrollbar-hide">
-              <button
-                onClick={() => onAgentRoleChange('manager')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-              >
-                <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
-              </button>
-              <button
-                onClick={() => onAgentRoleChange('analyst')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'analyst' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-              >
-                <BarChart className="w-3.5 h-3.5" /> Data Analyst
-              </button>
-              <button
-                onClick={() => onAgentRoleChange('researcher')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'researcher' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-              >
-                <Search className="w-3.5 h-3.5" /> Researcher
-              </button>
-              <button
-                onClick={() => onAgentRoleChange('clickhouse_query')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-              >
-                <Database className="w-3.5 h-3.5" /> ClickHouse Query
-              </button>
+          <div className={`overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'AGENT' ? 'max-h-40 opacity-100' : 'max-h-0 opacity-0'}`}>
+            <div className="flex flex-col gap-2 pl-2 border-l-2 border-purple-200 pb-1">
+              <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
+                <button
+                  onClick={() => onAgentRoleChange('manager')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                >
+                  <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
+                </button>
+                <button
+                  onClick={() => setIsOtherAgentsOpen((open) => !open)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${isOtherAgentsOpen ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                >
+                  {isOtherAgentsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                  Other agents
+                </button>
+              </div>
+
+              <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-24 opacity-100' : 'max-h-0 opacity-0'}`}>
+                <div className="flex items-center gap-2 pl-3 ml-1 border-l-2 border-cyan-200 overflow-x-auto scrollbar-hide">
+                  <button
+                    onClick={() => onAgentRoleChange('clickhouse_query')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <Database className="w-3.5 h-3.5" /> ClickHouse Query
+                  </button>
+                  <button
+                    onClick={() => onAgentRoleChange('file_management')}
+                    onDoubleClick={() => setIsFileManagerConfigOpen(true)}
+                    title="Double-click to configure"
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" /> File management
+                  </button>
+                  <button
+                    onClick={() => onAgentRoleChange('data_quality_tables')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" /> Data quality - Tables
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -865,6 +1608,36 @@ export function ChatInterface({
         </div>
       </div>
       </div>
+
+      <PlanningModal
+        isOpen={isPlanningModalOpen}
+        onClose={() => setIsPlanningModalOpen(false)}
+        draft={plannerDraft}
+        editingPlanId={editingPlanningPlanId}
+        planningState={planningState}
+        isBusy={planningBusy}
+        error={planningError}
+        onDraftChange={(draft) => setPlannerDraft(normalizeCrewPlanDraft(draft, browserTimeZone))}
+        onStartNewDraft={startNewPlanningDraft}
+        onSavePlan={savePlanningPlan}
+        onEditPlan={editPlanningPlan}
+        onTogglePlanStatus={togglePlanningPlanStatus}
+        onDeletePlan={deletePlanningPlan}
+        onRunPlan={runPlanningPlan}
+        onRefresh={loadPlanningState}
+      />
+      <FileManagerConfigModal
+        isOpen={isFileManagerConfigOpen}
+        config={config.fileManagerConfig}
+        onClose={() => setIsFileManagerConfigOpen(false)}
+        onSave={(nextConfig: FileManagerAgentConfig) => {
+          onConfigChange(normalizeAppConfig({
+            ...config,
+            fileManagerConfig: nextConfig,
+          }));
+          setIsFileManagerConfigOpen(false);
+        }}
+      />
     </div>
   );
 }
