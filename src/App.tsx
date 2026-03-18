@@ -64,7 +64,7 @@ export default function App() {
             transition={pageTransition}
             style={{ position: 'fixed', inset: 0, overflow: 'auto' }}
           >
-            <LandingPage onNavigate={navigate} />
+            <LandingPage onNavigate={navigate} documentationUrl={config.documentationUrl} />
           </motion.div>
         )}
 

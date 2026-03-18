@@ -1,12 +1,13 @@
 import React, { useRef, useState } from 'react';
 import { motion, useMotionValue, useSpring } from 'motion/react';
-import { ArrowRight, Brain, BarChart3, Cpu, Sparkles } from 'lucide-react';
+import { ArrowRight, Brain, BarChart3, Cpu } from 'lucide-react';
 import { ContactModal } from './ContactModal';
 
 type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 
 interface LandingPageProps {
   onNavigate: (page: Page) => void;
+  documentationUrl?: string;
 }
 
 const CARDS = [
@@ -260,7 +261,7 @@ function HeroHeadline() {
 }
 
 /* ---------- Main component ---------- */
-export function LandingPage({ onNavigate }: LandingPageProps) {
+export function LandingPage({ onNavigate, documentationUrl }: LandingPageProps) {
   const [contactOpen, setContactOpen] = useState(false);
 
   return (
@@ -272,18 +273,19 @@ export function LandingPage({ onNavigate }: LandingPageProps) {
         initial={{ opacity: 0, y: -16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease: 'easeOut' }}
-        className="relative z-10 flex items-center justify-between px-8 py-5 max-w-7xl mx-auto"
+        className="relative z-10 flex items-center justify-end px-8 py-5 max-w-7xl mx-auto"
       >
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-200">
-            <Sparkles size={16} className="text-white" strokeWidth={2} />
-          </div>
-          <span className="text-[15px] font-semibold text-gray-900 tracking-tight">ODIN</span>
-        </div>
         <div className="flex items-center gap-1">
-          <button className="px-4 py-2 text-[13px] text-gray-500 hover:text-gray-900 font-medium rounded-full hover:bg-gray-100 transition-all duration-200">
-            Documentation
-          </button>
+          {documentationUrl ? (
+            <a
+              href={documentationUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-2 text-[13px] text-gray-500 hover:text-gray-900 font-medium rounded-full hover:bg-gray-100 transition-all duration-200"
+            >
+              Documentation
+            </a>
+          ) : null}
           <button
             onClick={() => setContactOpen(true)}
             className="px-4 py-2 text-[13px] text-gray-500 hover:text-gray-900 font-medium rounded-full hover:bg-gray-100 transition-all duration-200"

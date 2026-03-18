@@ -76,10 +76,12 @@ export type AppConfig = {
   embeddingBaseUrl: string;
   embeddingApiKey: string;
   embeddingModel: string;
+  embeddingVerifySsl: boolean;
   chunkSize: number;
   chunkOverlap: number;
   knnNeighbors: number;
   mcpTools: McpTool[];
+  documentationUrl: string;
 };
 
 /**
@@ -98,6 +100,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   embeddingBaseUrl: "http://localhost:11434/v1",
   embeddingApiKey: "",
   embeddingModel: "nomic-embed-text",
+  embeddingVerifySsl: true,
   chunkSize: 512,
   chunkOverlap: 50,
   knnNeighbors: 50,
@@ -105,6 +108,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     { id: 'mcp_1', label: 'MCP Tool 1', url: '' },
     { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
   ],
+  documentationUrl: '',
 };
 
 /**
