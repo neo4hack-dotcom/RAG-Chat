@@ -4,11 +4,14 @@ Embeddings via Ollama/OpenAI-compatible endpoint.
 Vector storage and kNN search via opensearch-py.
 """
 
+from __future__ import annotations
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
 import httpx
 import json
 import re
@@ -29,7 +32,28 @@ from urllib.parse import urlparse
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-app = FastAPI(title="RAGnarok API")
+
+@asynccontextmanager
+async def ragnarok_lifespan(app: FastAPI):
+    await read_db_state()
+    stop_event = asyncio.Event()
+    app.state.planning_scheduler_stop = stop_event
+    app.state.planning_scheduler_task = asyncio.create_task(planning_scheduler_loop(stop_event))
+    try:
+        yield
+    finally:
+        stop_event = getattr(app.state, "planning_scheduler_stop", None)
+        task = getattr(app.state, "planning_scheduler_task", None)
+        if stop_event is not None:
+            stop_event.set()
+        if task is not None:
+            try:
+                await task
+            except Exception:
+                pass
+
+
+app = FastAPI(title="RAGnarok API", lifespan=ragnarok_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -394,27 +418,6 @@ async def read_db_state() -> dict:
 async def write_db_state(payload: dict) -> dict:
     async with DB_LOCK:
         return await asyncio.to_thread(_write_db_state_sync, payload)
-
-
-@app.on_event("startup")
-async def startup_planning_scheduler():
-    await read_db_state()
-    stop_event = asyncio.Event()
-    app.state.planning_scheduler_stop = stop_event
-    app.state.planning_scheduler_task = asyncio.create_task(planning_scheduler_loop(stop_event))
-
-
-@app.on_event("shutdown")
-async def shutdown_planning_scheduler():
-    stop_event = getattr(app.state, "planning_scheduler_stop", None)
-    task = getattr(app.state, "planning_scheduler_task", None)
-    if stop_event is not None:
-        stop_event.set()
-    if task is not None:
-        try:
-            await task
-        except Exception:
-            pass
 
 
 # ── OpenSearch client factory ─────────────────────────────────────────────────
