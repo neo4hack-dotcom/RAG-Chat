@@ -235,6 +235,57 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
         sources = data.sources;
         confidence = data.confidence;
         setIsConnected(true);
+      } else if (workflow === 'MCP') {
+        const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === mcpToolId);
+        if (!activeTool?.url) {
+          throw new Error("Aucun outil MCP sélectionné ou URL manquante. Configurez un outil MCP dans les paramètres.");
+        }
+        const response = await fetch('/api/chat/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: activeMessages.filter(m => m.role !== 'system'),
+            mcp_url: activeTool.url,
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            system_prompt: config.systemPrompt,
+          }),
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `MCP Backend error: ${response.status}`);
+        }
+        const data = await response.json();
+        reply = data.answer;
+        setIsConnected(true);
+
+        const assistantMcpMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.tool_calls?.length > 0
+            ? data.tool_calls.map((tc: { tool: string; args: Record<string, unknown>; result: string }, i: number) => ({
+                id: `mcp-${i}`,
+                title: `Tool: ${tc.tool}`,
+                status: 'success' as const,
+                details: `Args: ${JSON.stringify(tc.args)}\n\nResult: ${tc.result}`,
+              }))
+            : undefined,
+        };
+
+        setConversations(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], messages: [...updated[idx].messages, assistantMcpMsg], updatedAt: Date.now() };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
       } else {
         // Standard LLM / Agent flow (calls external API directly from frontend)
         let dynamicSystemPrompt = config.systemPrompt;

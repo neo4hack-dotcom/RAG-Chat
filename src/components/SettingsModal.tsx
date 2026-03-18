@@ -69,7 +69,36 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
   const [embedTestStatus, setEmbedTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [embedTestMessage, setEmbedTestMessage] = useState('');
 
+  // MCP test states: map of toolId → { status, tools }
+  const [mcpTestStates, setMcpTestStates] = useState<Record<string, { status: 'idle' | 'testing' | 'success' | 'error'; message: string; tools: { name: string; description: string }[] }>>({});
+
   if (!isOpen) return null;
+
+  // Test MCP connection via backend
+  const testMcpConnection = async (tool: McpTool) => {
+    setMcpTestStates(prev => ({ ...prev, [tool.id]: { status: 'testing', message: '', tools: [] } }));
+    try {
+      const response = await fetch('/api/mcp/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: tool.url }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      setMcpTestStates(prev => ({
+        ...prev,
+        [tool.id]: { status: 'success', message: `${data.tool_count} outil(s) disponible(s)`, tools: data.tools },
+      }));
+    } catch (err) {
+      setMcpTestStates(prev => ({
+        ...prev,
+        [tool.id]: { status: 'error', message: err instanceof Error ? err.message : 'Échec de connexion', tools: [] },
+      }));
+    }
+  };
 
   // Test OpenSearch connection via backend
   const testElasticsearchConnection = async () => {
@@ -362,49 +391,81 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
               )}
 
               <div className="space-y-3">
-                {(localConfig.mcpTools ?? []).map((tool: McpTool, idx: number) => (
-                  <div key={tool.id} className="flex items-start gap-3 p-3 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl">
-                    <div className="flex-1 grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Label</label>
-                        <input
-                          type="text"
-                          value={tool.label}
-                          onChange={(e) => {
-                            const updated = [...(localConfig.mcpTools ?? [])];
-                            updated[idx] = { ...tool, label: e.target.value };
-                            setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
-                          }}
-                          className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
-                          placeholder="Mon outil MCP"
-                        />
+                {(localConfig.mcpTools ?? []).map((tool: McpTool, idx: number) => {
+                  const testState = mcpTestStates[tool.id];
+                  return (
+                    <div key={tool.id} className="p-3 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl space-y-2">
+                      <div className="flex items-start gap-3">
+                        <div className="flex-1 grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Label</label>
+                            <input
+                              type="text"
+                              value={tool.label}
+                              onChange={(e) => {
+                                const updated = [...(localConfig.mcpTools ?? [])];
+                                updated[idx] = { ...tool, label: e.target.value };
+                                setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                              }}
+                              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                              placeholder="Mon outil MCP"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">URL (SSE)</label>
+                            <input
+                              type="text"
+                              value={tool.url}
+                              onChange={(e) => {
+                                const updated = [...(localConfig.mcpTools ?? [])];
+                                updated[idx] = { ...tool, url: e.target.value };
+                                setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                              }}
+                              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                              placeholder="http://localhost:3000/sse"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex flex-col gap-1 pt-5">
+                          <button
+                            onClick={() => testMcpConnection(tool)}
+                            disabled={!tool.url || testState?.status === 'testing'}
+                            className="px-3 py-1.5 bg-teal-50 dark:bg-teal-900/30 hover:bg-teal-100 dark:hover:bg-teal-800/40 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-700 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+                          >
+                            {testState?.status === 'testing' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                            Test
+                          </button>
+                          <button
+                            onClick={() => {
+                              const updated = (localConfig.mcpTools ?? []).filter((_: McpTool, i: number) => i !== idx);
+                              setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                            }}
+                            className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors flex items-center justify-center"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                      <div>
-                        <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">URL</label>
-                        <input
-                          type="text"
-                          value={tool.url}
-                          onChange={(e) => {
-                            const updated = [...(localConfig.mcpTools ?? [])];
-                            updated[idx] = { ...tool, url: e.target.value };
-                            setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
-                          }}
-                          className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
-                          placeholder="http://localhost:3000"
-                        />
-                      </div>
+                      {testState?.status === 'success' && (
+                        <div className="space-y-1">
+                          <p className="text-emerald-600 text-xs flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {testState.message}</p>
+                          {testState.tools.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {testState.tools.map(t => (
+                                <span key={t.name} title={t.description} className="px-2 py-0.5 bg-teal-50 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-700 rounded-md text-[10px] font-medium">
+                                  {t.name}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {testState?.status === 'error' && (
+                        <p className="text-red-600 text-xs flex items-center gap-1"><XCircle className="w-3 h-3" /> {testState.message}</p>
+                      )}
                     </div>
-                    <button
-                      onClick={() => {
-                        const updated = (localConfig.mcpTools ?? []).filter((_: McpTool, i: number) => i !== idx);
-                        setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
-                      }}
-                      className="mt-5 p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ) : activeTab === 'llm' ? (
