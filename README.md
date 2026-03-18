@@ -1,6 +1,6 @@
 # ODIN AI Portal — RAGnarok ⚡
 
-A fully local, privacy-first AI platform combining **pure LLM chat**, **Retrieval-Augmented Generation (RAG)** with OpenSearch, **multi-agent orchestration**, and **MCP (Model Context Protocol)** tool integration — all powered by Ollama or any OpenAI-compatible server.
+A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented Generation (RAG)** with OpenSearch, **guided agents** including a **ClickHouse SQL agent**, and **MCP (Model Context Protocol)** tool integration — powered by Ollama or any OpenAI-compatible server, with durable app state persisted by the Python backend.
 
 ---
 
@@ -11,7 +11,9 @@ A fully local, privacy-first AI platform combining **pure LLM chat**, **Retrieva
 - [Requirements](#requirements)
 - [Getting Started](#getting-started)
 - [Interaction Modes](#interaction-modes)
+- [State Persistence & Backup](#state-persistence--backup)
 - [RAG Pipeline](#rag-pipeline)
+- [ClickHouse Query Agent](#clickhouse-query-agent)
 - [MCP Integration](#mcp-integration)
 - [Configuration](#configuration)
 - [Production Build](#production-build)
@@ -24,13 +26,17 @@ A fully local, privacy-first AI platform combining **pure LLM chat**, **Retrieva
 | Category | Details |
 |----------|---------|
 | **4 chat modes** | Pure LLM, RAG, Multi-Agent, MCP Tools |
+| **4 agent roles** | Agent Manager, Data Analyst, Researcher, ClickHouse Query |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
+| **ClickHouse agent** | Guided table/schema discovery, ambiguity clarification, safe read-only SQL generation, English final answer |
 | **MCP tools** | Connect any MCP server via SSE, test connection, real agentic tool-call loop |
+| **Backend persistence** | App config, conversations and durable preferences stored in backend-managed `DB.json` |
+| **Backup workflow** | Export/import DB backups and force a resync from the latest backend state in Settings |
 | **Markdown & HTML** | Syntax-highlighted code blocks, proper tables, raw HTML from LLMs, copy button |
 | **Apple-inspired landing** | Animated cards, contact modal, page routing |
-| **Dark mode** | Full dark/light toggle persisted in `localStorage` |
+| **Dark mode** | Full dark/light toggle persisted through backend state sync |
 | **File attachments** | Images, PDFs, text files alongside messages |
-| **Conversation history** | Multi-session sidebar, persisted in `localStorage` |
+| **Conversation history** | Multi-session sidebar, persisted in backend state with browser fallback cache |
 | **Settings panel** | All parameters configurable in-app, no `.env` required |
 
 ---
@@ -49,31 +55,41 @@ A fully local, privacy-first AI platform combining **pure LLM chat**, **Retrieva
                            │       │          │
                     direct │  /api/│chat/rag  │/api/chat/mcp
                     call   │       │          │
-                           │  ┌────▼──────────▼────────┐
-                           │  │     server.py (FastAPI) │
-                           │  │                         │
-                           │  │  /api/opensearch/test   │
-                           │  │  /api/opensearch/setup  │
-                           │  │  /api/documents/ingest  │
-                           │  │  /api/chat/rag          │
-                           │  │  /api/mcp/test          │
-                           │  │  /api/chat/mcp          │
-                           │  └────┬──────────┬─────────┘
-                           │       │          │
-                    ┌──────▼───────▼─┐   ┌────▼─────────────┐
-                    │  Ollama / LLM  │   │  OpenSearch       │
-                    │  llama3        │   │  kNN index        │
-                    │  nomic-embed   │   │  (HNSW cosine)    │
-                    └────────────────┘   └──────────────────┘
-                                              MCP Server
-                                         ┌────▼──────────────┐
-                                         │  any SSE MCP tool │
-                                         └───────────────────┘
+                           │  ┌────▼─────────────────────────┐
+                           │  │     server.py (FastAPI)      │
+                           │  │                              │
+                           │  │  /api/db/state               │
+                           │  │  /api/db/export              │
+                           │  │  /api/db/import              │
+                           │  │  /api/opensearch/test        │
+                           │  │  /api/opensearch/setup       │
+                           │  │  /api/documents/ingest       │
+                           │  │  /api/chat/rag               │
+                           │  │  /api/clickhouse/test        │
+                           │  │  /api/chat/clickhouse-agent  │
+                           │  │  /api/mcp/test               │
+                           │  │  /api/chat/mcp               │
+                           │  └────┬──────────┬────────┬─────┘
+                           │       │          │        │
+                    ┌──────▼───────▼─┐   ┌────▼──────┐ │
+                    │  Ollama / LLM  │   │ OpenSearch│ │
+                    │  llama3        │   │ kNN index │ │
+                    │  nomic-embed   │   └───────────┘ │
+                    └────────────────┘                 │
+                                                ┌──────▼─────────┐
+                                                │  ClickHouse     │
+                                                │  analytics DB   │
+                                                └─────────────────┘
+                                                    MCP Server
+                                               ┌────▼──────────────┐
+                                               │  any SSE MCP tool │
+                                               └───────────────────┘
 ```
 
 - **Frontend** — React 19 + TypeScript + Tailwind CSS, bundled with Vite.
-- **Backend** — Python FastAPI (`server.py`) — RAG pipeline, MCP client, OpenSearch management.
+- **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, ClickHouse agent, MCP client, OpenSearch management.
 - **Vector store** — OpenSearch with `opensearch-py` and `mcp` Python packages.
+- **Analytics store** — ClickHouse over HTTP for the SQL agent.
 - **LLM / Embeddings** — Ollama (local) or any OpenAI-compatible API.
 
 ---
@@ -86,6 +102,7 @@ A fully local, privacy-first AI platform combining **pure LLM chat**, **Retrieva
 - **Node.js 18+**
 - **[Ollama](https://ollama.com)** (or any OpenAI-compatible server)
 - **[OpenSearch](https://opensearch.org)** running locally or remotely (for RAG mode)
+- **[ClickHouse](https://clickhouse.com)** running locally or remotely (optional, for the ClickHouse Query agent)
 
 ### Ollama models
 
@@ -119,6 +136,8 @@ pip install -r requirements.txt
 python server.py
 # Listening on http://localhost:8000
 ```
+
+On first run, the backend also creates a local `DB.json` file at the project root to persist app state, chat history and configuration.
 
 ### 4. Install frontend dependencies and start dev server
 
@@ -155,13 +174,56 @@ Answers include cited sources `[1]`, `[2]` and a confidence score.
 
 ### Agents
 
-Multi-agent orchestration with three roles:
+Multi-agent orchestration with four roles:
 
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Orchestrates sub-agents, synthesises final answer, shows thinking steps |
 | **Data Analyst** | Focuses on structured analysis and data interpretation |
 | **Researcher** | Deep research with broad context gathering |
+| **ClickHouse Query** | Guides the user through table selection, schema inspection, field/date clarification, then runs safe read-only SQL and answers in English |
+
+#### ClickHouse Query agent quick flow
+
+1. Configure ClickHouse in **Settings → RAG & OpenSearch → ClickHouse Query Agent**.
+2. Switch to **Agents** mode and select **ClickHouse Query**.
+3. The agent first proposes the list of available tables.
+4. Once the table is selected, it inspects the schema.
+5. If multiple fields or date columns are plausible, it asks the user to choose with task-list style options.
+6. It generates a read-only ClickHouse query, validates it, executes it, and returns:
+   - a short final answer in English,
+   - the executed SQL,
+   - a concise reasoning summary.
+
+The ClickHouse agent uses the backend only and always relies on the configured local/application LLM endpoint for planning and summarisation.
+
+---
+
+## State Persistence & Backup
+
+RAGnarok now uses a backend-managed `DB.json` file as its durable source of truth.
+
+What is stored there:
+
+- application configuration,
+- conversation history,
+- durable UI preferences such as dark mode, selected workflow and current conversation,
+- agent state needed for guided workflows like the ClickHouse Query agent.
+
+### Sync behaviour
+
+- On startup, the frontend fetches the latest state from the backend.
+- If the backend DB is empty but the browser still has legacy data, the app migrates that state into `DB.json`.
+- The app re-syncs when the window regains focus or becomes visible again.
+- The browser still keeps a lightweight fallback cache, but the backend DB is the source of truth.
+
+### Backup tools
+
+In **Settings → DB Backup**, you can:
+
+- export the current backend DB as JSON,
+- import a previous JSON backup,
+- force a manual resync from the backend.
 
 ### MCP Tools
 
@@ -201,6 +263,50 @@ Cited generation  ── LLM answers with [1][2] citations
     ▼
 Response + sources + confidence score
 ```
+
+---
+
+## ClickHouse Query Agent
+
+The ClickHouse Query agent is designed to follow a conservative analytics workflow instead of guessing columns blindly.
+
+### Workflow
+
+```text
+User enters request
+    ↓
+Agent lists available ClickHouse tables
+    ↓
+User selects one table
+    ↓
+Backend inspects system.columns for that table
+    ↓
+Local LLM maps request to likely business fields
+    ↓
+If ambiguous: user chooses field and/or date column
+    ↓
+Local LLM generates one safe read-only SQL query
+    ↓
+Backend validates and executes the query in ClickHouse
+    ↓
+Local LLM writes final answer in English
+```
+
+### Safety / best-practice behaviour
+
+- Only read-only `SELECT` / `WITH ... SELECT` style queries are accepted.
+- Multi-statement SQL is rejected.
+- Destructive keywords such as `DROP`, `ALTER`, `DELETE`, `INSERT`, `TRUNCATE`, etc. are blocked.
+- The backend enforces a result limit for row-oriented queries.
+- The agent tries to repair SQL once if ClickHouse returns an execution error.
+- The response stays short and includes both the SQL and a reasoning summary for auditability.
+
+### Backend endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/clickhouse/test` | Test ClickHouse connectivity and preview available tables |
+| `POST /api/chat/clickhouse-agent` | Guided ClickHouse agent workflow: discover tables, inspect schema, clarify fields/dates, generate and execute SQL |
 
 ---
 
@@ -265,6 +371,30 @@ All settings are available in-app via the **⚙ Settings** panel (no `.env` file
 | Chunk Overlap | `50` | Sentence overlap between chunks |
 | KNN Neighbors | `50` | Nearest neighbours to retrieve |
 
+### ClickHouse Query Agent Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Host | `localhost` | ClickHouse HTTP host |
+| Port | `8123` | ClickHouse HTTP port |
+| Database | `default` | Target database used by the agent |
+| Username | `default` | ClickHouse username |
+| Password | — | ClickHouse password |
+| Use HTTPS | `false` | Switches the ClickHouse connection to HTTPS |
+| Verify SSL certificate | `true` | Controls TLS verification for HTTPS connections |
+| HTTP Path | empty | Optional custom ClickHouse HTTP path |
+| Default Query Limit | `200` | Safety cap applied to row-returning ClickHouse queries |
+
+Use **Test ClickHouse** in the settings panel to verify the connection and preview the first available tables.
+
+### DB Backup Settings
+
+| Action | Description |
+|--------|-------------|
+| Export backup | Download the current `DB.json` content as a JSON file |
+| Import backup | Replace the current backend state with a previous JSON backup |
+| Resync now | Reload the frontend from the latest backend DB state |
+
 ### MCP Tools Settings
 
 Each MCP tool entry has:
@@ -300,11 +430,12 @@ Access the app at `http://localhost:8000`.
 
 ODIN AI Portal is designed to be **100% local**:
 
-- No data is sent to any cloud service.
+- No data is sent to any cloud service unless you explicitly configure a remote OpenAI-compatible, OpenSearch or ClickHouse endpoint.
 - No telemetry, no analytics, no tracking.
-- All models run on your own hardware via Ollama.
-- Conversation history is stored only in your browser's `localStorage`.
-- OpenSearch runs on your own infrastructure.
+- Models can run fully on your own hardware via Ollama.
+- Durable application state is stored locally in backend-managed `DB.json`.
+- The browser keeps a fallback cache, but the backend DB is the primary state source.
+- OpenSearch and ClickHouse can run on your own infrastructure.
 
 ---
 
@@ -316,6 +447,7 @@ ODIN AI Portal is designed to be **100% local**:
 | Markdown | ReactMarkdown, remark-gfm, remark-breaks, rehype-raw, react-syntax-highlighter |
 | Backend | Python 3.11, FastAPI, Uvicorn |
 | Vector store | OpenSearch (`opensearch-py`) |
+| SQL analytics | ClickHouse over HTTP (`httpx`) |
 | MCP client | `mcp` Python SDK (SSE transport) |
 | HTTP client | `httpx` (async) |
 | LLM / Embeddings | Ollama or any OpenAI-compatible API |
