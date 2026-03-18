@@ -1,6 +1,8 @@
 import React, { useState } from "react";
-import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, CircleDashed, Loader2, XCircle, BrainCircuit, File } from "lucide-react";
-import { Message, cn, parseMarkdownToHTML, AgentStep } from "../lib/utils";
+import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, CircleDashed, Loader2, XCircle, BrainCircuit, File, Database } from "lucide-react";
+import { Message, cn, AgentStep, preprocessMarkdown } from "../lib/utils";
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface ChatMessageProps {
   message: Message;
@@ -8,29 +10,19 @@ interface ChatMessageProps {
   showSteps?: boolean;
 }
 
+/**
+ * ChatMessage Component
+ * Renders a single message bubble (either from the user or the assistant).
+ * Handles markdown rendering, attachments, agent thinking steps, and RAG sources.
+ */
 export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: ChatMessageProps) {
   const isUser = message.role === "user";
+  
+  // State for collapsible sections
   const [isStepsExpanded, setIsStepsExpanded] = useState(false);
+  const [isSourcesExpanded, setIsSourcesExpanded] = useState(false);
 
-  const handleHtmlClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    if (target.tagName === 'INPUT' && target.getAttribute('type') === 'checkbox') {
-      const li = target.closest('.task-list-item');
-      if (li) {
-        const text = li.getAttribute('data-task') || '';
-        const checked = (target as HTMLInputElement).checked;
-        onCheckboxToggle?.(message.id, text, checked);
-      }
-    } else if (target.closest('.task-list-item')) {
-      // Allow clicking the li to toggle the checkbox
-      const li = target.closest('.task-list-item');
-      const input = li?.querySelector('input');
-      if (input && target.tagName !== 'INPUT') {
-        (input as HTMLInputElement).click();
-      }
-    }
-  };
-
+  // Helper to render the appropriate icon for agent thinking steps
   const renderStepIcon = (status: AgentStep['status']) => {
     switch (status) {
       case 'success': return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
@@ -66,6 +58,7 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
             : "glass-panel rounded-tl-sm w-full"
         )}
       >
+        {/* Agent Thinking Steps (Collapsible) */}
         {showSteps && !isUser && message.steps && message.steps.length > 0 && (
           <div className="mb-4 bg-white/60 border border-gray-200/60 rounded-xl overflow-hidden shadow-sm">
             <button 
@@ -103,6 +96,7 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
           </div>
         )}
 
+        {/* Attachments Display (Images or Files) */}
         {message.attachments && message.attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-3">
             {message.attachments.map(att => (
@@ -123,16 +117,120 @@ export function ChatMessage({ message, onCheckboxToggle, showSteps = true }: Cha
           </div>
         )}
 
+        {/* User messages are shown as plain text */}
         {isUser ? (
           <div className="whitespace-pre-wrap text-[14px] leading-relaxed">
             {message.content}
           </div>
         ) : (
-          <div 
-            className="markdown-body"
-            onClick={handleHtmlClick}
-            dangerouslySetInnerHTML={{ __html: parseMarkdownToHTML(message.content) }}
-          />
+          <>
+            {/* Assistant messages are rendered as Markdown */}
+            <div className="markdown-body">
+              <ReactMarkdown 
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  // Custom rendering for list items to support interactive task lists
+                  li: ({ node, checked, className, children, ...props }) => {
+                    const isTask = className?.includes('task-list-item');
+                    if (isTask) {
+                      // Extract text content from children
+                      let text = '';
+                      React.Children.forEach(children, child => {
+                        if (typeof child === 'string') text += child;
+                        else if (React.isValidElement(child) && child.props.children) {
+                          if (typeof child.props.children === 'string') text += child.props.children;
+                        }
+                      });
+                      text = text.trim();
+
+                      return (
+                        <li className={className} {...props} onClick={(e) => {
+                          if ((e.target as HTMLElement).tagName !== 'INPUT') {
+                            const input = e.currentTarget.querySelector('input');
+                            if (input) {
+                              input.checked = !input.checked;
+                              onCheckboxToggle?.(message.id, text, input.checked);
+                            }
+                          }
+                        }}>
+                          {children}
+                        </li>
+                      );
+                    }
+                    return <li className={className} {...props}>{children}</li>;
+                  },
+                  // Custom rendering for input elements (specifically checkboxes)
+                  input: ({ node, checked, type, ...props }) => {
+                    if (type === 'checkbox') {
+                      return (
+                        <input 
+                          type="checkbox" 
+                          checked={checked} 
+                          onChange={(e) => {
+                            const li = e.target.closest('li');
+                            let text = '';
+                            if (li) {
+                              text = li.textContent || '';
+                            }
+                            onCheckboxToggle?.(message.id, text.trim(), e.target.checked);
+                          }}
+                          {...props} 
+                          disabled={false} // Enable the checkbox
+                        />
+                      );
+                    }
+                    return <input type={type} {...props} />;
+                  }
+                }}
+              >
+                {/* Preprocess markdown to fix common formatting issues before rendering */}
+                {preprocessMarkdown(message.content)}
+              </ReactMarkdown>
+            </div>
+            
+            {/* RAG Confidence Warning: Show if the retrieval score is too low */}
+            {message.confidence !== undefined && message.confidence < 0.4 && (
+              <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-amber-800 text-xs">
+                <XCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                <p><strong>Attention :</strong> Les documents trouvés semblent peu pertinents par rapport à votre question (score: {Math.round(message.confidence * 100)}%). La réponse peut être imprécise.</p>
+              </div>
+            )}
+
+            {/* RAG Sources Inspector (Collapsible) */}
+            {message.sources && message.sources.length > 0 && (
+              <div className="mt-4 border-t border-gray-200/60 pt-3">
+                <button 
+                  onClick={() => setIsSourcesExpanded(!isSourcesExpanded)}
+                  className="flex items-center gap-2 text-xs font-medium text-gray-500 hover:text-gray-800 transition-colors"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  Inspecteur RAG ({message.sources.length} sources)
+                  {isSourcesExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                </button>
+                
+                {isSourcesExpanded && (
+                  <div className="mt-3 space-y-2">
+                    {message.sources.map((source, idx) => (
+                      <div key={source.id} className="bg-white/60 border border-gray-200 rounded-lg p-3 text-xs">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="font-semibold text-gray-700 flex items-center gap-1.5">
+                            <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[10px]">[{idx + 1}]</span>
+                            {source.docName}
+                          </span>
+                          <span className={cn("font-mono text-[10px] px-1.5 py-0.5 rounded", source.score > 0.6 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+                            Score: {Math.round(source.score * 100)}%
+                          </span>
+                        </div>
+                        <p className="text-gray-600 line-clamp-3 hover:line-clamp-none transition-all duration-300 leading-relaxed">
+                          {source.text}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

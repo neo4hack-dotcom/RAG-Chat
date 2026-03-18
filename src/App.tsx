@@ -3,10 +3,15 @@ import { ChatInterface } from './components/ChatInterface';
 import { SettingsModal } from './components/SettingsModal';
 import { AppConfig, DEFAULT_CONFIG } from './lib/utils';
 
+/**
+ * Main Application Component
+ * Manages the global state for application configuration and settings modal visibility.
+ */
 export default function App() {
+  // State to control the visibility of the settings modal
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
-  // Load config from localStorage or use default
+  // Load configuration from localStorage on initial render, or fallback to DEFAULT_CONFIG
   const [config, setConfig] = useState<AppConfig>(() => {
     const saved = localStorage.getItem('liquid-ai-config');
     if (saved) {
@@ -19,17 +24,20 @@ export default function App() {
     return DEFAULT_CONFIG;
   });
 
-  // Save config to localStorage whenever it changes
+  // Persist configuration to localStorage whenever it changes
   useEffect(() => {
     localStorage.setItem('liquid-ai-config', JSON.stringify(config));
   }, [config]);
 
   return (
     <>
+      {/* Main Chat Interface */}
       <ChatInterface
         config={config}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
+      
+      {/* Settings Modal overlay */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

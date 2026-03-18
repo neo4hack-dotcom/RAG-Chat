@@ -9,10 +9,15 @@ interface ChatInterfaceProps {
 }
 
 export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
+  // --- STATE MANAGEMENT ---
+  
+  // Load conversation history from local storage
   const [conversations, setConversations] = useState<Conversation[]>(() => {
     const saved = localStorage.getItem('ragnarok_conversations');
     return saved ? JSON.parse(saved) : [];
   });
+  
+  // Track the currently active conversation ID
   const [currentId, setCurrentId] = useState<string | null>(() => {
     const saved = localStorage.getItem('ragnarok_conversations');
     if (saved) {
@@ -22,17 +27,24 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     return null;
   });
 
+  // UI and Interaction states
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
+  
+  // Workflow mode: Standard LLM, RAG (Retrieval-Augmented Generation), or Multi-Agent
   const [workflow, setWorkflow] = useState<'LLM' | 'RAG' | 'AGENT'>('LLM');
   const [agentRole, setAgentRole] = useState<'manager' | 'analyst' | 'researcher'>('manager');
+  
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  
+  // Refs for DOM elements
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Persist conversations whenever they change
   useEffect(() => {
     localStorage.setItem('ragnarok_conversations', JSON.stringify(conversations));
   }, [conversations]);
@@ -51,11 +63,34 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     },
   ];
 
+  // --- ACTIONS ---
+  
+  // Start a completely new chat session
   const createNewChat = () => {
     setCurrentId(null);
     setInput("");
   };
 
+  // Reset the current chat to its initial state (welcome message only)
+  const clearCurrentChat = () => {
+    if (!currentId) return;
+    setConversations(prev => prev.map(c => 
+      c.id === currentId 
+        ? { ...c, messages: [{
+            id: Date.now().toString(),
+            role: "assistant",
+            content: "# Welcome to RAGnarok ⚡️\n\nI'm your AI assistant, ready to connect to your LLMs, RAG system, or agents.",
+            timestamp: Date.now(),
+            steps: [
+              { id: 'init-1', title: 'System Initialization', status: 'success', details: 'Loaded configuration and connected to local environment.' },
+              { id: 'init-2', title: 'Ready for Instructions', status: 'success', details: 'Awaiting your commands to orchestrate sub-agents or query the RAG database.' }
+            ]
+          }], updatedAt: Date.now() } 
+        : c
+    ));
+  };
+
+  // Delete a specific conversation from history
   const deleteConversation = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     const updated = conversations.filter(c => c.id !== id);
@@ -65,6 +100,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     }
   };
 
+  // Auto-scroll to the bottom of the chat when new messages arrive
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -73,6 +109,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     scrollToBottom();
   }, [messages, isLoading]);
 
+  // Handle file selection for attachments
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     files.forEach(file => {
@@ -91,10 +128,12 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  // Remove an attachment before sending
   const removeAttachment = (id: string) => {
     setAttachments(prev => prev.filter(a => a.id !== id));
   };
 
+  // Auto-resize the textarea based on content
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     if (textareaRef.current) {
@@ -103,9 +142,11 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     }
   };
 
+  // Main function to handle sending a message
   const handleSend = async (text: string = input) => {
     if ((!text.trim() && attachments.length === 0) || isLoading) return;
 
+    // Construct the user message object
     const userMsg: Message = {
       id: Date.now().toString(),
       role: "user",
@@ -117,6 +158,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     let activeConvId = currentId;
     let activeMessages = [...messages, userMsg];
 
+    // Create a new conversation if one doesn't exist
     if (!activeConvId) {
       activeConvId = Date.now().toString();
       const newConv: Conversation = {
@@ -128,6 +170,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
       setConversations(prev => [newConv, ...prev]);
       setCurrentId(activeConvId);
     } else {
+      // Update the existing conversation and move it to the top of the list
       setConversations(prev => {
         const idx = prev.findIndex(c => c.id === activeConvId);
         if (idx === -1) return prev;
@@ -143,6 +186,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
       });
     }
 
+    // Reset input fields and UI state
     setInput("");
     setAttachments([]);
     if (textareaRef.current) {
@@ -151,95 +195,110 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
     setIsLoading(true);
 
     try {
-      let dynamicSystemPrompt = config.systemPrompt;
+      let reply = "";
+      let sources = undefined;
+      let confidence = undefined;
+
+      // Route the request based on the selected workflow
       if (workflow === 'RAG') {
-        dynamicSystemPrompt += "\n\n[SYSTEM: You are currently operating in RAG mode. You have access to a knowledge base.]";
-      } else if (workflow === 'AGENT') {
-        dynamicSystemPrompt += `\n\n[SYSTEM: You are currently operating as an Agent with the role: ${agentRole.toUpperCase()}. Act accordingly.]`;
-      }
+        // Call our full-stack RAG backend
+        const response = await fetch('/api/chat/rag', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: activeMessages.filter(m => m.role !== 'system')
+          })
+        });
 
-      // Prepare messages for OpenAI/Ollama format
-      const apiMessages = [
-        { role: "system", content: dynamicSystemPrompt },
-        ...activeMessages.map((m) => {
-          if (m.role === 'user' && m.attachments && m.attachments.length > 0) {
-            if (config.provider === 'ollama') {
-              // Ollama expects base64 without the data:image/jpeg;base64, prefix for images
-              const images = m.attachments
-                .filter(a => a.type.startsWith('image/'))
-                .map(a => a.data.split(',')[1]);
-              
-              const textAttachments = m.attachments
-                .filter(a => !a.type.startsWith('image/'))
-                .map(a => `[Attached File: ${a.name}]`);
+        if (!response.ok) throw new Error(`RAG Backend error! status: ${response.status}`);
+        const data = await response.json();
+        reply = data.answer;
+        sources = data.sources;
+        confidence = data.confidence;
+        setIsConnected(true);
+      } else {
+        // Standard LLM / Agent flow (calls external API directly from frontend)
+        let dynamicSystemPrompt = config.systemPrompt;
+        if (workflow === 'AGENT') {
+          dynamicSystemPrompt += `\n\n[SYSTEM: You are currently operating as an Agent with the role: ${agentRole.toUpperCase()}. Act accordingly.]`;
+        }
 
-              const content = textAttachments.length > 0 
-                ? `${m.content}\n\n${textAttachments.join('\n')}`
-                : m.content;
-
-              return {
-                role: m.role,
-                content: content,
-                images: images.length > 0 ? images : undefined
-              };
-            } else {
-              // OpenAI format
-              const content: any[] = [{ type: "text", text: m.content }];
-              m.attachments.forEach(a => {
-                if (a.type.startsWith('image/')) {
-                  content.push({
-                    type: "image_url",
-                    image_url: { url: a.data }
-                  });
-                } else {
-                  content[0].text += `\n\n[Attached File: ${a.name}]`;
-                }
-              });
-              return { role: m.role, content };
+        // Prepare messages for OpenAI/Ollama format, handling attachments
+        const apiMessages = [
+          { role: "system", content: dynamicSystemPrompt },
+          ...activeMessages.map((m) => {
+            if (m.role === 'user' && m.attachments && m.attachments.length > 0) {
+              if (config.provider === 'ollama') {
+                const images = m.attachments
+                  .filter(a => a.type.startsWith('image/'))
+                  .map(a => a.data.split(',')[1]);
+                const textAttachments = m.attachments
+                  .filter(a => !a.type.startsWith('image/'))
+                  .map(a => `[Attached File: ${a.name}]`);
+                const content = textAttachments.length > 0 
+                  ? `${m.content}\n\n${textAttachments.join('\n')}`
+                  : m.content;
+                return {
+                  role: m.role,
+                  content: content,
+                  images: images.length > 0 ? images : undefined
+                };
+              } else {
+                const content: any[] = [{ type: "text", text: m.content }];
+                m.attachments.forEach(a => {
+                  if (a.type.startsWith('image/')) {
+                    content.push({ type: "image_url", image_url: { url: a.data } });
+                  } else {
+                    content[0].text += `\n\n[Attached File: ${a.name}]`;
+                  }
+                });
+                return { role: m.role, content };
+              }
             }
-          }
-          return { role: m.role, content: m.content };
-        }),
-      ];
+            return { role: m.role, content: m.content };
+          }),
+        ];
 
-      const baseUrl = (config.baseUrl || (config as any).endpoint || 'http://localhost:11434').replace(/\/$/, '');
-      const chatEndpoint = config.provider === 'ollama' 
-        ? `${baseUrl}/api/chat` 
-        : `${baseUrl}/chat/completions`;
+        const baseUrl = (config.baseUrl || (config as any).endpoint || 'http://localhost:11434').replace(/\/$/, '');
+        const chatEndpoint = config.provider === 'ollama' 
+          ? `${baseUrl}/api/chat` 
+          : `${baseUrl}/chat/completions`;
 
-      const payload = {
-        model: config.model,
-        messages: apiMessages,
-        stream: false,
-      };
+        const payload = {
+          model: config.model,
+          messages: apiMessages,
+          stream: false,
+        };
 
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
 
-      if (config.apiKey) {
-        headers["Authorization"] = `Bearer ${config.apiKey}`;
-      }
+        if (config.apiKey) {
+          headers["Authorization"] = `Bearer ${config.apiKey}`;
+        }
 
-      const response = await fetch(chatEndpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      });
+        const response = await fetch(chatEndpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+        });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
 
-      setIsConnected(true);
-      const data = await response.json();
-      
-      const reply = config.provider === 'ollama' 
-        ? data.message?.content 
-        : data.choices?.[0]?.message?.content;
+        setIsConnected(true);
+        const data = await response.json();
+        
+        reply = config.provider === 'ollama' 
+          ? data.message?.content 
+          : data.choices?.[0]?.message?.content;
 
-      if (!reply) {
-        throw new Error("Invalid response format from API");
+        if (!reply) {
+          throw new Error("Invalid response format from API");
+        }
       }
 
       const assistantMsg: Message = {
@@ -247,6 +306,8 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
         role: "assistant",
         content: reply,
         timestamp: Date.now(),
+        sources,
+        confidence,
       };
 
       // Mock steps for Agent Manager to showcase the UI for LangGraph integration
@@ -363,7 +424,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col relative z-10 h-screen overflow-hidden">
         {/* Header */}
-      <header className="glass-panel m-4 rounded-2xl px-6 py-4 flex items-center justify-between z-10 relative">
+      <header className="glass-panel m-2 rounded-xl px-4 py-2 flex items-center justify-between z-10 relative">
         {/* Left: Sidebar Toggle */}
         <div className="flex items-center w-1/3">
           <button 
@@ -377,29 +438,39 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
 
         {/* Center: Title & Icons */}
         <div className="flex flex-col items-center justify-center w-1/3">
-          <div className="flex items-center gap-6">
-            <div className="w-8 h-8 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
-              <Hammer className="w-4 h-4 text-white" />
+          <div className="flex items-center gap-4">
+            <div className="w-6 h-6 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
+              <Hammer className="w-3 h-3 text-white" />
             </div>
-            <h1 className="text-2xl font-bold text-gray-900 tracking-tight">RAGnarok</h1>
-            <div className="w-8 h-8 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
-              <Hammer className="w-4 h-4 text-white" />
+            <h1 className="text-xl font-bold text-gray-900 tracking-tight">RAGnarok</h1>
+            <div className="w-6 h-6 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
+              <Hammer className="w-3 h-3 text-white" />
             </div>
           </div>
-          <div className="flex items-center gap-2 text-[11px] font-medium text-gray-500 mt-1">
-            <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]'}`} />
+          <div className="flex items-center gap-2 text-[10px] font-medium text-gray-500 mt-0.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]'}`} />
             {isConnected ? 'Active' : 'Offline'}
           </div>
         </div>
 
         {/* Right: Settings */}
-        <div className="flex items-center justify-end w-1/3">
+        <div className="flex items-center justify-end w-1/3 gap-1">
+          {currentId && (
+            <button
+              onClick={clearCurrentChat}
+              className="glass-button p-2 rounded-xl text-red-600 hover:text-red-700 hover:bg-red-50 flex items-center gap-1.5"
+              title="Purger la conversation"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span className="hidden sm:inline text-xs font-medium">Purger</span>
+            </button>
+          )}
           <button
             onClick={onOpenSettings}
-            className="glass-button p-2.5 rounded-xl text-gray-600 hover:text-gray-900"
+            className="glass-button p-2 rounded-xl text-gray-600 hover:text-gray-900"
             title="Configuration"
           >
-            <Settings className="w-5 h-5" />
+            <Settings className="w-4 h-4" />
           </button>
         </div>
       </header>
@@ -429,37 +500,37 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           )}
 
           {workflow === 'AGENT' && agentRole === 'manager' && (
-            <div className="max-w-4xl mx-auto mb-8 p-5 rounded-2xl bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200/50 shadow-sm animate-fade-in-up">
-              <div className="flex items-center gap-2 mb-3">
-                <Star className="w-5 h-5 text-amber-500 fill-amber-500" />
+            <div className="max-w-4xl mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200/50 shadow-sm animate-fade-in-up">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
                 <h3 className="font-semibold text-amber-900 text-[13px]">Agent Manager Brief</h3>
               </div>
-              <div className="text-[11px] text-amber-800/90 leading-relaxed space-y-2">
+              <div className="text-[11px] text-amber-800/90 leading-relaxed space-y-1">
                 <p>Welcome to the <strong>Agent Manager</strong> mode. Here is what you can do:</p>
-                <ul className="list-disc pl-4 space-y-1">
+                <ul className="list-disc pl-4 space-y-0.5">
                   <li>Orchestrate multiple sub-agents to solve complex tasks.</li>
                   <li>Delegate research, analysis, and coding to specialized AI roles.</li>
                   <li>Review and synthesize the final output from all agents.</li>
                 </ul>
-                <p className="italic mt-2 text-amber-700/70">Tip: Start by describing your overarching goal, and the Manager will handle the rest.</p>
+                <p className="italic mt-1 text-amber-700/70">Tip: Start by describing your overarching goal, and the Manager will handle the rest.</p>
               </div>
             </div>
           )}
 
           {workflow === 'RAG' && (
-            <div className="max-w-4xl mx-auto mb-8 p-5 rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200/50 shadow-sm animate-fade-in-up">
-              <div className="flex items-center gap-2 mb-3">
-                <Database className="w-5 h-5 text-blue-500" />
+            <div className="max-w-4xl mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200/50 shadow-sm animate-fade-in-up">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Database className="w-4 h-4 text-blue-500" />
                 <h3 className="font-semibold text-blue-900 text-[13px]">Retrieval-Augmented Generation (RAG)</h3>
               </div>
-              <div className="text-[11px] text-blue-800/90 leading-relaxed space-y-2">
+              <div className="text-[11px] text-blue-800/90 leading-relaxed space-y-1">
                 <p>Welcome to <strong>RAG</strong> mode. This workflow helps you find and synthesize information from your documents:</p>
-                <ul className="list-disc pl-4 space-y-1">
+                <ul className="list-disc pl-4 space-y-0.5">
                   <li><strong>Retrieve:</strong> Your query is converted into a vector using the local embedding model and searched against the Elasticsearch database.</li>
                   <li><strong>Augment:</strong> The most relevant document chunks (optimized with overlap) are retrieved using K-Nearest Neighbors (KNN).</li>
                   <li><strong>Generate:</strong> The LLM uses this retrieved context to provide accurate, grounded answers.</li>
                 </ul>
-                <p className="italic mt-2 text-blue-700/70">Tip: You can configure the Elasticsearch URL, embedding model, chunk size, and KNN neighbors in the settings.</p>
+                <p className="italic mt-1 text-blue-700/70">Tip: You can configure the Elasticsearch URL, embedding model, chunk size, and KNN neighbors in the settings.</p>
               </div>
             </div>
           )}

@@ -9,7 +9,13 @@ interface SettingsModalProps {
   onSave: (config: AppConfig) => void;
 }
 
+/**
+ * SettingsModal Component
+ * Provides a UI for configuring application settings, including LLM provider details,
+ * RAG parameters (Elasticsearch, Embeddings), and system prompts.
+ */
 export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModalProps) {
+  // Local state to hold configuration changes before saving
   const [localConfig, setLocalConfig] = useState<AppConfig>({
     provider: config.provider || 'ollama',
     baseUrl: config.baseUrl || (config as any).endpoint || 'http://localhost:11434',
@@ -23,20 +29,29 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     chunkOverlap: config.chunkOverlap || 50,
     knnNeighbors: config.knnNeighbors || 50
   });
+  
+  // State for available models fetched from the provider
   const [models, setModels] = useState<string[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  
+  // Connection test states for LLM
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
+  
+  // Tab state (LLM vs RAG settings)
   const [activeTab, setActiveTab] = useState<'llm' | 'rag'>('llm');
 
+  // Connection test states for Elasticsearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [esTestMessage, setEsTestMessage] = useState('');
   
+  // Connection test states for Embedding model
   const [embedTestStatus, setEmbedTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [embedTestMessage, setEmbedTestMessage] = useState('');
 
   if (!isOpen) return null;
 
+  // Test connection to the Elasticsearch instance
   const testElasticsearchConnection = async () => {
     setEsTestStatus('testing');
     setEsTestMessage('');
@@ -54,6 +69,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     }
   };
 
+  // Test connection to the Embedding model provider
   const testEmbeddingConnection = async () => {
     setEmbedTestStatus('testing');
     setEmbedTestMessage('');
@@ -76,6 +92,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     }
   };
 
+  // Fetch available models from the configured LLM provider
   const fetchModels = async (testConnection = false) => {
     if (testConnection) {
       setTestStatus('testing');
@@ -137,6 +154,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     }
   };
 
+  // Handle saving the configuration and closing the modal
   const handleSave = () => {
     onSave(localConfig);
     onClose();
