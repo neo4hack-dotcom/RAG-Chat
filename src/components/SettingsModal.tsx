@@ -35,6 +35,15 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     knnNeighbors: config.knnNeighbors || 50,
     mcpTools: config.mcpTools ?? [],
     documentationUrl: config.documentationUrl ?? '',
+    clickhouseHost: config.clickhouseHost || 'localhost',
+    clickhousePort: config.clickhousePort || 8123,
+    clickhouseDatabase: config.clickhouseDatabase || 'default',
+    clickhouseUsername: config.clickhouseUsername || 'default',
+    clickhousePassword: config.clickhousePassword || '',
+    clickhouseSecure: config.clickhouseSecure ?? false,
+    clickhouseVerifySsl: config.clickhouseVerifySsl ?? true,
+    clickhouseHttpPath: config.clickhouseHttpPath ?? '',
+    clickhouseQueryLimit: config.clickhouseQueryLimit || 200,
   };
 }
 
@@ -76,6 +85,9 @@ export function SettingsModal({
   // Connection test states for OpenSearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [esTestMessage, setEsTestMessage] = useState('');
+  const [clickhouseTestStatus, setClickhouseTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [clickhouseTestMessage, setClickhouseTestMessage] = useState('');
+  const [clickhouseTablesPreview, setClickhouseTablesPreview] = useState<string[]>([]);
 
   // Setup index status
   const [setupStatus, setSetupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
@@ -154,6 +166,42 @@ export function SettingsModal({
     } catch (err) {
       setEsTestStatus('error');
       setEsTestMessage(err instanceof Error ? err.message : 'Failed to connect');
+    }
+  };
+
+  const testClickHouseConnection = async () => {
+    setClickhouseTestStatus('testing');
+    setClickhouseTestMessage('');
+    setClickhouseTablesPreview([]);
+    try {
+      const response = await fetch('/api/clickhouse/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clickhouse: {
+            host: localConfig.clickhouseHost,
+            port: localConfig.clickhousePort,
+            database: localConfig.clickhouseDatabase,
+            username: localConfig.clickhouseUsername,
+            password: localConfig.clickhousePassword,
+            secure: localConfig.clickhouseSecure,
+            verify_ssl: localConfig.clickhouseVerifySsl,
+            http_path: localConfig.clickhouseHttpPath,
+            query_limit: localConfig.clickhouseQueryLimit,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      setClickhouseTestStatus('success');
+      setClickhouseTestMessage(`Connected · db: ${data.database} · v${data.version} · ${data.table_count} table(s)`);
+      setClickhouseTablesPreview(data.tables || []);
+    } catch (err) {
+      setClickhouseTestStatus('error');
+      setClickhouseTestMessage(err instanceof Error ? err.message : 'Failed to connect');
     }
   };
 
@@ -844,6 +892,159 @@ export function SettingsModal({
                     placeholder="••••••••"
                     autoComplete="current-password"
                   />
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-cyan-500" /> ClickHouse Query Agent
+                </h3>
+
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                        <Server className="w-4 h-4" /> Host
+                      </label>
+                      <input
+                        type="text"
+                        value={localConfig.clickhouseHost}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseHost: e.target.value })}
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                        placeholder="localhost"
+                      />
+                    </div>
+                    <div>
+                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                        <Server className="w-4 h-4" /> Port
+                      </label>
+                      <input
+                        type="number"
+                        value={localConfig.clickhousePort}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhousePort: parseInt(e.target.value, 10) || 8123 })}
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                        placeholder="8123"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                        <Database className="w-4 h-4" /> Database
+                      </label>
+                      <input
+                        type="text"
+                        value={localConfig.clickhouseDatabase}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseDatabase: e.target.value })}
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                        placeholder="default"
+                      />
+                    </div>
+                    <div>
+                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                        <Server className="w-4 h-4" /> HTTP Path
+                      </label>
+                      <input
+                        type="text"
+                        value={localConfig.clickhouseHttpPath}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseHttpPath: e.target.value })}
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                        placeholder="Leave empty for default root path"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                        <Key className="w-4 h-4" /> Username
+                      </label>
+                      <input
+                        type="text"
+                        value={localConfig.clickhouseUsername}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseUsername: e.target.value })}
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                        placeholder="default"
+                        autoComplete="username"
+                      />
+                    </div>
+                    <div>
+                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                        <Key className="w-4 h-4" /> Password
+                      </label>
+                      <input
+                        type="password"
+                        value={localConfig.clickhousePassword}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhousePassword: e.target.value })}
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                        placeholder="••••••••"
+                        autoComplete="current-password"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={localConfig.clickhouseSecure}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseSecure: e.target.checked })}
+                        className="w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500"
+                      />
+                      <span className="text-xs text-gray-600 dark:text-gray-400">Use HTTPS</span>
+                    </label>
+                    <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={localConfig.clickhouseVerifySsl}
+                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseVerifySsl: e.target.checked })}
+                        className="w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500"
+                      />
+                      <span className="text-xs text-gray-600 dark:text-gray-400">Verify SSL certificate</span>
+                    </label>
+                  </div>
+
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <SlidersHorizontal className="w-4 h-4" /> Default Query Limit
+                    </label>
+                    <input
+                      type="number"
+                      value={localConfig.clickhouseQueryLimit}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseQueryLimit: parseInt(e.target.value, 10) || 200 })}
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Used by the ClickHouse agent to keep row-level queries bounded and safe.</p>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={testClickHouseConnection}
+                      disabled={clickhouseTestStatus === 'testing'}
+                      className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
+                    >
+                      {clickhouseTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test ClickHouse'}
+                    </button>
+                  </div>
+                  {clickhouseTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {clickhouseTestMessage}</p>}
+                  {clickhouseTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3" /> {clickhouseTestMessage}</p>}
+
+                  {clickhouseTablesPreview.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-gray-600 dark:text-gray-300">Available tables preview</p>
+                      <div className="flex flex-wrap gap-1">
+                        {clickhouseTablesPreview.map((table) => (
+                          <span
+                            key={table}
+                            className="px-2 py-0.5 bg-cyan-50 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-700 rounded-md text-[10px] font-medium"
+                          >
+                            {table}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
