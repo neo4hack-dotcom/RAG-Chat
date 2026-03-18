@@ -442,13 +442,13 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
 
         {/* Center: Title & Icons */}
         <div className="flex flex-col items-center justify-center w-1/3">
-          <div className="flex items-center gap-4">
-            <div className="w-6 h-6 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
-              <Hammer className="w-3 h-3 text-white" />
+          <div className="flex items-center gap-5">
+            <div className="w-9 h-9 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-xl flex items-center justify-center shadow-md shadow-slate-900/20">
+              <Hammer className="w-5 h-5 text-white" />
             </div>
-            <h1 className="text-xl font-bold text-gray-900 tracking-tight">RAGnarok</h1>
-            <div className="w-6 h-6 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-lg flex items-center justify-center shadow-md shadow-slate-900/20">
-              <Hammer className="w-3 h-3 text-white" />
+            <h1 className="text-3xl font-bold text-gray-900 tracking-tight">RAGnarok</h1>
+            <div className="w-9 h-9 bg-gradient-to-tr from-slate-700 to-slate-900 rounded-xl flex items-center justify-center shadow-md shadow-slate-900/20">
+              <Hammer className="w-5 h-5 text-white" />
             </div>
           </div>
           <div className="flex items-center gap-2 text-[10px] font-medium text-gray-500 mt-0.5">
@@ -481,7 +481,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
 
       {/* Chat Area */}
       <main className="flex-1 overflow-y-auto p-4 md:p-8 z-10 scroll-smooth">
-        <div className="max-w-4xl mx-auto pb-20">
+        <div className="max-w-[67rem] mx-auto pb-20">
           {messages.map((msg) => (
             <ChatMessage
               key={msg.id}
@@ -492,7 +492,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           ))}
           
           {isLoading && (
-            <div className="flex gap-4 w-full max-w-4xl mx-auto mb-8 animate-fade-in-up">
+            <div className="flex gap-4 w-full max-w-[67rem] mx-auto mb-8 animate-fade-in-up">
               <div className="flex-shrink-0 w-10 h-10 rounded-2xl bg-white border border-gray-200 flex items-center justify-center shadow-sm">
                 <Bot className="w-5 h-5 text-gray-400" />
               </div>
@@ -504,7 +504,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           )}
 
           {workflow === 'AGENT' && agentRole === 'manager' && (
-            <div className="max-w-4xl mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200/50 shadow-sm animate-fade-in-up">
+            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200/50 shadow-sm animate-fade-in-up">
               <div className="flex items-center gap-2 mb-1.5">
                 <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
                 <h3 className="font-semibold text-amber-900 text-[13px]">Agent Manager Brief</h3>
@@ -522,7 +522,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           )}
 
           {workflow === 'RAG' && (
-            <div className="max-w-4xl mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200/50 shadow-sm animate-fade-in-up">
+            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200/50 shadow-sm animate-fade-in-up">
               <div className="flex items-center gap-2 mb-1.5">
                 <Database className="w-4 h-4 text-blue-500" />
                 <h3 className="font-semibold text-blue-900 text-[13px]">Retrieval-Augmented Generation (RAG)</h3>
@@ -544,7 +544,7 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
       </main>
 
       {/* Input Area */}
-      <div className="p-4 md:p-8 pt-0 z-10 w-full max-w-4xl mx-auto">
+      <div className="p-4 md:p-8 pt-0 z-10 w-full max-w-[67rem] mx-auto">
         <div className="glass-panel rounded-[2rem] p-2 flex flex-col gap-2 shadow-2xl shadow-black/5">
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 px-4 pt-3 pb-1">
