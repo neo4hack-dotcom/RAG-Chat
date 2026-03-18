@@ -62,6 +62,8 @@ export type AppConfig = {
   systemPrompt: string;
   elasticsearchUrl: string;
   elasticsearchIndex: string;
+  elasticsearchUsername: string;
+  elasticsearchPassword: string;
   embeddingBaseUrl: string;
   embeddingApiKey: string;
   embeddingModel: string;
@@ -81,6 +83,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   systemPrompt: "You are a helpful, smart, and concise AI assistant. Format your responses beautifully using markdown. When offering choices, use markdown task lists (- [ ] Option).",
   elasticsearchUrl: "http://localhost:9200",
   elasticsearchIndex: "rag_documents",
+  elasticsearchUsername: "",
+  elasticsearchPassword: "",
   embeddingBaseUrl: "http://localhost:11434/v1",
   embeddingApiKey: "",
   embeddingModel: "nomic-embed-text",

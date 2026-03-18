@@ -117,6 +117,11 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []
+    # Optional Elasticsearch credentials forwarded by the frontend
+    elasticsearchUrl:      Optional[str] = None
+    elasticsearchIndex:    Optional[str] = None
+    elasticsearchUsername: Optional[str] = None
+    elasticsearchPassword: Optional[str] = None
 
 
 # ── RAG endpoint ─────────────────────────────────────────────────────────────

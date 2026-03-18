@@ -207,7 +207,11 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: text,
-            history: activeMessages.filter(m => m.role !== 'system')
+            history: activeMessages.filter(m => m.role !== 'system'),
+            elasticsearchUrl:      config.elasticsearchUrl,
+            elasticsearchIndex:    config.elasticsearchIndex,
+            elasticsearchUsername: config.elasticsearchUsername,
+            elasticsearchPassword: config.elasticsearchPassword,
           })
         });
 
@@ -459,10 +463,10 @@ export function ChatInterface({ config, onOpenSettings }: ChatInterfaceProps) {
             <button
               onClick={clearCurrentChat}
               className="glass-button p-2 rounded-xl text-red-600 hover:text-red-700 hover:bg-red-50 flex items-center gap-1.5"
-              title="Purger la conversation"
+              title="Reset conversation"
             >
               <Trash2 className="w-4 h-4" />
-              <span className="hidden sm:inline text-xs font-medium">Purger</span>
+              <span className="hidden sm:inline text-xs font-medium">Reset</span>
             </button>
           )}
           <button
