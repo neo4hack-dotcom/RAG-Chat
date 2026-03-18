@@ -1,5 +1,5 @@
-import React, { useState, useRef } from "react";
-import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2, FolderOpen, UploadCloud } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2, FolderOpen, UploadCloud, Download } from "lucide-react";
 import { AppConfig, McpTool } from "../lib/utils";
 
 interface SettingsModalProps {
@@ -7,16 +7,16 @@ interface SettingsModalProps {
   onClose: () => void;
   config: AppConfig;
   onSave: (config: AppConfig) => void;
+  onExportDb: () => Promise<void>;
+  onImportDb: (snapshot: unknown) => Promise<void>;
+  onSyncFromDb: () => Promise<void>;
+  isDbBusy: boolean;
+  lastSyncedAt: string | null;
+  syncError: string | null;
 }
 
-/**
- * SettingsModal Component
- * Provides a UI for configuring application settings, including LLM provider details,
- * RAG parameters (Elasticsearch, Embeddings), and system prompts.
- */
-export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModalProps) {
-  // Local state to hold configuration changes before saving
-  const [localConfig, setLocalConfig] = useState<AppConfig>({
+function buildLocalConfig(config: AppConfig): AppConfig {
+  return {
     provider: config.provider || 'ollama',
     baseUrl: config.baseUrl || (config as any).endpoint || 'http://localhost:11434',
     apiKey: config.apiKey || '',
@@ -35,7 +35,28 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     knnNeighbors: config.knnNeighbors || 50,
     mcpTools: config.mcpTools ?? [],
     documentationUrl: config.documentationUrl ?? '',
-  });
+  };
+}
+
+/**
+ * SettingsModal Component
+ * Provides a UI for configuring application settings, including LLM provider details,
+ * RAG parameters (Elasticsearch, Embeddings), and system prompts.
+ */
+export function SettingsModal({
+  isOpen,
+  onClose,
+  config,
+  onSave,
+  onExportDb,
+  onImportDb,
+  onSyncFromDb,
+  isDbBusy,
+  lastSyncedAt,
+  syncError,
+}: SettingsModalProps) {
+  // Local state to hold configuration changes before saving
+  const [localConfig, setLocalConfig] = useState<AppConfig>(() => buildLocalConfig(config));
   
   // State for available models fetched from the provider
   const [models, setModels] = useState<string[]>([]);
@@ -49,8 +70,8 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
   
-  // Tab state (LLM, RAG, or MCP settings)
-  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'mcp'>('llm');
+  // Tab state (LLM, RAG, MCP, or DB backup settings)
+  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'mcp' | 'storage'>('llm');
 
   // Connection test states for OpenSearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -66,6 +87,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
   const [ingestStatus, setIngestStatus] = useState<'idle' | 'indexing' | 'success' | 'error'>('idle');
   const [ingestMessage, setIngestMessage] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dbImportInputRef = useRef<HTMLInputElement>(null);
 
   // Connection test states for Embedding model
   const [embedTestStatus, setEmbedTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -73,6 +95,12 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
 
   // MCP test states: map of toolId → { status, tools }
   const [mcpTestStates, setMcpTestStates] = useState<Record<string, { status: 'idle' | 'testing' | 'success' | 'error'; message: string; tools: { name: string; description: string }[] }>>({});
+  const [dbStatus, setDbStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
+  const [dbMessage, setDbMessage] = useState('');
+
+  useEffect(() => {
+    setLocalConfig(buildLocalConfig(config));
+  }, [config]);
 
   if (!isOpen) return null;
 
@@ -350,6 +378,47 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     onClose();
   };
 
+  const runDbAction = async (successMessage: string, action: () => Promise<void>) => {
+    setDbStatus('running');
+    setDbMessage('');
+    try {
+      await action();
+      setDbStatus('success');
+      setDbMessage(successMessage);
+    } catch (error) {
+      setDbStatus('error');
+      setDbMessage(error instanceof Error ? error.message : 'DB action failed');
+    }
+  };
+
+  const handleExportDb = async () => {
+    await runDbAction('Sauvegarde DB exportée avec succès.', onExportDb);
+  };
+
+  const handleSyncDb = async () => {
+    await runDbAction('Interface réalignée sur la dernière version de la DB.', onSyncFromDb);
+  };
+
+  const handleImportDbFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const snapshot = JSON.parse(text);
+      await runDbAction(`Sauvegarde "${file.name}" importée avec succès.`, () => onImportDb(snapshot));
+    } catch (error) {
+      setDbStatus('error');
+      setDbMessage(error instanceof Error ? error.message : 'Import DB failed');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const formattedLastSync = lastSyncedAt
+    ? new Date(lastSyncedAt).toLocaleString()
+    : 'Aucune synchronisation confirmée pour le moment.';
+
   return (
     <>
       <div
@@ -390,9 +459,83 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
             >
               MCP Tools
             </button>
+            <button
+              onClick={() => setActiveTab('storage')}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'storage' ? 'border-amber-500 text-amber-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              DB Backup
+            </button>
           </div>
 
-          {activeTab === 'mcp' ? (
+          {activeTab === 'storage' ? (
+            <div className="space-y-5">
+              <div className="p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-900/20 border border-amber-200/70 dark:border-amber-700/40">
+                <div className="flex items-center gap-2 mb-2">
+                  <Database className="w-4 h-4 text-amber-600 dark:text-amber-300" />
+                  <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">Source de vérité: `DB.json`</h3>
+                </div>
+                <p className="text-xs text-amber-800/90 dark:text-amber-300/90 leading-relaxed">
+                  Les informations de connexion, les conversations et les préférences durables sont sauvegardées côté backend. Cette section permet d&apos;exporter, d&apos;importer et de réaligner l&apos;interface avec la dernière version de la base.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <button
+                  onClick={handleSyncDb}
+                  disabled={isDbBusy}
+                  className="px-4 py-3 rounded-2xl bg-white/80 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700 text-sm font-medium text-gray-800 dark:text-gray-100 hover:bg-white dark:hover:bg-gray-800 transition-colors flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {isDbBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Resync now
+                </button>
+                <button
+                  onClick={handleExportDb}
+                  disabled={isDbBusy}
+                  className="px-4 py-3 rounded-2xl bg-white/80 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700 text-sm font-medium text-gray-800 dark:text-gray-100 hover:bg-white dark:hover:bg-gray-800 transition-colors flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {isDbBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  Export backup
+                </button>
+                <button
+                  onClick={() => dbImportInputRef.current?.click()}
+                  disabled={isDbBusy}
+                  className="px-4 py-3 rounded-2xl bg-black text-white text-sm font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {isDbBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                  Import backup
+                </button>
+                <input
+                  ref={dbImportInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={handleImportDbFile}
+                />
+              </div>
+
+              <div className="p-4 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Dernière synchro DB</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400 text-right">{formattedLastSync}</span>
+                </div>
+                {dbStatus === 'success' && (
+                  <p className="text-emerald-600 text-xs flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" /> {dbMessage}
+                  </p>
+                )}
+                {dbStatus === 'error' && (
+                  <p className="text-red-600 text-xs flex items-center gap-1">
+                    <XCircle className="w-3 h-3" /> {dbMessage}
+                  </p>
+                )}
+                {syncError && (
+                  <p className="text-red-600 text-xs flex items-center gap-1">
+                    <XCircle className="w-3 h-3" /> Sync backend: {syncError}
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : activeTab === 'mcp' ? (
             <div className="space-y-5">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">

@@ -51,6 +51,12 @@ export type Conversation = {
   updatedAt: number;
 };
 
+export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP';
+
+export type AgentRole = 'manager' | 'analyst' | 'researcher';
+
+export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
+
 /**
  * Represents a single MCP tool entry configurable by the user.
  */
@@ -84,6 +90,22 @@ export type AppConfig = {
   documentationUrl: string;
 };
 
+export type AppPreferences = {
+  darkMode: boolean;
+  currentConversationId: string | null;
+  workflow: WorkflowMode;
+  agentRole: AgentRole;
+  selectedMcpToolId: string;
+  page: Page;
+};
+
+export type PersistedAppState = {
+  config: AppConfig;
+  conversations: Conversation[];
+  preferences: AppPreferences;
+  updatedAt?: string;
+};
+
 /**
  * Default configuration values used when the app first loads.
  */
@@ -110,6 +132,73 @@ export const DEFAULT_CONFIG: AppConfig = {
   ],
   documentationUrl: '',
 };
+
+export const DEFAULT_PREFERENCES: AppPreferences = {
+  darkMode: false,
+  currentConversationId: null,
+  workflow: 'LLM',
+  agentRole: 'manager',
+  selectedMcpToolId: '',
+  page: 'landing',
+};
+
+export const DEFAULT_PERSISTED_STATE: PersistedAppState = {
+  config: DEFAULT_CONFIG,
+  conversations: [],
+  preferences: DEFAULT_PREFERENCES,
+};
+
+export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfig {
+  return {
+    ...DEFAULT_CONFIG,
+    ...(config ?? {}),
+    mcpTools: Array.isArray(config?.mcpTools)
+      ? config!.mcpTools.map((tool) => ({
+          id: tool.id || `mcp_${Date.now()}`,
+          label: tool.label || 'New Tool',
+          url: tool.url || '',
+        }))
+      : DEFAULT_CONFIG.mcpTools.map((tool) => ({ ...tool })),
+  };
+}
+
+export function normalizeAppPreferences(preferences?: Partial<AppPreferences> | null): AppPreferences {
+  return {
+    ...DEFAULT_PREFERENCES,
+    ...(preferences ?? {}),
+  };
+}
+
+export function normalizePersistedAppState(
+  state?: Partial<PersistedAppState> | null
+): PersistedAppState {
+  const config = normalizeAppConfig(state?.config);
+  const conversations = Array.isArray(state?.conversations) ? state!.conversations : [];
+  const preferences = normalizeAppPreferences(state?.preferences);
+  const hasCurrentConversation = conversations.some((conversation) => conversation.id === preferences.currentConversationId);
+  const selectedMcpToolId = config.mcpTools.some((tool) => tool.id === preferences.selectedMcpToolId)
+    ? preferences.selectedMcpToolId
+    : (config.mcpTools[0]?.id ?? '');
+
+  return {
+    config,
+    conversations,
+    preferences: {
+      ...preferences,
+      currentConversationId: hasCurrentConversation
+        ? preferences.currentConversationId
+        : (conversations[0]?.id ?? null),
+      selectedMcpToolId,
+    },
+    updatedAt: state?.updatedAt,
+  };
+}
+
+export function hasMeaningfulPersistedAppState(state: PersistedAppState): boolean {
+  if (state.conversations.length > 0) return true;
+  if (JSON.stringify(state.config) !== JSON.stringify(DEFAULT_CONFIG)) return true;
+  return JSON.stringify(state.preferences) !== JSON.stringify(DEFAULT_PREFERENCES);
+}
 
 /**
  * Preprocesses markdown text before it is rendered by ReactMarkdown.

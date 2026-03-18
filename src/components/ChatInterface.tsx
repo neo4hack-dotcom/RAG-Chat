@@ -1,45 +1,49 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, Users, BarChart, Search, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 
 interface ChatInterfaceProps {
   config: AppConfig;
+  conversations: Conversation[];
+  currentId: string | null;
+  workflow: WorkflowMode;
+  agentRole: AgentRole;
+  mcpToolId: string;
+  onConversationsChange: React.Dispatch<React.SetStateAction<Conversation[]>>;
+  onCurrentIdChange: (id: string | null) => void;
+  onWorkflowChange: (workflow: WorkflowMode) => void;
+  onAgentRoleChange: (role: AgentRole) => void;
+  onMcpToolIdChange: (id: string) => void;
   onOpenSettings: () => void;
   isDark: boolean;
   onToggleDark: () => void;
   onGoHome?: () => void;
 }
 
-export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, onGoHome }: ChatInterfaceProps) {
+export function ChatInterface({
+  config,
+  conversations,
+  currentId,
+  workflow,
+  agentRole,
+  mcpToolId,
+  onConversationsChange,
+  onCurrentIdChange,
+  onWorkflowChange,
+  onAgentRoleChange,
+  onMcpToolIdChange,
+  onOpenSettings,
+  isDark,
+  onToggleDark,
+  onGoHome,
+}: ChatInterfaceProps) {
   // --- STATE MANAGEMENT ---
-  
-  // Load conversation history from local storage
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    const saved = localStorage.getItem('ragnarok_conversations');
-    return saved ? JSON.parse(saved) : [];
-  });
-  
-  // Track the currently active conversation ID
-  const [currentId, setCurrentId] = useState<string | null>(() => {
-    const saved = localStorage.getItem('ragnarok_conversations');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (parsed.length > 0) return parsed[0].id;
-    }
-    return null;
-  });
 
   // UI and Interaction states
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
-  
-  // Workflow mode: Standard LLM, RAG (Retrieval-Augmented Generation), Multi-Agent, or MCP
-  const [workflow, setWorkflow] = useState<'LLM' | 'RAG' | 'AGENT' | 'MCP'>('LLM');
-  const [agentRole, setAgentRole] = useState<'manager' | 'analyst' | 'researcher'>('manager');
-  const [mcpToolId, setMcpToolId] = useState<string>(() => config.mcpTools?.[0]?.id ?? '');
-  
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   
@@ -47,11 +51,6 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  // Persist conversations whenever they change
-  useEffect(() => {
-    localStorage.setItem('ragnarok_conversations', JSON.stringify(conversations));
-  }, [conversations]);
 
   const currentConversation = conversations.find(c => c.id === currentId);
   const messages = currentConversation?.messages || [
@@ -71,14 +70,14 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
   
   // Start a completely new chat session
   const createNewChat = () => {
-    setCurrentId(null);
+    onCurrentIdChange(null);
     setInput("");
   };
 
   // Reset the current chat to its initial state (welcome message only)
   const clearCurrentChat = () => {
     if (!currentId) return;
-    setConversations(prev => prev.map(c => 
+    onConversationsChange(prev => prev.map(c => 
       c.id === currentId 
         ? { ...c, messages: [{
             id: Date.now().toString(),
@@ -98,9 +97,9 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
   const deleteConversation = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     const updated = conversations.filter(c => c.id !== id);
-    setConversations(updated);
+    onConversationsChange(updated);
     if (currentId === id) {
-      setCurrentId(updated.length > 0 ? updated[0].id : null);
+      onCurrentIdChange(updated.length > 0 ? updated[0].id : null);
     }
   };
 
@@ -112,6 +111,18 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
   useEffect(() => {
     scrollToBottom();
   }, [messages, isLoading]);
+
+  useEffect(() => {
+    if ((config.mcpTools ?? []).length === 0) {
+      if (mcpToolId) onMcpToolIdChange('');
+      return;
+    }
+
+    const currentToolExists = (config.mcpTools ?? []).some((tool: McpTool) => tool.id === mcpToolId);
+    if (!currentToolExists) {
+      onMcpToolIdChange(config.mcpTools[0]?.id ?? '');
+    }
+  }, [config.mcpTools, mcpToolId, onMcpToolIdChange]);
 
   // Handle file selection for attachments
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -171,11 +182,11 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
         messages: activeMessages,
         updatedAt: Date.now()
       };
-      setConversations(prev => [newConv, ...prev]);
-      setCurrentId(activeConvId);
+      onConversationsChange(prev => [newConv, ...prev]);
+      onCurrentIdChange(activeConvId);
     } else {
       // Update the existing conversation and move it to the top of the list
-      setConversations(prev => {
+      onConversationsChange(prev => {
         const idx = prev.findIndex(c => c.id === activeConvId);
         if (idx === -1) return prev;
         const updated = [...prev];
@@ -278,7 +289,7 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
             : undefined,
         };
 
-        setConversations(prev => {
+        onConversationsChange(prev => {
           const idx = prev.findIndex(c => c.id === activeConvId);
           if (idx === -1) return prev;
           const updated = [...prev];
@@ -389,7 +400,7 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
         ];
       }
 
-      setConversations(prev => {
+      onConversationsChange(prev => {
         const idx = prev.findIndex(c => c.id === activeConvId);
         if (idx === -1) return prev;
         const updated = [...prev];
@@ -409,7 +420,7 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
         content: `**Error:** Could not connect to the LLM endpoint.\n\n\`\`\`\n${error instanceof Error ? error.message : "Unknown error"}\n\`\`\`\n\nPlease check your configuration settings.`,
         timestamp: Date.now(),
       };
-      setConversations(prev => {
+      onConversationsChange(prev => {
         const idx = prev.findIndex(c => c.id === activeConvId);
         if (idx === -1) return prev;
         const updated = [...prev];
@@ -458,7 +469,7 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
           {conversations.map((conv) => (
             <div
               key={conv.id}
-              onClick={() => setCurrentId(conv.id)}
+              onClick={() => onCurrentIdChange(conv.id)}
               className={`group relative w-full text-left p-3 rounded-xl text-sm transition-all cursor-pointer border ${
                 currentId === conv.id
                   ? "bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 shadow-sm"
@@ -688,25 +699,25 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
         <div className="mt-3 px-2 flex flex-col gap-2">
           <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
             <button
-              onClick={() => setWorkflow('LLM')}
+              onClick={() => onWorkflowChange('LLM')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'LLM' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Cpu className="w-3.5 h-3.5" /> Pure LLM
             </button>
             <button
-              onClick={() => setWorkflow('RAG')}
+              onClick={() => onWorkflowChange('RAG')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'RAG' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Database className="w-3.5 h-3.5" /> RAG Knowledge
             </button>
             <button
-              onClick={() => setWorkflow('AGENT')}
+              onClick={() => onWorkflowChange('AGENT')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'AGENT' ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Network className="w-3.5 h-3.5" /> Agents
             </button>
             <button
-              onClick={() => setWorkflow('MCP')}
+              onClick={() => onWorkflowChange('MCP')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'MCP' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-200 border border-teal-200 dark:border-teal-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Cpu className="w-3.5 h-3.5" /> MCP
@@ -722,7 +733,7 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
                 (config.mcpTools ?? []).map((tool: McpTool) => (
                   <button
                     key={tool.id}
-                    onClick={() => setMcpToolId(tool.id)}
+                    onClick={() => onMcpToolIdChange(tool.id)}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
                   >
                     <Network className="w-3.5 h-3.5" /> {tool.label}
@@ -736,19 +747,19 @@ export function ChatInterface({ config, onOpenSettings, isDark, onToggleDark, on
           <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'AGENT' ? 'max-h-10 opacity-100' : 'max-h-0 opacity-0'}`}>
             <div className="flex items-center gap-2 pl-2 border-l-2 border-purple-200 overflow-x-auto pb-1 scrollbar-hide">
               <button
-                onClick={() => setAgentRole('manager')}
+                onClick={() => onAgentRoleChange('manager')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
               >
                 <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
               </button>
               <button
-                onClick={() => setAgentRole('analyst')}
+                onClick={() => onAgentRoleChange('analyst')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'analyst' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
               >
                 <BarChart className="w-3.5 h-3.5" /> Data Analyst
               </button>
               <button
-                onClick={() => setAgentRole('researcher')}
+                onClick={() => onAgentRoleChange('researcher')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'researcher' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
               >
                 <Search className="w-3.5 h-3.5" /> Researcher

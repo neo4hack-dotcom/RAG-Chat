@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+DB.json
+__pycache__/
