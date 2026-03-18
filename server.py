@@ -19,6 +19,8 @@ from typing import Optional
 from pathlib import Path
 from opensearchpy import OpenSearch
 from urllib.parse import urlparse
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
 app = FastAPI(title="RAGnarok API")
 
@@ -136,6 +138,21 @@ async def llm_chat(
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
+class MCPTestRequest(BaseModel):
+    url: str
+
+
+class MCPChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    mcp_url: str
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    system_prompt: str = ""
+
+
 class OSConfig(BaseModel):
     url: str
     index: str = "rag_documents"
@@ -178,6 +195,163 @@ class ChatRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+
+
+# ── MCP endpoints ─────────────────────────────────────────────────────────────
+
+@app.post("/api/mcp/test")
+async def test_mcp_connection(req: MCPTestRequest):
+    """Connect to an MCP server via SSE and return its available tools."""
+    try:
+        async with sse_client(req.url) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_result = await session.list_tools()
+                tools = [
+                    {"name": t.name, "description": t.description or ""}
+                    for t in tools_result.tools
+                ]
+        return {"status": "ok", "tools": tools, "tool_count": len(tools)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _mcp_tool_to_openai(tool) -> dict:
+    """Convert an MCP tool definition to OpenAI function-calling format."""
+    schema = {}
+    if hasattr(tool, "inputSchema") and tool.inputSchema:
+        schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": schema or {"type": "object", "properties": {}},
+        },
+    }
+
+
+@app.post("/api/chat/mcp")
+async def chat_mcp(req: MCPChatRequest):
+    """Agentic loop: connects to MCP server, lets LLM call tools, returns final answer."""
+    try:
+        async with sse_client(req.mcp_url) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_result = await session.list_tools()
+                openai_tools = [_mcp_tool_to_openai(t) for t in tools_result.tools]
+
+                # Build initial messages
+                messages: list[dict] = []
+                if req.system_prompt:
+                    messages.append({"role": "system", "content": req.system_prompt})
+                for m in req.history:
+                    role = "user" if m.get("role") == "user" else "assistant"
+                    messages.append({"role": role, "content": m.get("content", "")})
+                messages.append({"role": "user", "content": req.message})
+
+                tool_calls_log: list[dict] = []
+                MAX_TURNS = 5
+
+                for _ in range(MAX_TURNS):
+                    # Call LLM with tools
+                    headers = {"Content-Type": "application/json"}
+                    if req.llm_api_key:
+                        headers["Authorization"] = f"Bearer {req.llm_api_key}"
+
+                    if req.llm_provider == "ollama":
+                        endpoint = req.llm_base_url.rstrip("/") + "/api/chat"
+                        payload: dict = {
+                            "model": req.llm_model,
+                            "messages": messages,
+                            "stream": False,
+                            "tools": openai_tools,
+                        }
+                        async with httpx.AsyncClient(timeout=120.0) as client:
+                            resp = await client.post(endpoint, json=payload, headers=headers)
+                            resp.raise_for_status()
+                        data = resp.json()
+                        llm_msg = data.get("message", {})
+                        content = llm_msg.get("content", "")
+                        raw_tool_calls = llm_msg.get("tool_calls", [])
+                    else:
+                        endpoint = req.llm_base_url.rstrip("/") + "/chat/completions"
+                        payload = {
+                            "model": req.llm_model,
+                            "messages": messages,
+                            "tools": openai_tools,
+                        }
+                        async with httpx.AsyncClient(timeout=120.0) as client:
+                            resp = await client.post(endpoint, json=payload, headers=headers)
+                            resp.raise_for_status()
+                        data = resp.json()
+                        choice = data["choices"][0]["message"]
+                        content = choice.get("content") or ""
+                        raw_tool_calls = choice.get("tool_calls", [])
+
+                    # No tool calls → final answer
+                    if not raw_tool_calls:
+                        return {
+                            "answer": content,
+                            "tool_calls": tool_calls_log,
+                        }
+
+                    # Append assistant message with tool calls
+                    messages.append({
+                        "role": "assistant",
+                        "content": content,
+                        "tool_calls": raw_tool_calls,
+                    })
+
+                    # Execute each tool call via MCP
+                    for tc in raw_tool_calls:
+                        # Normalise across Ollama / OpenAI formats
+                        if isinstance(tc, dict) and "function" in tc:
+                            fn = tc["function"]
+                            tool_name = fn.get("name", "")
+                            raw_args = fn.get("arguments", "{}")
+                            tool_id = tc.get("id", tool_name)
+                        else:
+                            # Ollama sometimes returns {"name":..., "arguments":...} directly
+                            tool_name = tc.get("name", "")
+                            raw_args = tc.get("arguments", "{}")
+                            tool_id = tool_name
+
+                        tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+
+                        try:
+                            result = await session.call_tool(tool_name, tool_args)
+                            tool_output = "\n".join(
+                                c.text for c in result.content if hasattr(c, "text")
+                            ) or str(result.content)
+                        except Exception as e:
+                            tool_output = f"[Tool error] {e}"
+
+                        tool_calls_log.append({
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "result": tool_output,
+                        })
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": tool_output,
+                        })
+
+                # Safety net: ask LLM for a final answer without tools
+                messages.append({
+                    "role": "user",
+                    "content": "Please summarise the results above as a final answer.",
+                })
+                final = await llm_chat(
+                    messages, req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key
+                )
+                return {"answer": final, "tool_calls": tool_calls_log}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── OpenSearch management endpoints ──────────────────────────────────────────
