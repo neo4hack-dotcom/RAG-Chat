@@ -209,24 +209,46 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     }
   };
 
-  // Test connection to the Embedding model provider
+  // Test the embedding model by generating a real vector and checking OpenSearch index compatibility
   const testEmbeddingConnection = async () => {
     setEmbedTestStatus('testing');
     setEmbedTestMessage('');
     try {
-      const baseUrl = localConfig.embeddingBaseUrl.replace(/\/$/, '');
-      const headers: Record<string, string> = {};
-      if (localConfig.embeddingApiKey) {
-        headers['Authorization'] = `Bearer ${localConfig.embeddingApiKey}`;
+      const response = await fetch('/api/embedding/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          embedding_base_url: localConfig.embeddingBaseUrl,
+          embedding_model: localConfig.embeddingModel,
+          embedding_api_key: localConfig.embeddingApiKey || undefined,
+          opensearch: localConfig.elasticsearchUrl ? {
+            url: localConfig.elasticsearchUrl,
+            index: localConfig.elasticsearchIndex,
+            username: localConfig.elasticsearchUsername || undefined,
+            password: localConfig.elasticsearchPassword || undefined,
+          } : undefined,
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error((err as any).detail || `HTTP ${response.status}`);
       }
-      const response = await fetch(`${baseUrl}/models`, { headers });
-      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
       const data = await response.json();
-      const modelsCount = data.data?.length || 0;
+      let msg = `Modèle OK · dimension: ${data.dimension}`;
+      if (data.opensearch) {
+        if (data.opensearch.status === 'compatible') {
+          msg += ` · compatible avec l'index OpenSearch ✓`;
+        } else if (data.opensearch.status === 'incompatible') {
+          msg += ` · ⚠ ${data.opensearch.message}`;
+        } else if (data.opensearch.status === 'no_index') {
+          msg += ` · index inexistant (utilisez "Setup Index")`;
+        } else if (data.opensearch.status === 'error') {
+          msg += ` · OpenSearch: ${data.opensearch.message}`;
+        }
+      }
       setEmbedTestStatus('success');
-      setEmbedTestMessage(`Connected! Found ${modelsCount} models.`);
+      setEmbedTestMessage(msg);
     } catch (err) {
-      console.error("Embedding connection error:", err);
       setEmbedTestStatus('error');
       setEmbedTestMessage(err instanceof Error ? err.message : 'Failed to connect');
     }
@@ -682,14 +704,17 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                         className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                         placeholder="http://localhost:11434/v1"
                       />
-                      <button 
+                      <button
                         onClick={testEmbeddingConnection}
                         disabled={embedTestStatus === 'testing'}
                         className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
                       >
-                        {embedTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Connection'}
+                        {embedTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Embeddings'}
                       </button>
                     </div>
+                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                      Base URL (ex: <code>http://host/v1</code>) ou URL complète se terminant par <code>/embeddings</code> (ex: <code>http://host/v1/openai/embeddings</code>).
+                    </p>
                     {embedTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/> {embedTestMessage}</p>}
                     {embedTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3"/> {embedTestMessage}</p>}
                   </div>
