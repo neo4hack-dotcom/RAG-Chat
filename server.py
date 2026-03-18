@@ -90,6 +90,7 @@ async def get_embedding(
     base_url: str,
     model: str,
     api_key: str = None,
+    verify_ssl: bool = True,
 ) -> list[float]:
     """Get a vector embedding via an OpenAI-compatible /embeddings endpoint.
 
@@ -102,7 +103,7 @@ async def get_embedding(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=60.0, verify=verify_ssl) as client:
         resp = await client.post(url, json={"model": model, "input": text}, headers=headers)
         resp.raise_for_status()
         return resp.json()["data"][0]["embedding"]
@@ -184,6 +185,7 @@ class IngestRequest(BaseModel):
     embedding_base_url: str = "http://localhost:11434/v1"
     embedding_api_key: Optional[str] = None
     embedding_model: str = "nomic-embed-text"
+    embedding_verify_ssl: bool = True
     chunk_size: int = 200
     chunk_overlap: int = 2
     embedding_dimension: int = 768
@@ -196,6 +198,7 @@ class ChatRequest(BaseModel):
     embedding_base_url: str = "http://localhost:11434/v1"
     embedding_api_key: Optional[str] = None
     embedding_model: str = "nomic-embed-text"
+    embedding_verify_ssl: bool = True
     knn_neighbors: int = 10
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3"
@@ -207,6 +210,7 @@ class EmbeddingTestRequest(BaseModel):
     embedding_base_url: str
     embedding_model: str
     embedding_api_key: Optional[str] = None
+    embedding_verify_ssl: bool = True
     opensearch: Optional[OSConfig] = None
 
 
@@ -434,7 +438,8 @@ async def test_embedding(req: EmbeddingTestRequest):
     """Generate a real test embedding and optionally verify dimension compatibility with the OpenSearch index."""
     try:
         vector = await get_embedding(
-            "embedding connectivity test", req.embedding_base_url, req.embedding_model, req.embedding_api_key
+            "embedding connectivity test", req.embedding_base_url, req.embedding_model,
+            req.embedding_api_key, verify_ssl=req.embedding_verify_ssl
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Embedding error: {e}")
@@ -488,7 +493,8 @@ async def ingest_document(req: IngestRequest):
         embeddings = []
         for chunk in chunks:
             vec = await get_embedding(
-                chunk, req.embedding_base_url, req.embedding_model, req.embedding_api_key
+                chunk, req.embedding_base_url, req.embedding_model,
+                req.embedding_api_key, verify_ssl=req.embedding_verify_ssl
             )
             embeddings.append(vec)
     except Exception as e:
@@ -559,7 +565,8 @@ async def chat_rag(req: ChatRequest):
     # 2. Embed the query
     try:
         query_vector = await get_embedding(
-            search_text, req.embedding_base_url, req.embedding_model, req.embedding_api_key
+            search_text, req.embedding_base_url, req.embedding_model,
+            req.embedding_api_key, verify_ssl=req.embedding_verify_ssl
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Embedding error: {e}")

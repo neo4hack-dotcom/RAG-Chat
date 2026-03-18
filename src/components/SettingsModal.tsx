@@ -29,6 +29,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
     embeddingBaseUrl: config.embeddingBaseUrl || 'http://localhost:11434/v1',
     embeddingApiKey: config.embeddingApiKey || '',
     embeddingModel: config.embeddingModel || 'nomic-embed-text',
+    embeddingVerifySsl: config.embeddingVerifySsl ?? true,
     chunkSize: config.chunkSize || 512,
     chunkOverlap: config.chunkOverlap || 50,
     knnNeighbors: config.knnNeighbors || 50,
@@ -190,6 +191,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
           embedding_base_url: localConfig.embeddingBaseUrl,
           embedding_api_key: localConfig.embeddingApiKey || undefined,
           embedding_model: localConfig.embeddingModel,
+          embedding_verify_ssl: localConfig.embeddingVerifySsl,
           chunk_size: localConfig.chunkSize,
           chunk_overlap: localConfig.chunkOverlap,
         }),
@@ -221,6 +223,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
           embedding_base_url: localConfig.embeddingBaseUrl,
           embedding_model: localConfig.embeddingModel,
           embedding_api_key: localConfig.embeddingApiKey || undefined,
+          embedding_verify_ssl: localConfig.embeddingVerifySsl,
           opensearch: localConfig.elasticsearchUrl ? {
             url: localConfig.elasticsearchUrl,
             index: localConfig.elasticsearchIndex,
@@ -715,6 +718,15 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                     <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                       Base URL (ex: <code>http://host/v1</code>) ou URL complète se terminant par <code>/embeddings</code> (ex: <code>http://host/v1/openai/embeddings</code>).
                     </p>
+                    <label className="flex items-center gap-2 mt-2 cursor-pointer select-none w-fit">
+                      <input
+                        type="checkbox"
+                        checked={localConfig.embeddingVerifySsl}
+                        onChange={(e) => setLocalConfig({ ...localConfig, embeddingVerifySsl: e.target.checked })}
+                        className="w-4 h-4 rounded text-blue-500 focus:ring-blue-500"
+                      />
+                      <span className="text-xs text-gray-600 dark:text-gray-400">Vérifier le certificat SSL</span>
+                    </label>
                     {embedTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/> {embedTestMessage}</p>}
                     {embedTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3"/> {embedTestMessage}</p>}
                   </div>
