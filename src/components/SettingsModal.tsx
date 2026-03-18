@@ -35,6 +35,10 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
   // State for available models fetched from the provider
   const [models, setModels] = useState<string[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // State for available embedding models
+  const [embeddingModels, setEmbeddingModels] = useState<string[]>([]);
+  const [isRefreshingEmbed, setIsRefreshingEmbed] = useState(false);
   
   // Connection test states for LLM
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -96,6 +100,30 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
       console.error("Embedding connection error:", err);
       setEmbedTestStatus('error');
       setEmbedTestMessage(err instanceof Error ? err.message : 'Failed to connect');
+    }
+  };
+
+  // Fetch available models from the configured embedding provider
+  const fetchEmbeddingModels = async () => {
+    setIsRefreshingEmbed(true);
+    try {
+      const baseUrl = localConfig.embeddingBaseUrl.replace(/\/$/, '');
+      const headers: Record<string, string> = {};
+      if (localConfig.embeddingApiKey) {
+        headers['Authorization'] = `Bearer ${localConfig.embeddingApiKey}`;
+      }
+      const response = await fetch(`${baseUrl}/models`, { headers });
+      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+      const data = await response.json();
+      const fetched: string[] = data.data?.map((m: any) => m.id) || data.models?.map((m: any) => m.name) || [];
+      setEmbeddingModels(fetched);
+      if (fetched.length > 0 && !fetched.includes(localConfig.embeddingModel)) {
+        setLocalConfig(prev => ({ ...prev, embeddingModel: fetched[0] }));
+      }
+    } catch (err) {
+      console.error("Error fetching embedding models:", err);
+    } finally {
+      setIsRefreshingEmbed(false);
     }
   };
 
@@ -429,16 +457,34 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                   </div>
 
                   <div>
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                      <Bot className="w-4 h-4" /> Model Name
-                    </label>
-                    <input
-                      type="text"
-                      value={localConfig.embeddingModel}
-                      onChange={(e) => setLocalConfig({ ...localConfig, embeddingModel: e.target.value })}
-                      className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
-                      placeholder="nomic-embed-text"
-                    />
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                        <Bot className="w-4 h-4" /> Model Name
+                      </label>
+                      <button
+                        onClick={fetchEmbeddingModels}
+                        className="text-blue-500 hover:text-blue-600 flex items-center gap-1 text-xs font-medium"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isRefreshingEmbed ? 'animate-spin' : ''}`} /> Refresh Models
+                      </button>
+                    </div>
+                    {embeddingModels.length > 0 ? (
+                      <select
+                        value={localConfig.embeddingModel}
+                        onChange={(e) => setLocalConfig({ ...localConfig, embeddingModel: e.target.value })}
+                        className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all appearance-none"
+                      >
+                        {embeddingModels.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={localConfig.embeddingModel}
+                        onChange={(e) => setLocalConfig({ ...localConfig, embeddingModel: e.target.value })}
+                        className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                        placeholder="nomic-embed-text"
+                      />
+                    )}
                     <p className="text-xs text-gray-500 mt-1">Used to vectorize user queries locally.</p>
                   </div>
                 </div>
