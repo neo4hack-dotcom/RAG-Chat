@@ -205,28 +205,28 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
       <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl z-50 p-6 animate-scale-in">
         <div className="glass-panel rounded-[2rem] p-8 shadow-2xl max-h-[90vh] overflow-y-auto">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-semibold flex items-center gap-3">
+            <h2 className="text-2xl font-semibold flex items-center gap-3 dark:text-white">
               <Settings className="w-6 h-6 text-blue-500" />
               Configuration
             </h2>
             <button
               onClick={onClose}
-              className="p-2 rounded-full hover:bg-black/5 transition-colors"
+              className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
             >
-              <X className="w-5 h-5 text-gray-500" />
+              <X className="w-5 h-5 text-gray-500 dark:text-gray-400" />
             </button>
           </div>
 
-          <div className="flex gap-4 border-b border-gray-200 mb-6">
+          <div className="flex gap-4 border-b border-gray-200 dark:border-gray-800 mb-6">
             <button
               onClick={() => setActiveTab('llm')}
-              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'llm' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'llm' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
             >
               LLM Settings
             </button>
             <button
               onClick={() => setActiveTab('rag')}
-              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'rag' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'rag' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
             >
               RAG & Elasticsearch
             </button>
@@ -241,7 +241,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
           {activeTab === 'mcp' ? (
             <div className="space-y-5">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
                   <Network className="w-4 h-4 text-teal-500" /> MCP Tools
                 </h3>
                 <button
@@ -254,20 +254,20 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                   <Plus className="w-3.5 h-3.5" /> Add Tool
                 </button>
               </div>
-              <p className="text-xs text-gray-500 -mt-3">Ces outils apparaissent dans le dropdown du bouton MCP dans l'interface de chat.</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 -mt-3">Ces outils apparaissent dans le dropdown du bouton MCP dans l'interface de chat.</p>
 
               {(localConfig.mcpTools ?? []).length === 0 && (
-                <div className="text-center py-8 text-sm text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                <div className="text-center py-8 text-sm text-gray-400 dark:text-gray-500 border border-dashed border-gray-200 dark:border-gray-700 rounded-xl">
                   Aucun outil MCP. Cliquez sur « Add Tool » pour en ajouter.
                 </div>
               )}
 
               <div className="space-y-3">
                 {(localConfig.mcpTools ?? []).map((tool: McpTool, idx: number) => (
-                  <div key={tool.id} className="flex items-start gap-3 p-3 bg-white/50 border border-gray-200 rounded-xl">
+                  <div key={tool.id} className="flex items-start gap-3 p-3 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl">
                     <div className="flex-1 grid grid-cols-2 gap-2">
                       <div>
-                        <label className="text-xs font-medium text-gray-500 mb-1 block">Label</label>
+                        <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Label</label>
                         <input
                           type="text"
                           value={tool.label}
@@ -276,12 +276,12 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                             updated[idx] = { ...tool, label: e.target.value };
                             setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
                           }}
-                          className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                          className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
                           placeholder="Mon outil MCP"
                         />
                       </div>
                       <div>
-                        <label className="text-xs font-medium text-gray-500 mb-1 block">URL</label>
+                        <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">URL</label>
                         <input
                           type="text"
                           value={tool.url}
@@ -290,7 +290,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                             updated[idx] = { ...tool, url: e.target.value };
                             setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
                           }}
-                          className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                          className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
                           placeholder="http://localhost:3000"
                         />
                       </div>
@@ -311,11 +311,11 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
           ) : activeTab === 'llm' ? (
             <div className="space-y-5">
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <Zap className="w-4 h-4" /> Provider
                   </label>
-                  <div className="flex gap-6 items-center bg-white/50 border border-gray-200 rounded-xl px-4 py-3">
-                    <label className="flex items-center gap-2 cursor-pointer text-sm font-medium">
+                  <div className="flex gap-6 items-center bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3">
+                    <label className="flex items-center gap-2 cursor-pointer text-sm font-medium dark:text-gray-200">
                       <input 
                         type="radio" 
                         name="provider" 
@@ -326,7 +326,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                       />
                       Ollama
                     </label>
-                    <label className="flex items-center gap-2 cursor-pointer text-sm font-medium">
+                    <label className="flex items-center gap-2 cursor-pointer text-sm font-medium dark:text-gray-200">
                       <input 
                         type="radio" 
                         name="provider" 
@@ -341,7 +341,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                 </div>
 
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <Server className="w-4 h-4" /> Base URL
                   </label>
                   <div className="flex gap-2">
@@ -349,13 +349,13 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                       type="text"
                       value={localConfig.baseUrl}
                       onChange={(e) => setLocalConfig({ ...localConfig, baseUrl: e.target.value })}
-                      className="flex-1 bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                      className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                       placeholder={localConfig.provider === 'ollama' ? "http://localhost:11434" : "http://localhost:1234/v1"}
                     />
                     <button 
                       onClick={() => fetchModels(true)}
                       disabled={testStatus === 'testing'}
-                      className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
+                      className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
                     >
                       {testStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Connection'}
                     </button>
@@ -366,14 +366,14 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
 
                 {localConfig.provider === 'openai' && (
                   <div>
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                       <Key className="w-4 h-4" /> API Key (Optional for local)
                     </label>
                     <input
                       type="password"
                       value={localConfig.apiKey}
                       onChange={(e) => setLocalConfig({ ...localConfig, apiKey: e.target.value })}
-                      className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                       placeholder="sk-..."
                     />
                   </div>
@@ -386,7 +386,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                     </label>
                     <button 
                       onClick={() => fetchModels(false)}
-                      className="text-blue-500 hover:text-blue-600 flex items-center gap-1 text-xs font-medium"
+                      className="text-blue-500 hover:text-blue-400 flex items-center gap-1 text-xs font-medium"
                     >
                       <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} /> Refresh Models
                     </button>
@@ -395,7 +395,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                     <select
                       value={localConfig.model}
                       onChange={(e) => setLocalConfig({ ...localConfig, model: e.target.value })}
-                      className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all appearance-none"
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all appearance-none"
                     >
                       {models.map(m => <option key={m} value={m}>{m}</option>)}
                     </select>
@@ -404,20 +404,20 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                       type="text"
                       value={localConfig.model}
                       onChange={(e) => setLocalConfig({ ...localConfig, model: e.target.value })}
-                      className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                       placeholder="llama3, gpt-4, etc."
                     />
                   )}
                 </div>
 
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <MessageSquare className="w-4 h-4" /> System Prompt
                   </label>
                   <textarea
                     value={localConfig.systemPrompt}
                     onChange={(e) => setLocalConfig({ ...localConfig, systemPrompt: e.target.value })}
-                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all min-h-[100px] resize-none"
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all min-h-[100px] resize-none"
                     placeholder="You are a helpful assistant..."
                   />
                 </div>
@@ -425,7 +425,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
           ) : (
             <div className="space-y-5">
               <div>
-                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                   <Database className="w-4 h-4" /> Elasticsearch URL
                 </label>
                 <div className="flex gap-2">
@@ -433,13 +433,13 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                     type="text"
                     value={localConfig.elasticsearchUrl}
                     onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchUrl: e.target.value })}
-                    className="flex-1 bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                     placeholder="http://localhost:9200"
                   />
                   <button 
                     onClick={testElasticsearchConnection}
                     disabled={esTestStatus === 'testing'}
-                    className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
+                    className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
                   >
                     {esTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Connection'}
                   </button>
@@ -449,55 +449,55 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
               </div>
 
               <div>
-                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                   <Layers className="w-4 h-4" /> Elasticsearch Index
                 </label>
                 <input
                   type="text"
                   value={localConfig.elasticsearchIndex}
                   onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchIndex: e.target.value })}
-                  className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                  className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                   placeholder="rag_documents"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <Key className="w-4 h-4" /> Username
                   </label>
                   <input
                     type="text"
                     value={localConfig.elasticsearchUsername}
                     onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchUsername: e.target.value })}
-                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                     placeholder="elastic"
                     autoComplete="username"
                   />
                 </div>
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <Key className="w-4 h-4" /> Password
                   </label>
                   <input
                     type="password"
                     value={localConfig.elasticsearchPassword}
                     onChange={(e) => setLocalConfig({ ...localConfig, elasticsearchPassword: e.target.value })}
-                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                     placeholder="••••••••"
                     autoComplete="current-password"
                   />
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-gray-100">
-                <h3 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2">
                   <Bot className="w-4 h-4 text-blue-500" /> Embedding Model Configuration
                 </h3>
                 
                 <div className="space-y-4">
                   <div>
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                       <Server className="w-4 h-4" /> OpenAI-Compatible Base URL
                     </label>
                     <div className="flex gap-2">
@@ -505,13 +505,13 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                         type="text"
                         value={localConfig.embeddingBaseUrl}
                         onChange={(e) => setLocalConfig({ ...localConfig, embeddingBaseUrl: e.target.value })}
-                        className="flex-1 bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                        className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                         placeholder="http://localhost:11434/v1"
                       />
                       <button 
                         onClick={testEmbeddingConnection}
                         disabled={embedTestStatus === 'testing'}
-                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
+                        className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
                       >
                         {embedTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Connection'}
                       </button>
@@ -521,14 +521,14 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                   </div>
 
                   <div>
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                       <Key className="w-4 h-4" /> API Key (Optional)
                     </label>
                     <input
                       type="password"
                       value={localConfig.embeddingApiKey}
                       onChange={(e) => setLocalConfig({ ...localConfig, embeddingApiKey: e.target.value })}
-                      className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                       placeholder="sk-..."
                     />
                   </div>
@@ -540,7 +540,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                       </label>
                       <button
                         onClick={fetchEmbeddingModels}
-                        className="text-blue-500 hover:text-blue-600 flex items-center gap-1 text-xs font-medium"
+                        className="text-blue-500 hover:text-blue-400 flex items-center gap-1 text-xs font-medium"
                       >
                         <RefreshCw className={`w-3 h-3 ${isRefreshingEmbed ? 'animate-spin' : ''}`} /> Refresh Models
                       </button>
@@ -549,7 +549,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                       <select
                         value={localConfig.embeddingModel}
                         onChange={(e) => setLocalConfig({ ...localConfig, embeddingModel: e.target.value })}
-                        className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all appearance-none"
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all appearance-none"
                       >
                         {embeddingModels.map(m => <option key={m} value={m}>{m}</option>)}
                       </select>
@@ -558,7 +558,7 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
                         type="text"
                         value={localConfig.embeddingModel}
                         onChange={(e) => setLocalConfig({ ...localConfig, embeddingModel: e.target.value })}
-                        className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                         placeholder="nomic-embed-text"
                       />
                     )}
@@ -569,36 +569,36 @@ export function SettingsModal({ isOpen, onClose, config, onSave }: SettingsModal
 
               <div className="pt-4 border-t border-gray-100 grid grid-cols-3 gap-4">
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <SlidersHorizontal className="w-4 h-4" /> Chunk Size
                   </label>
                   <input
                     type="number"
                     value={localConfig.chunkSize}
                     onChange={(e) => setLocalConfig({ ...localConfig, chunkSize: parseInt(e.target.value) || 512 })}
-                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                   />
                 </div>
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <SlidersHorizontal className="w-4 h-4" /> Chunk Overlap
                   </label>
                   <input
                     type="number"
                     value={localConfig.chunkOverlap}
                     onChange={(e) => setLocalConfig({ ...localConfig, chunkOverlap: parseInt(e.target.value) || 50 })}
-                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                   />
                 </div>
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <SlidersHorizontal className="w-4 h-4" /> KNN Neighbors
                   </label>
                   <input
                     type="number"
                     value={localConfig.knnNeighbors}
                     onChange={(e) => setLocalConfig({ ...localConfig, knnNeighbors: parseInt(e.target.value) || 50 })}
-                    className="w-full bg-white/50 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                   />
                 </div>
               </div>
