@@ -181,6 +181,57 @@ export type FileManagerAgentState = {
   lastVisitedPath: string;
 };
 
+export type PdfCreatorPendingAction = {
+  preview: string;
+  summary: string;
+  requestedAt: string;
+};
+
+export type PdfCreatorAgentState = {
+  stage: 'idle' | 'awaiting_source_choice' | 'awaiting_content';
+  pendingDocument: Record<string, unknown> | null;
+  pendingConfirmation: PdfCreatorPendingAction | null;
+  lastOutputPath: string;
+  lastTitle: string;
+};
+
+export type OracleConnectionConfig = {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  serviceName: string;
+  sid: string;
+  dsn: string;
+  username: string;
+  password: string;
+};
+
+export type OracleAnalystAgentConfig = {
+  connectionId: string;
+  rowLimit: number;
+  maxRetries: number;
+  maxIterations: number;
+  toolkitId: string;
+  systemPrompt: string;
+};
+
+export type OracleAnalystAgentState = {
+  stage: 'idle' | 'awaiting_table' | 'ready';
+  pendingRequest: string;
+  availableTables: string[];
+  selectedTable: string | null;
+  schemaInfo: Array<{ name: string; type: string; nullable?: boolean }>;
+  clarificationPrompt: string;
+  clarificationOptions: string[];
+  lastSql: string;
+  lastResultMeta: Array<{ name: string; type: string }>;
+  lastResultRows: Record<string, unknown>[];
+  finalAnswer: string;
+  actionLog: string[];
+  lastError: string;
+};
+
 export type DataQualitySchemaColumn = {
   name: string;
   type: string;
@@ -208,9 +259,9 @@ export type DataQualityState = {
   dateColumns: string[];
 };
 
-export type ManagerDelegateRole = 'clickhouse_query' | 'file_management' | 'data_quality_tables';
+export type ManagerDelegateRole = 'clickhouse_query' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'data_quality_tables';
 
-export type ManagerPendingPipeline = {
+export type ManagerFileExportPipeline = {
   kind: 'clickhouse_to_file';
   stage: 'awaiting_clickhouse' | 'awaiting_export_details';
   nextDelegate: 'file_management';
@@ -219,6 +270,18 @@ export type ManagerPendingPipeline = {
   sourceRequest: string;
   reason: string;
 };
+
+export type ManagerPdfExportPipeline = {
+  kind: 'clickhouse_to_pdf';
+  stage: 'awaiting_clickhouse';
+  nextDelegate: 'pdf_creator';
+  targetPath: string;
+  sourceRequest: string;
+  reason: string;
+  title: string;
+};
+
+export type ManagerPendingPipeline = ManagerFileExportPipeline | ManagerPdfExportPipeline;
 
 export type ManagerAgentState = {
   activeDelegate: ManagerDelegateRole | null;
@@ -258,6 +321,8 @@ export type ConversationAgentState = {
   clickhouse?: ClickHouseAgentState;
   planning?: PlanningAgentState;
   fileManager?: FileManagerAgentState;
+  pdfCreator?: PdfCreatorAgentState;
+  oracleAnalyst?: OracleAnalystAgentState;
   dataQuality?: DataQualityState;
 };
 
@@ -275,11 +340,11 @@ export type Conversation = {
 
 export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP' | 'CREWAI';
 
-export type AgentRole = 'manager' | 'clickhouse_query' | 'file_management' | 'data_quality_tables';
+export type AgentRole = 'manager' | 'clickhouse_query' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'data_quality_tables';
 
 export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 
-const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'file_management', 'data_quality_tables'];
+const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'file_management', 'pdf_creator', 'oracle_analyst', 'data_quality_tables'];
 
 function isValidAgentRole(value: unknown): value is AgentRole {
   return typeof value === 'string' && VALID_AGENT_ROLES.includes(value as AgentRole);
@@ -292,6 +357,13 @@ export type McpTool = {
   id: string;
   label: string;
   url: string;
+};
+
+export type PortalApp = {
+  id: string;
+  name: string;
+  url: string;
+  description: string;
 };
 
 /**
@@ -316,6 +388,7 @@ export type AppConfig = {
   knnNeighbors: number;
   mcpTools: McpTool[];
   documentationUrl: string;
+  portalApps: PortalApp[];
   settingsAccessPassword: string;
   clickhouseHost: string;
   clickhousePort: number;
@@ -326,6 +399,8 @@ export type AppConfig = {
   clickhouseVerifySsl: boolean;
   clickhouseHttpPath: string;
   clickhouseQueryLimit: number;
+  oracleConnections: OracleConnectionConfig[];
+  oracleAnalystConfig: OracleAnalystAgentConfig;
   fileManagerConfig: FileManagerAgentConfig;
 };
 
@@ -359,7 +434,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   baseUrl: "http://localhost:11434",
   apiKey: "",
   model: "llama3",
-  systemPrompt: "You are a helpful, smart, and concise AI assistant. Format your responses beautifully using markdown. When offering choices, use markdown task lists (- [ ] Option).",
+  systemPrompt: "You are a helpful, smart, and concise AI assistant. Format your responses beautifully using markdown. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies.",
   elasticsearchUrl: "http://localhost:9200",
   elasticsearchIndex: "rag_documents",
   elasticsearchUsername: "",
@@ -376,6 +451,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
   ],
   documentationUrl: '',
+  portalApps: [],
   settingsAccessPassword: 'MM@2026',
   clickhouseHost: 'localhost',
   clickhousePort: 8123,
@@ -386,6 +462,28 @@ export const DEFAULT_CONFIG: AppConfig = {
   clickhouseVerifySsl: true,
   clickhouseHttpPath: '',
   clickhouseQueryLimit: 200,
+  oracleConnections: [
+    {
+      id: 'oracle_default',
+      label: 'Default Oracle',
+      host: 'localhost',
+      port: 1521,
+      serviceName: '',
+      sid: '',
+      dsn: '',
+      username: '',
+      password: '',
+    },
+  ],
+  oracleAnalystConfig: {
+    connectionId: 'oracle_default',
+    rowLimit: 1000,
+    maxRetries: 3,
+    maxIterations: 8,
+    toolkitId: '',
+    systemPrompt:
+      'You are the Oracle Analyst agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
+  },
   fileManagerConfig: {
     basePath: '',
     maxIterations: 10,
@@ -550,6 +648,79 @@ export function normalizeFileManagerAgentState(
   };
 }
 
+export function normalizePdfCreatorAgentState(
+  state?: Partial<PdfCreatorAgentState> | null
+): PdfCreatorAgentState {
+  const pendingDocument = (state as any)?.pendingDocument ?? (state as any)?.pending_document;
+  const pendingConfirmation = (state as any)?.pendingConfirmation ?? (state as any)?.pending_confirmation;
+  return {
+    stage:
+      (state as any)?.stage === 'awaiting_source_choice' || (state as any)?.stage === 'awaiting_content'
+        ? (state as any).stage
+        : 'idle',
+    pendingDocument: pendingDocument && typeof pendingDocument === 'object'
+      ? (pendingDocument as Record<string, unknown>)
+      : null,
+    pendingConfirmation: pendingConfirmation && typeof pendingConfirmation === 'object'
+      ? {
+          preview: (pendingConfirmation as any).preview ?? '',
+          summary: (pendingConfirmation as any).summary ?? '',
+          requestedAt: (pendingConfirmation as any).requestedAt ?? (pendingConfirmation as any).requested_at ?? '',
+        }
+      : null,
+    lastOutputPath: (state as any)?.lastOutputPath ?? (state as any)?.last_output_path ?? '',
+    lastTitle: (state as any)?.lastTitle ?? (state as any)?.last_title ?? '',
+  };
+}
+
+export function normalizeOracleAnalystAgentState(
+  state?: Partial<OracleAnalystAgentState> | null
+): OracleAnalystAgentState {
+  const schemaInfo = (state as any)?.schemaInfo ?? (state as any)?.schema_info;
+  const lastResultMeta = (state as any)?.lastResultMeta ?? (state as any)?.last_result_meta;
+  const lastResultRows = (state as any)?.lastResultRows ?? (state as any)?.last_result_rows;
+  const actionLog = (state as any)?.actionLog ?? (state as any)?.action_log;
+  return {
+    stage:
+      (state as any)?.stage === 'awaiting_table' || (state as any)?.stage === 'ready'
+        ? (state as any).stage
+        : 'idle',
+    pendingRequest: String((state as any)?.pendingRequest ?? (state as any)?.pending_request ?? ''),
+    availableTables: Array.isArray((state as any)?.availableTables ?? (state as any)?.available_tables)
+      ? ((state as any)?.availableTables ?? (state as any)?.available_tables).filter(Boolean)
+      : [],
+    selectedTable: (state as any)?.selectedTable ?? (state as any)?.selected_table ?? null,
+    schemaInfo: Array.isArray(schemaInfo)
+      ? schemaInfo
+          .filter(Boolean)
+          .map((column: any) => ({
+            name: String(column?.name ?? ''),
+            type: String(column?.type ?? ''),
+            nullable: Boolean(column?.nullable),
+          }))
+          .filter((column: { name: string }) => Boolean(column.name))
+      : [],
+    clarificationPrompt: String((state as any)?.clarificationPrompt ?? (state as any)?.clarification_prompt ?? ''),
+    clarificationOptions: Array.isArray((state as any)?.clarificationOptions ?? (state as any)?.clarification_options)
+      ? ((state as any)?.clarificationOptions ?? (state as any)?.clarification_options).filter(Boolean)
+      : [],
+    lastSql: String((state as any)?.lastSql ?? (state as any)?.last_sql ?? ''),
+    lastResultMeta: Array.isArray(lastResultMeta)
+      ? lastResultMeta
+          .filter(Boolean)
+          .map((column: any) => ({
+            name: String(column?.name ?? ''),
+            type: String(column?.type ?? ''),
+          }))
+          .filter((column: { name: string }) => Boolean(column.name))
+      : [],
+    lastResultRows: Array.isArray(lastResultRows) ? lastResultRows.filter((row: unknown) => Boolean(row)) as Record<string, unknown>[] : [],
+    finalAnswer: String((state as any)?.finalAnswer ?? (state as any)?.final_answer ?? ''),
+    actionLog: Array.isArray(actionLog) ? actionLog.filter(Boolean).map(String) : [],
+    lastError: String((state as any)?.lastError ?? (state as any)?.last_error ?? ''),
+  };
+}
+
 export function normalizeManagerAgentState(
   state?: Partial<ManagerAgentState> | null
 ): ManagerAgentState {
@@ -561,7 +732,7 @@ export function normalizeManagerAgentState(
     : null;
   const stage = pendingPipeline?.stage;
   return {
-    activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'file_management' || activeDelegate === 'data_quality_tables'
+    activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'file_management' || activeDelegate === 'data_quality_tables' || activeDelegate === 'pdf_creator' || activeDelegate === 'oracle_analyst'
       ? activeDelegate
       : null,
     lastRoutingReason: (state as any)?.lastRoutingReason ?? (state as any)?.last_routing_reason ?? '',
@@ -576,6 +747,16 @@ export function normalizeManagerAgentState(
           sourceRequest: String(pendingPipeline?.sourceRequest ?? pendingPipeline?.source_request ?? ''),
           reason: String(pendingPipeline?.reason ?? ''),
         }
+      : pendingPipeline && pendingPipeline.kind === 'clickhouse_to_pdf' && pendingPipeline.nextDelegate === 'pdf_creator'
+        ? {
+            kind: 'clickhouse_to_pdf',
+            stage: 'awaiting_clickhouse',
+            nextDelegate: 'pdf_creator',
+            targetPath: String(pendingPipeline?.targetPath ?? pendingPipeline?.target_path ?? ''),
+            sourceRequest: String(pendingPipeline?.sourceRequest ?? pendingPipeline?.source_request ?? ''),
+            reason: String(pendingPipeline?.reason ?? ''),
+            title: String(pendingPipeline?.title ?? ''),
+          }
       : null,
   };
 }
@@ -626,10 +807,48 @@ export function normalizeDataQualityState(
 
 export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfig {
   const incomingFileManager = config?.fileManagerConfig;
+  const incomingOracleAnalyst = config?.oracleAnalystConfig;
+  const incomingOracleConnections = Array.isArray(config?.oracleConnections) ? config!.oracleConnections : [];
+  const incomingPortalApps = Array.isArray(config?.portalApps) ? config!.portalApps : [];
+  const normalizedOracleConnections = incomingOracleConnections.length > 0
+    ? incomingOracleConnections.map((connection, index) => ({
+        id: connection.id || `oracle_${index + 1}`,
+        label: connection.label || `Oracle ${index + 1}`,
+        host: connection.host || 'localhost',
+        port: Number(connection.port) || 1521,
+        serviceName: connection.serviceName || '',
+        sid: connection.sid || '',
+        dsn: connection.dsn || '',
+        username: connection.username || '',
+        password: connection.password || '',
+      }))
+    : DEFAULT_CONFIG.oracleConnections.map((connection) => ({ ...connection }));
+  const hasOracleConnection = normalizedOracleConnections.some((connection) => connection.id === (incomingOracleAnalyst?.connectionId || DEFAULT_CONFIG.oracleAnalystConfig.connectionId));
   return {
     ...DEFAULT_CONFIG,
     ...(config ?? {}),
     settingsAccessPassword: config?.settingsAccessPassword || DEFAULT_CONFIG.settingsAccessPassword,
+    portalApps: incomingPortalApps
+      .filter((app): app is PortalApp => Boolean(app))
+      .map((app, index) => ({
+        id: app.id || `portal_app_${index + 1}`,
+        name: app.name || '',
+        url: app.url || '',
+        description: app.description || '',
+      })),
+    oracleConnections: normalizedOracleConnections,
+    oracleAnalystConfig: {
+      ...DEFAULT_CONFIG.oracleAnalystConfig,
+      ...(incomingOracleAnalyst ?? {}),
+      connectionId: hasOracleConnection
+        ? (incomingOracleAnalyst?.connectionId || DEFAULT_CONFIG.oracleAnalystConfig.connectionId)
+        : (normalizedOracleConnections[0]?.id ?? DEFAULT_CONFIG.oracleAnalystConfig.connectionId),
+      rowLimit: Math.min(50000, Math.max(1, Number(incomingOracleAnalyst?.rowLimit ?? DEFAULT_CONFIG.oracleAnalystConfig.rowLimit) || DEFAULT_CONFIG.oracleAnalystConfig.rowLimit)),
+      maxRetries: Math.min(10, Math.max(1, Number(incomingOracleAnalyst?.maxRetries ?? DEFAULT_CONFIG.oracleAnalystConfig.maxRetries) || DEFAULT_CONFIG.oracleAnalystConfig.maxRetries)),
+      maxIterations: Math.min(20, Math.max(1, Number(incomingOracleAnalyst?.maxIterations ?? DEFAULT_CONFIG.oracleAnalystConfig.maxIterations) || DEFAULT_CONFIG.oracleAnalystConfig.maxIterations)),
+      toolkitId: incomingOracleAnalyst?.toolkitId ?? DEFAULT_CONFIG.oracleAnalystConfig.toolkitId,
+      systemPrompt: incomingOracleAnalyst?.systemPrompt ?? DEFAULT_CONFIG.oracleAnalystConfig.systemPrompt,
+    },
     fileManagerConfig: {
       ...DEFAULT_CONFIG.fileManagerConfig,
       ...(incomingFileManager ?? {}),
@@ -649,7 +868,7 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
 
 export function normalizeAppPreferences(preferences?: Partial<AppPreferences> | null): AppPreferences {
   const nextAgentRole =
-    preferences?.agentRole === 'clickhouse_query' || preferences?.agentRole === 'file_management' || preferences?.agentRole === 'data_quality_tables'
+    preferences?.agentRole === 'clickhouse_query' || preferences?.agentRole === 'file_management' || preferences?.agentRole === 'pdf_creator' || preferences?.agentRole === 'oracle_analyst' || preferences?.agentRole === 'data_quality_tables'
       ? preferences.agentRole
       : 'manager';
   return {
@@ -704,7 +923,75 @@ export function preprocessMarkdown(md: string): string {
   text = text.replace(/([.!?])\s+([-*]\s+[A-Z0-9])/g, '$1\n$2');
   // Fix inline numbered list items
   text = text.replace(/([.!?])\s+(\d+\.\s+[A-Z0-9])/g, '$1\n$2');
+  text = promoteChoiceListsToTaskLists(text);
   return text;
+}
+
+const CHOICE_CONTEXT_PATTERN =
+  /(?:choose|pick|select|which(?:\s+one|\s+option|\s+table|\s+field|\s+date|\s+format)?|would you like|do you want|can you confirm|confirm|prefer|option(?:s)?|one of the following|clarif(?:y|ication)|specif(?:y|ication)|tell me which|choose from|pick one|reply with|answer with|yes or no|launch analysis|edit table|edit columns|edit sample size|edit row filter|edit time column|start over|choisis|selectionne|sélectionne|lequel|laquelle|quelle option|précis(?:e|ion)|réponds avec|confirme)/i;
+
+function promoteChoiceListsToTaskLists(md: string): string {
+  const lines = md.split('\n');
+  let inCodeFence = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+      continue;
+    }
+    if (inCodeFence) continue;
+    if (!/^\s*(?:[-*+]|\d+\.)\s+/.test(line)) continue;
+    if (/^\s*[-*+]\s+\[[ xX]\]\s+/.test(line)) continue;
+
+    const blockItems: string[] = [];
+    let cursor = index;
+    let containsTaskList = false;
+
+    while (cursor < lines.length) {
+      const current = lines[cursor];
+      if (/^\s*$/.test(current) || /^\s*```/.test(current)) break;
+      if (/^\s*[-*+]\s+\[[ xX]\]\s+/.test(current)) {
+        containsTaskList = true;
+        break;
+      }
+      const match = current.match(/^\s*(?:[-*+]|\d+\.)\s+(.+?)\s*$/);
+      if (!match) break;
+      blockItems.push(match[1].trim());
+      cursor += 1;
+    }
+
+    if (containsTaskList || blockItems.length < 2 || blockItems.length > 8) {
+      index = Math.max(index, cursor - 1);
+      continue;
+    }
+
+    if (blockItems.some((item) => item.length > 120 || item.startsWith('|') || item.startsWith('`'))) {
+      index = Math.max(index, cursor - 1);
+      continue;
+    }
+
+    const contextLines: string[] = [];
+    let lookback = index - 1;
+    while (lookback >= 0 && contextLines.length < 4) {
+      const previous = lines[lookback].trim();
+      if (!previous) break;
+      if (/^\s*```/.test(previous)) break;
+      contextLines.unshift(previous);
+      lookback -= 1;
+    }
+
+    if (!CHOICE_CONTEXT_PATTERN.test(contextLines.join(' '))) {
+      index = Math.max(index, cursor - 1);
+      continue;
+    }
+
+    const replacement = blockItems.map((item) => `- [ ] ${item}`);
+    lines.splice(index, blockItems.length, ...replacement);
+    index += replacement.length - 1;
+  }
+
+  return lines.join('\n');
 }
 
 /**

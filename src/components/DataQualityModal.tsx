@@ -101,6 +101,8 @@ export function DataQualityModal({
 
   const dateColumns = schema.filter((column) => column.category === "date");
   const selectedPreset = SAMPLE_PRESETS.find((preset) => preset.value === sampleSize)?.value ?? "custom";
+  const launchDisabled = isBusy || isLoadingMetadata || !selectedTable || selectedColumns.length === 0;
+  const sampleSizeLabel = sampleSize === 0 ? "Full scan (capped to 2,000,000 rows)" : `${sampleSize.toLocaleString()} rows`;
 
   if (!isOpen) return null;
 
@@ -142,7 +144,8 @@ export function DataQualityModal({
         </div>
 
         <div className="overflow-y-auto max-h-[calc(92vh-88px)]">
-          <div className="grid lg:grid-cols-[1.05fr,1.15fr] gap-6 p-6">
+          <div className="space-y-6 p-6">
+            <div className="grid lg:grid-cols-[1.05fr,1.15fr] gap-6">
             <div className="space-y-6">
               {error && (
                 <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -393,27 +396,68 @@ export function DataQualityModal({
                 </div>
               </div>
             </div>
+            </div>
+
+            <div className="rounded-[1.75rem] border border-black/10 dark:border-white/10 bg-white/85 dark:bg-gray-900/60 p-5 shadow-sm">
+              <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                <div className="space-y-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                      Ready to launch
+                    </h3>
+                    <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                      Review the current scope, then launch the agent directly from the form. The final report will still be posted back into the chat.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 px-3 py-1.5 text-gray-700 dark:text-gray-200">
+                      Table: <strong>{selectedTable || "Not selected"}</strong>
+                    </span>
+                    <span className="rounded-full border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 px-3 py-1.5 text-gray-700 dark:text-gray-200">
+                      Columns: <strong>{selectedColumns.length}</strong>
+                    </span>
+                    <span className="rounded-full border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 px-3 py-1.5 text-gray-700 dark:text-gray-200">
+                      Sample: <strong>{sampleSizeLabel}</strong>
+                    </span>
+                    <span className="rounded-full border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 px-3 py-1.5 text-gray-700 dark:text-gray-200">
+                      Filter: <strong>{rowFilter.trim() ? "Enabled" : "None"}</strong>
+                    </span>
+                    <span className="rounded-full border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 px-3 py-1.5 text-gray-700 dark:text-gray-200">
+                      Time column: <strong>{timeColumn || "None"}</strong>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-col items-stretch gap-2 lg:min-w-[220px]">
+                  <button
+                    type="button"
+                    onClick={() => void onSubmit()}
+                    disabled={launchDisabled}
+                    className="inline-flex items-center justify-center gap-2 rounded-[1.35rem] bg-black px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <BarChart3 className="w-4 h-4" />
+                    {isBusy ? "Launching..." : "Launch"}
+                  </button>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    Select a table and at least one column to enable the launch action.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
         <div className="flex items-center justify-end gap-3 px-6 py-5 border-t border-gray-200/70 dark:border-gray-800/80 bg-white/70 dark:bg-black/10">
           <div className="mr-auto text-xs text-gray-500 dark:text-gray-400">
-            Review the configuration, then launch the agent from here. The final report will be posted back into the chat.
+            The report is generated from the form configuration and posted back into the chat.
           </div>
           <button
             type="button"
             onClick={onClose}
             className="px-4 py-2 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
           >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => void onSubmit()}
-            disabled={isBusy || isLoadingMetadata || !selectedTable || selectedColumns.length === 0}
-            className="px-4 py-2 rounded-2xl bg-black text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {isBusy ? "Launching..." : "Launch"}
+            Close
           </button>
         </div>
       </div>
