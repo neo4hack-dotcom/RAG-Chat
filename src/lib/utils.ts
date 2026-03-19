@@ -1017,7 +1017,78 @@ export function preprocessMarkdown(md: string): string {
   // Fix inline numbered list items
   text = text.replace(/([.!?])\s+(\d+\.\s+[A-Z0-9])/g, '$1\n$2');
   text = promoteChoiceListsToTaskLists(text);
+  text = collapseTechnicalSections(text);
   return text;
+}
+
+const COLLAPSIBLE_MARKDOWN_SECTION_RULES: Array<{ pattern: RegExp; summary: string }> = [
+  { pattern: /^(executed sql|sql used|sql queries?|queries executed|query log)$/i, summary: 'Expand SQL' },
+  { pattern: /^(technical details?|technical notes?|implementation notes?|appendix|appendices)$/i, summary: 'Expand details' },
+  { pattern: /^(reasoning|reasoning summary|analysis reasoning|method|approach)$/i, summary: 'Expand reasoning' },
+  { pattern: /^(data preview|result preview|sample rows?|raw results?)$/i, summary: 'Expand data preview' },
+  { pattern: /^(knowledge signals|sources?|reference notes?|evidence trail|confidence|action log)$/i, summary: 'Expand details' },
+];
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function collapsibleSummaryForHeading(title: string): string | null {
+  const normalized = title.trim();
+  if (!normalized) return null;
+  for (const rule of COLLAPSIBLE_MARKDOWN_SECTION_RULES) {
+    if (rule.pattern.test(normalized)) {
+      return rule.summary;
+    }
+  }
+  return null;
+}
+
+function collapseTechnicalSections(md: string): string {
+  const lines = md.split('\n');
+  const renderedSections: string[] = [];
+  let currentSection: string[] = [];
+  let inCodeFence = false;
+
+  const flushSection = () => {
+    if (currentSection.length === 0) return;
+    const headingMatch = currentSection[0].match(/^(#{2,4})\s+(.+?)\s*$/);
+    const summaryLabel = headingMatch ? collapsibleSummaryForHeading(headingMatch[2]) : null;
+    const sectionBody = currentSection.slice(1).join('\n').trim();
+
+    if (
+      headingMatch &&
+      summaryLabel &&
+      sectionBody &&
+      !sectionBody.includes('<details')
+    ) {
+      renderedSections.push(
+        `<details>\n<summary>${escapeHtml(summaryLabel)}</summary>\n\n${sectionBody}\n</details>`
+      );
+    } else {
+      renderedSections.push(currentSection.join('\n'));
+    }
+    currentSection = [];
+  };
+
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+    }
+    const isHeading = !inCodeFence && /^(#{2,4})\s+.+$/.test(line);
+    if (isHeading) {
+      flushSection();
+    }
+    currentSection.push(line);
+  }
+
+  flushSection();
+  return renderedSections.join('\n');
 }
 
 const CHOICE_CONTEXT_PATTERN =
