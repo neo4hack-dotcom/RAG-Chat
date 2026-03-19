@@ -462,7 +462,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   baseUrl: "http://localhost:11434",
   apiKey: "",
   model: "llama3",
-  systemPrompt: "You are a helpful, smart, and concise AI assistant. Format your responses beautifully using markdown. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies.",
+  systemPrompt: "You are a helpful, smart, and concise AI assistant. Present non-JSON answers in polished Markdown with clear sections, concise bullets, tasteful **bold** emphasis, and tables when they help. Safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> are allowed when they genuinely improve the layout. Never return a full HTML document, CSS, or JavaScript. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies.",
   disableSslVerification: false,
   elasticsearchUrl: "http://localhost:9200",
   elasticsearchIndex: "rag_documents",
@@ -511,13 +511,13 @@ export const DEFAULT_CONFIG: AppConfig = {
     maxIterations: 8,
     toolkitId: '',
     systemPrompt:
-      'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
+      'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and present final user-facing answers in polished Markdown with clear sections, concise bullets, and tasteful emphasis. Safe semantic HTML fragments are allowed when they improve readability.',
   },
   fileManagerConfig: {
     basePath: '',
     maxIterations: 10,
     systemPrompt:
-      'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, and ask for confirmation before destructive or overwrite actions.',
+      'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, ask for confirmation before destructive or overwrite actions, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis.',
   },
 };
 
@@ -974,6 +974,7 @@ export function normalizePersistedAppState(
   const config = normalizeAppConfig(state?.config);
   const conversations = Array.isArray(state?.conversations) ? state!.conversations : [];
   const preferences = normalizeAppPreferences(state?.preferences);
+  const wantsFreshChat = preferences.currentConversationId === null;
   const hasCurrentConversation = conversations.some((conversation) => conversation.id === preferences.currentConversationId);
   const selectedMcpToolId = config.mcpTools.some((tool) => tool.id === preferences.selectedMcpToolId)
     ? preferences.selectedMcpToolId
@@ -984,7 +985,9 @@ export function normalizePersistedAppState(
     conversations,
     preferences: {
       ...preferences,
-      currentConversationId: hasCurrentConversation
+      currentConversationId: wantsFreshChat
+        ? null
+        : hasCurrentConversation
         ? preferences.currentConversationId
         : (conversations[0]?.id ?? null),
       selectedMcpToolId,

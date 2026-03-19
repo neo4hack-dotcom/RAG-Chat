@@ -87,12 +87,12 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       toolkitId: config.oracleAnalystConfig?.toolkitId ?? '',
       systemPrompt:
         config.oracleAnalystConfig?.systemPrompt ??
-        'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
+        'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and present final user-facing answers in polished Markdown with clear sections, concise bullets, and tasteful emphasis. Safe semantic HTML fragments are allowed when they improve readability.',
     },
     fileManagerConfig: {
       basePath: config.fileManagerConfig?.basePath ?? '',
       maxIterations: Math.min(15, Math.max(1, config.fileManagerConfig?.maxIterations ?? 10)),
-      systemPrompt: config.fileManagerConfig?.systemPrompt ?? 'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, and ask for confirmation before destructive or overwrite actions.',
+      systemPrompt: config.fileManagerConfig?.systemPrompt ?? 'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, ask for confirmation before destructive or overwrite actions, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis.',
     },
   };
 }
@@ -116,6 +116,9 @@ export function SettingsModal({
 }: SettingsModalProps) {
   // Local state to hold configuration changes before saving
   const [localConfig, setLocalConfig] = useState<AppConfig>(() => buildLocalConfig(config));
+  const wasOpenRef = useRef(false);
+  const lastHydratedConfigRef = useRef(JSON.stringify(buildLocalConfig(config)));
+  const currentDraftFingerprintRef = useRef(lastHydratedConfigRef.current);
   
   // State for available models fetched from the provider
   const [models, setModels] = useState<string[]>([]);
@@ -129,8 +132,8 @@ export function SettingsModal({
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
   
-  // Tab state (LLM, RAG, MCP, or DB backup settings)
-  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'oracle' | 'apps' | 'mcp' | 'storage'>('llm');
+  // Tab state (LLM, RAG, ClickHouse, MCP, or DB backup settings)
+  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'clickhouse' | 'oracle' | 'apps' | 'mcp' | 'storage'>('llm');
 
   // Connection test states for OpenSearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -162,8 +165,29 @@ export function SettingsModal({
   const [dbMessage, setDbMessage] = useState('');
 
   useEffect(() => {
-    setLocalConfig(buildLocalConfig(config));
-  }, [config]);
+    currentDraftFingerprintRef.current = JSON.stringify(localConfig);
+  }, [localConfig]);
+
+  useEffect(() => {
+    const nextLocalConfig = buildLocalConfig(config);
+    const nextFingerprint = JSON.stringify(nextLocalConfig);
+    const previousHydratedFingerprint = lastHydratedConfigRef.current;
+    const currentDraftFingerprint = currentDraftFingerprintRef.current;
+    const isOpening = isOpen && !wasOpenRef.current;
+    const hasUnsavedChanges = currentDraftFingerprint !== previousHydratedFingerprint;
+    const shouldAdoptExternalConfig =
+      !isOpen ||
+      isOpening ||
+      (!hasUnsavedChanges && nextFingerprint !== previousHydratedFingerprint);
+
+    if (shouldAdoptExternalConfig) {
+      setLocalConfig(nextLocalConfig);
+      lastHydratedConfigRef.current = nextFingerprint;
+      currentDraftFingerprintRef.current = nextFingerprint;
+    }
+
+    wasOpenRef.current = isOpen;
+  }, [config, isOpen]);
 
   if (!isOpen) return null;
 
@@ -712,6 +736,12 @@ export function SettingsModal({
               className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'rag' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
             >
               RAG & OpenSearch
+            </button>
+            <button
+              onClick={() => setActiveTab('clickhouse')}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'clickhouse' ? 'border-cyan-500 text-cyan-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+            >
+              ClickHouse SQL
             </button>
             <button
               onClick={() => setActiveTab('mcp')}
@@ -1281,7 +1311,7 @@ export function SettingsModal({
                             />
                           </div>
                           <div>
-                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">URL (SSE)</label>
+                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">URL (SSE or HTTP)</label>
                             <input
                               type="text"
                               value={tool.url}
@@ -1482,7 +1512,7 @@ export function SettingsModal({
                   />
                 </div>
             </div>
-          ) : (
+          ) : activeTab === 'rag' ? (
             <div className="space-y-5">
               {/* OpenSearch URL */}
               <div>
@@ -1561,161 +1591,6 @@ export function SettingsModal({
                     placeholder="••••••••"
                     autoComplete="current-password"
                   />
-                </div>
-              </div>
-
-              <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
-                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2">
-                  <Database className="w-4 h-4 text-cyan-500" /> Clickhouse SQL Agent
-                </h3>
-
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                        <Server className="w-4 h-4" /> Host
-                      </label>
-                      <input
-                        type="text"
-                        value={localConfig.clickhouseHost}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseHost: e.target.value })}
-                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
-                        placeholder="localhost"
-                      />
-                    </div>
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                        <Server className="w-4 h-4" /> Port
-                      </label>
-                      <input
-                        type="number"
-                        value={localConfig.clickhousePort}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhousePort: parseInt(e.target.value, 10) || 8123 })}
-                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
-                        placeholder="8123"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                        <Database className="w-4 h-4" /> Database
-                      </label>
-                      <input
-                        type="text"
-                        value={localConfig.clickhouseDatabase}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseDatabase: e.target.value })}
-                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
-                        placeholder="default"
-                      />
-                    </div>
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                        <Server className="w-4 h-4" /> HTTP Path
-                      </label>
-                      <input
-                        type="text"
-                        value={localConfig.clickhouseHttpPath}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseHttpPath: e.target.value })}
-                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
-                        placeholder="Leave empty for default root path"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                        <Key className="w-4 h-4" /> Username
-                      </label>
-                      <input
-                        type="text"
-                        value={localConfig.clickhouseUsername}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseUsername: e.target.value })}
-                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
-                        placeholder="default"
-                        autoComplete="username"
-                      />
-                    </div>
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                        <Key className="w-4 h-4" /> Password
-                      </label>
-                      <input
-                        type="password"
-                        value={localConfig.clickhousePassword}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhousePassword: e.target.value })}
-                        className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
-                        placeholder="••••••••"
-                        autoComplete="current-password"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={localConfig.clickhouseSecure}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseSecure: e.target.checked })}
-                        className="w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500"
-                      />
-                      <span className="text-xs text-gray-600 dark:text-gray-400">Use HTTPS</span>
-                    </label>
-                    <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={localConfig.clickhouseVerifySsl}
-                        onChange={(e) => setLocalConfig({ ...localConfig, clickhouseVerifySsl: e.target.checked })}
-                        className="w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500"
-                      />
-                      <span className="text-xs text-gray-600 dark:text-gray-400">
-                        Verify SSL certificate{localConfig.disableSslVerification ? ' (overridden globally)' : ''}
-                      </span>
-                    </label>
-                  </div>
-
-                  <div>
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                      <SlidersHorizontal className="w-4 h-4" /> Default Query Limit
-                    </label>
-                    <input
-                      type="number"
-                      value={localConfig.clickhouseQueryLimit}
-                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseQueryLimit: parseInt(e.target.value, 10) || 200 })}
-                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
-                    />
-                    <p className="text-xs text-gray-500 mt-1">Used by the ClickHouse agent to keep row-level queries bounded and safe.</p>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <button
-                      onClick={testClickHouseConnection}
-                      disabled={clickhouseTestStatus === 'testing'}
-                      className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
-                    >
-                      {clickhouseTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test ClickHouse'}
-                    </button>
-                  </div>
-                  {clickhouseTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {clickhouseTestMessage}</p>}
-                  {clickhouseTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3" /> {clickhouseTestMessage}</p>}
-
-                  {clickhouseTablesPreview.length > 0 && (
-                    <div className="space-y-2">
-                      <p className="text-xs font-medium text-gray-600 dark:text-gray-300">Available tables preview</p>
-                      <div className="flex flex-wrap gap-1">
-                        {clickhouseTablesPreview.map((table) => (
-                          <span
-                            key={table}
-                            className="px-2 py-0.5 bg-cyan-50 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-700 rounded-md text-[10px] font-medium"
-                          >
-                            {table}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -1902,7 +1777,168 @@ export function SettingsModal({
                 {ingestStatus === 'error'   && <p className="text-red-600   text-xs flex items-center gap-1"><XCircle      className="w-3 h-3" /> {ingestMessage}</p>}
               </div>
             </div>
-          )}
+          ) : activeTab === 'clickhouse' ? (
+            <div className="space-y-6">
+              <div className="p-4 rounded-2xl bg-cyan-50/80 dark:bg-cyan-900/20 border border-cyan-200/70 dark:border-cyan-700/40">
+                <div className="flex items-center gap-2 mb-2">
+                  <Database className="w-4 h-4 text-cyan-600 dark:text-cyan-300" />
+                  <h3 className="text-sm font-semibold text-cyan-900 dark:text-cyan-200">ClickHouse SQL</h3>
+                </div>
+                <p className="text-xs text-cyan-800/90 dark:text-cyan-300/90 leading-relaxed">
+                  Configure the ClickHouse connection used by ClickHouse SQL, Data Analyst, Data Quality, and any Manager workflow that needs ClickHouse queries. All existing tests, safety limits, and table previews stay available here.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <Server className="w-4 h-4" /> Host
+                    </label>
+                    <input
+                      type="text"
+                      value={localConfig.clickhouseHost}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseHost: e.target.value })}
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                      placeholder="localhost"
+                    />
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <Server className="w-4 h-4" /> Port
+                    </label>
+                    <input
+                      type="number"
+                      value={localConfig.clickhousePort}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhousePort: parseInt(e.target.value, 10) || 8123 })}
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                      placeholder="8123"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <Database className="w-4 h-4" /> Database
+                    </label>
+                    <input
+                      type="text"
+                      value={localConfig.clickhouseDatabase}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseDatabase: e.target.value })}
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                      placeholder="default"
+                    />
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <Server className="w-4 h-4" /> HTTP Path
+                    </label>
+                    <input
+                      type="text"
+                      value={localConfig.clickhouseHttpPath}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseHttpPath: e.target.value })}
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                      placeholder="Leave empty for default root path"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <Key className="w-4 h-4" /> Username
+                    </label>
+                    <input
+                      type="text"
+                      value={localConfig.clickhouseUsername}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseUsername: e.target.value })}
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                      placeholder="default"
+                      autoComplete="username"
+                    />
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <Key className="w-4 h-4" /> Password
+                    </label>
+                    <input
+                      type="password"
+                      value={localConfig.clickhousePassword}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhousePassword: e.target.value })}
+                      className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                      placeholder="••••••••"
+                      autoComplete="current-password"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={localConfig.clickhouseSecure}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseSecure: e.target.checked })}
+                      className="w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500"
+                    />
+                    <span className="text-xs text-gray-600 dark:text-gray-400">Use HTTPS</span>
+                  </label>
+                  <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={localConfig.clickhouseVerifySsl}
+                      onChange={(e) => setLocalConfig({ ...localConfig, clickhouseVerifySsl: e.target.checked })}
+                      className="w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500"
+                    />
+                    <span className="text-xs text-gray-600 dark:text-gray-400">
+                      Verify SSL certificate{localConfig.disableSslVerification ? ' (overridden globally)' : ''}
+                    </span>
+                  </label>
+                </div>
+
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                    <SlidersHorizontal className="w-4 h-4" /> Default Query Limit
+                  </label>
+                  <input
+                    type="number"
+                    value={localConfig.clickhouseQueryLimit}
+                    onChange={(e) => setLocalConfig({ ...localConfig, clickhouseQueryLimit: parseInt(e.target.value, 10) || 200 })}
+                    className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition-all"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Used by the ClickHouse agent to keep row-level queries bounded and safe.</p>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={testClickHouseConnection}
+                    disabled={clickhouseTestStatus === 'testing'}
+                    className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm"
+                  >
+                    {clickhouseTestStatus === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test ClickHouse'}
+                  </button>
+                </div>
+                {clickhouseTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {clickhouseTestMessage}</p>}
+                {clickhouseTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3" /> {clickhouseTestMessage}</p>}
+
+                {clickhouseTablesPreview.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-gray-600 dark:text-gray-300">Available tables preview</p>
+                    <div className="flex flex-wrap gap-1">
+                      {clickhouseTablesPreview.map((table) => (
+                        <span
+                          key={table}
+                          className="px-2 py-0.5 bg-cyan-50 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-700 rounded-md text-[10px] font-medium"
+                        >
+                          {table}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
 
           <div className="mt-8 flex justify-end">
                 <button

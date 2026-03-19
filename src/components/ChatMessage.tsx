@@ -392,13 +392,13 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
     },
 
     // Headings
-    h1: ({ children, ...props }: any) => <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mt-6 mb-3 leading-tight" {...props}>{children}</h1>,
-    h2: ({ children, ...props }: any) => <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mt-5 mb-2 leading-tight" {...props}>{children}</h2>,
-    h3: ({ children, ...props }: any) => <h3 className="text-base font-semibold text-gray-800 dark:text-gray-200 mt-4 mb-1.5" {...props}>{children}</h3>,
-    h4: ({ children, ...props }: any) => <h4 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mt-3 mb-1" {...props}>{children}</h4>,
+    h1: ({ children, ...props }: any) => <h1 className="text-[1.9rem] font-semibold tracking-tight text-gray-900 dark:text-gray-100 mt-6 mb-3 leading-tight" {...props}>{children}</h1>,
+    h2: ({ children, ...props }: any) => <h2 className="text-[1.1rem] font-semibold text-gray-900 dark:text-gray-100 mt-6 mb-3 leading-tight" {...props}>{children}</h2>,
+    h3: ({ children, ...props }: any) => <h3 className="text-[0.98rem] font-semibold text-gray-800 dark:text-gray-200 mt-4 mb-2" {...props}>{children}</h3>,
+    h4: ({ children, ...props }: any) => <h4 className="text-sm font-semibold uppercase tracking-[0.12em] text-gray-500 dark:text-gray-400 mt-4 mb-1.5" {...props}>{children}</h4>,
 
     // Paragraphs
-    p: ({ children, ...props }: any) => <p className="text-[14px] leading-relaxed text-gray-800 dark:text-gray-200 mb-3 last:mb-0" {...props}>{children}</p>,
+    p: ({ children, ...props }: any) => <p className="text-[14px] leading-[1.8] text-gray-800 dark:text-gray-200 mb-3 last:mb-0" {...props}>{children}</p>,
 
     // Lists
     ul: ({ children, ...props }: any) => <ul className="list-none pl-0 mb-3 space-y-1" {...props}>{children}</ul>,
@@ -410,26 +410,15 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
       const isTask = (checked !== null && checked !== undefined) || hasTaskListClassName(className) || looksLikeUncheckedTask;
       if (isTask) {
         return (
-          <li className="list-none my-2" {...props}>
+          <li className="list-none inline-block mr-2 mb-2 align-top" {...props}>
             <button
               type="button"
               onClick={() => onCheckboxToggle?.(messageId, choiceLabel || rawText, true)}
-              className="group w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/85 dark:bg-gray-900/70 px-4 py-3 text-left shadow-sm hover:border-blue-300 hover:bg-blue-50/70 dark:hover:border-blue-600 dark:hover:bg-blue-900/20 transition-all"
+              className="group inline-flex max-w-full items-center gap-2 rounded-md border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-left text-[11px] font-medium text-cyan-700 shadow-sm transition-all hover:bg-cyan-100 hover:border-cyan-300 dark:border-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 dark:hover:bg-cyan-900/45 dark:hover:border-cyan-500"
               aria-label={choiceLabel || rawText}
             >
-              <div className="flex items-start gap-3">
-                <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300 border border-blue-100 dark:border-blue-800/60 flex-shrink-0">
-                  <ChevronRight className="w-4 h-4" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-[14px] font-medium text-gray-900 dark:text-gray-100 leading-relaxed">
-                    {choiceLabel || rawText}
-                  </div>
-                  <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                    Click to choose
-                  </div>
-                </div>
-              </div>
+              <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 dark:bg-cyan-300 flex-shrink-0" />
+              <span className="truncate">{choiceLabel || rawText}</span>
             </button>
           </li>
         );
@@ -452,9 +441,31 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
 
     // Blockquote
     blockquote: ({ children, ...props }: any) => (
-      <blockquote className="border-l-4 border-blue-400 dark:border-blue-600 pl-4 py-1 my-3 bg-blue-50/50 dark:bg-blue-900/10 rounded-r-lg text-gray-700 dark:text-gray-300 italic text-[14px]" {...props}>
-        {children}
+      <blockquote className="relative overflow-hidden rounded-[1.4rem] border border-sky-200/80 bg-gradient-to-br from-sky-50 to-white px-4 py-3 my-4 text-gray-700 dark:border-sky-800/60 dark:from-sky-950/30 dark:to-transparent dark:text-gray-200 shadow-sm" {...props}>
+        <div className="absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b from-sky-400 to-cyan-500 dark:from-sky-500 dark:to-cyan-400" />
+        <div className="pl-2 text-[14px] leading-[1.75]">{children}</div>
       </blockquote>
+    ),
+
+    details: ({ children, ...props }: any) => (
+      <details className="my-4 overflow-hidden rounded-[1.35rem] border border-gray-200/80 bg-white/75 shadow-sm dark:border-gray-700/80 dark:bg-gray-900/45" {...props}>
+        {children}
+      </details>
+    ),
+    summary: ({ children, ...props }: any) => (
+      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-100 transition-colors hover:bg-black/5 dark:hover:bg-white/5 [&::-webkit-details-marker]:hidden" {...props}>
+        {children}
+      </summary>
+    ),
+    section: ({ children, ...props }: any) => (
+      <section className="my-4 rounded-[1.45rem] border border-gray-200/80 bg-white/70 px-4 py-4 shadow-sm dark:border-gray-700/80 dark:bg-gray-900/35" {...props}>
+        {children}
+      </section>
+    ),
+    article: ({ children, ...props }: any) => (
+      <article className="my-4 rounded-[1.45rem] border border-slate-200/80 bg-gradient-to-br from-white to-slate-50 px-4 py-4 shadow-sm dark:border-slate-700/80 dark:from-slate-900/60 dark:to-slate-950/40" {...props}>
+        {children}
+      </article>
     ),
 
     // Horizontal rule
@@ -498,18 +509,18 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
   const renderedContent = !isUser && !htmlMode ? preprocessMarkdown(content) : content;
 
   return (
-    <div className={cn("flex gap-4 w-full max-w-[77rem] mx-auto mb-8 animate-fade-in-up", isUser ? "flex-row-reverse" : "flex-row")}>
+    <div className={cn("flex gap-3 w-full max-w-[77rem] mx-auto mb-5 animate-fade-in-up", isUser ? "flex-row-reverse" : "flex-row")}>
       <div className={cn(
-        "flex-shrink-0 w-10 h-10 rounded-2xl flex items-center justify-center shadow-sm",
+        "flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center shadow-sm",
         isUser
           ? "bg-gradient-to-tr from-blue-500 to-blue-600 text-white"
           : "bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300"
       )}>
-        {isUser ? <User className="w-5 h-5" /> : <Bot className="w-5 h-5" />}
+        {isUser ? <User className="w-4.5 h-4.5" /> : <Bot className="w-4.5 h-4.5" />}
       </div>
 
       <div className={cn(
-        "group relative px-6 py-4 rounded-[2rem]",
+        "group relative px-5 py-3 rounded-[1.7rem]",
         isUser
           ? "max-w-[88%] bg-blue-500 text-white rounded-tr-sm shadow-md shadow-blue-500/10"
           : "glass-panel rounded-tl-sm w-full"
@@ -518,10 +529,10 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
 
         {/* Agent Thinking Steps */}
         {showSteps && !isUser && message.steps && message.steps.length > 0 && (
-          <div className="mb-4 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 rounded-xl overflow-hidden shadow-sm">
+          <div className="mb-3 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 rounded-xl overflow-hidden shadow-sm">
             <button
               onClick={() => setIsStepsExpanded(!isStepsExpanded)}
-              className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/40 dark:hover:bg-white/5 transition-colors"
+              className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-white/40 dark:hover:bg-white/5 transition-colors"
             >
               <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200">
                 <BrainCircuit className="w-4 h-4 text-purple-500" />
@@ -530,8 +541,8 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
               {isStepsExpanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
             </button>
             {isStepsExpanded && (
-              <div className="px-4 pb-4 pt-1 border-t border-gray-100/50">
-                <div className="space-y-3 mt-2">
+              <div className="px-4 pb-3 pt-1 border-t border-gray-100/50">
+                <div className="space-y-2.5 mt-2">
                   {message.steps.map((step, idx) => (
                     <div key={step.id || idx} className="flex items-start gap-3">
                       <div className="mt-0.5">{renderStepIcon(step.status)}</div>
@@ -600,7 +611,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
 
         {/* Attachments */}
         {message.attachments && message.attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-3">
+          <div className="flex flex-wrap gap-2 mb-2.5">
             {message.attachments.map(att =>
               att.type.startsWith('image/') ? (
                 <img key={att.id} src={att.data} alt={att.name} className="max-w-xs max-h-64 object-contain rounded-lg border border-white/20 shadow-sm" />
@@ -615,11 +626,11 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
 
         {/* Message Content */}
         {isUser ? (
-          <div className="whitespace-pre-wrap text-[14px] leading-relaxed">{content}</div>
+          <div className="whitespace-pre-wrap text-[14px] leading-[1.65]">{content}</div>
         ) : htmlMode ? (
           // Raw HTML content (e.g. some local LLMs output HTML directly)
           <div
-            className="markdown-body prose-sm prose dark:prose-invert max-w-none"
+            className="markdown-body llm-html max-w-none"
             dangerouslySetInnerHTML={{ __html: content }}
           />
         ) : (
@@ -639,14 +650,14 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
         )}
 
         {!isUser && message.actions && message.actions.length > 0 && (
-          <div className="mt-4 flex flex-wrap gap-2">
+          <div className="mt-3 flex flex-wrap gap-2">
             {message.actions.map((action) => (
               <button
                 key={action.id}
                 type="button"
                 onClick={() => onAction?.(action, message)}
                 className={cn(
-                  "inline-flex items-center gap-2 px-4 py-2 rounded-2xl text-sm font-medium transition-colors",
+                  "inline-flex items-center gap-2 px-3.5 py-1.5 rounded-2xl text-[13px] font-medium transition-colors",
                   action.variant === 'primary'
                     ? "bg-black text-white hover:bg-gray-800"
                     : "border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
@@ -660,7 +671,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
 
         {/* RAG low-confidence warning */}
         {!isUser && message.confidence !== undefined && message.confidence < 0.4 && (
-          <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg flex items-start gap-2 text-amber-800 dark:text-amber-200 text-xs">
+          <div className="mt-3 p-2.5 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg flex items-start gap-2 text-amber-800 dark:text-amber-200 text-xs">
             <XCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
             <p><strong>Warning:</strong> Low-relevance documents detected (score: {Math.round(message.confidence * 100)}%). The answer may be imprecise.</p>
           </div>
@@ -668,7 +679,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
 
         {/* RAG Sources Inspector */}
         {!isUser && message.sources && message.sources.length > 0 && (
-          <div className="mt-4 border-t border-gray-200/60 dark:border-gray-700/60 pt-3">
+          <div className="mt-3 border-t border-gray-200/60 dark:border-gray-700/60 pt-2.5">
             <button
               onClick={() => setIsSourcesExpanded(!isSourcesExpanded)}
               className="flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
