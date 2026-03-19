@@ -101,13 +101,13 @@ function HydrationScreen({ syncError }: { syncError: string | null }) {
         <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-slate-700 to-slate-900 flex items-center justify-center shadow-md shadow-slate-900/20 mb-4">
           <span className="text-white text-xl font-semibold">R</span>
         </div>
-        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Synchronisation de la DB</h1>
+        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Syncing the DB</h1>
         <p className="mt-3 text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
-          RAGnarok recharge l&apos;état persistant pour afficher la dernière version enregistrée côté backend.
+          RAGnarok is reloading the persistent state to show the latest version saved on the backend.
         </p>
         {syncError && (
           <p className="mt-4 text-sm text-red-600 dark:text-red-400">
-            Dernier souci détecté: {syncError}
+            Latest issue detected: {syncError}
           </p>
         )}
       </div>

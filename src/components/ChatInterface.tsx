@@ -3,8 +3,10 @@ import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Data
 import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
+import { PlanningMonitorModal } from "./PlanningMonitorModal";
 import { FileManagerConfigModal } from "./FileManagerConfigModal";
 import { DataQualityModal } from "./DataQualityModal";
+import { downloadMarkdownPdf } from "../lib/pdf";
 
 interface ChatInterfaceProps {
   config: AppConfig;
@@ -157,6 +159,124 @@ function summarizeDataQualityRun(form: DataQualityFormState): string {
   return lines.join("\n");
 }
 
+function isFrenchCapabilitiesQuery(text: string): boolean {
+  return /(?:que peux?-?tu faire(?: pour moi)?|qu['’]est-ce que tu peux faire(?: pour moi)?|que peut faire (?:l['’])?(?:app|application|outil|ragnarok)|comment .*servir|comment .*utiliser|aide-moi à comprendre|capacités|fonctionnalités|quel agent utiliser)/i.test(text);
+}
+
+function isEnglishCapabilitiesQuery(text: string): boolean {
+  return /(?:what can you do(?: for me)?|what can this app do|how can you help|what is this app able to do|how do i use|how can i use|capabilities|features|which agent should i use)/i.test(text);
+}
+
+function isAppCapabilitiesQuery(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  return isFrenchCapabilitiesQuery(normalized) || isEnglishCapabilitiesQuery(normalized);
+}
+
+function buildAppCapabilitiesReply(text: string): string {
+  const replyInFrench = isFrenchCapabilitiesQuery(text);
+
+  if (replyInFrench) {
+    return `## Ce que RAGnarok peut faire pour toi
+
+RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agents spécialisés** sont le meilleur point de départ si tu veux obtenir une action concrète plutôt qu'une simple réponse.
+
+### Agent Manager
+
+- C'est l'agent **chef d'orchestre**.
+- Tu peux lui décrire directement un objectif métier, par exemple : **"analyse les ventes puis exporte le résultat en CSV"**.
+- Il peut déléguer à d'autres agents comme **ClickHouse Query**, **File management** ou **Data quality - Tables** quand c'est pertinent.
+- C'est le bon choix si tu ne sais pas encore quel agent utiliser.
+
+### ClickHouse Query
+
+- Cet agent sert à **interroger une base ClickHouse** en langage naturel.
+- Il peut choisir la bonne table automatiquement si la demande est claire, sinon il te propose des choix cliquables.
+- Il peut aussi proposer ou générer un **graphique** quand le résultat s'y prête.
+- Utilise-le pour des demandes comme : **"show me the revenue by month"**, **"find the latest failed jobs"**, ou **"compare sales by region"**.
+
+### File management
+
+- Cet agent sert à **lire, créer, modifier, déplacer et supprimer des fichiers**.
+- Il peut travailler sur des fichiers texte, CSV et Excel, avec confirmation avant les actions sensibles.
+- Utilise-le pour : **créer un fichier**, **générer un export CSV/XLSX**, **lire un dossier**, **résumer un fichier**, ou **mettre à jour un document**.
+- Il est particulièrement utile après une requête de données quand tu veux **sauvegarder le résultat dans un fichier**.
+
+### Data quality - Tables
+
+- Cet agent sert à faire de la **data quality** et du **profiling statistique** sur une table.
+- Il s'utilise via un **formulaire guidé** où tu choisis la table, les colonnes, le sample size, le filtre éventuel et la colonne temporelle.
+- Il calcule des statistiques, détecte les anomalies, puis produit une **synthèse structurée** avec recommandations.
+- Utilise-le pour des demandes comme : **"check data quality on customers"** ou **"profile the sales table"**.
+
+## Autres modes utiles
+
+- **RAG Knowledge** : interroger ta base documentaire avec recherche sémantique.
+- **MCP** : appeler un outil externe compatible MCP.
+- **CrewAI - Planning** : programmer des agents à heure fixe ou sur événement, puis suivre les exécutions.
+- **Pure LLM** : discuter librement avec le modèle sans workflow spécialisé.
+
+## Comment bien t'en servir
+
+- Si tu veux un résultat métier sans te poser de question, commence par **Agent Manager**.
+- Si tu veux interroger des données, choisis **ClickHouse Query**.
+- Si tu veux produire ou manipuler un fichier, choisis **File management**.
+- Si tu veux auditer la qualité d'une table, choisis **Data quality - Tables** puis **Open form**.
+- Si tu veux automatiser un scénario récurrent, utilise **CrewAI - Planning**.
+
+Si tu veux, je peux aussi te proposer **quel agent utiliser selon ton besoin exact**.`;
+  }
+
+  return `## What RAGnarok can do for you
+
+RAGnarok supports several workflows, but its **specialist agents** are the most useful entry point when you want the app to actually perform a task instead of only chatting.
+
+### Agent Manager
+
+- This is the **orchestrator** agent.
+- You can give it a business outcome such as **"analyze sales and export the result to CSV"**.
+- It can delegate to **ClickHouse Query**, **File management**, or **Data quality - Tables** when needed.
+- Use it when you want the app to decide the best path for you.
+
+### ClickHouse Query
+
+- This agent is designed to **query a ClickHouse database from natural language**.
+- It tries to infer the right table automatically, and only asks for clarification when the request stays ambiguous.
+- It can also suggest or generate a **chart** when the result is easier to understand visually.
+- Use it for requests like **"show revenue by month"**, **"find the latest failed jobs"**, or **"compare sales by region"**.
+
+### File management
+
+- This agent is built to **read, create, edit, move, and delete files**.
+- It supports text files, CSV, and Excel workflows, with confirmation before destructive actions.
+- Use it to **create a file**, **export data to CSV/XLSX**, **inspect folders**, **summarize a file**, or **update existing content**.
+- It is especially useful after a data query when you want to **save the result as a file**.
+
+### Data quality - Tables
+
+- This agent runs **data-quality profiling and statistical diagnostics** on a table.
+- It opens a **guided form** where you choose the table, columns, sample size, optional row filter, and optional time column.
+- It computes metrics, detects anomalies, and returns a **structured quality summary** with recommendations.
+- Use it for requests like **"profile the customers table"** or **"check the data quality of sales records"**.
+
+## Other useful modes
+
+- **RAG Knowledge**: query your document base with semantic retrieval.
+- **MCP**: call an external MCP-compatible tool.
+- **CrewAI - Planning**: schedule one or more agents to run on a fixed schedule or on events, then monitor their execution history.
+- **Pure LLM**: free-form conversation with the model without a specialized workflow.
+
+## How to use the app effectively
+
+- Start with **Agent Manager** if you want the app to figure out the best execution path.
+- Pick **ClickHouse Query** when your goal is to analyze data from ClickHouse.
+- Pick **File management** when your goal is to create, inspect, or export files.
+- Pick **Data quality - Tables** and click **Open form** when you want a guided table-quality analysis.
+- Use **CrewAI - Planning** when you want an automated recurring workflow.
+
+If you want, I can also tell you **which mode or agent to use for your exact task**.`;
+}
+
 export function ChatInterface({
   config,
   conversations,
@@ -221,6 +341,7 @@ export function ChatInterface({
     ? [...fallbackMessages, pendingAgentIntro]
     : fallbackMessages;
   const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
+  const [isPlanningMonitorOpen, setIsPlanningMonitorOpen] = useState(false);
   const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
   const [plannerDraft, setPlannerDraft] = useState<CrewPlanDraft>(() => normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
@@ -362,10 +483,10 @@ export function ChatInterface({
   };
 
   useEffect(() => {
-    if (workflow === 'CREWAI' || isPlanningModalOpen) {
+    if (workflow === 'CREWAI' || isPlanningModalOpen || isPlanningMonitorOpen) {
       void loadPlanningState();
     }
-  }, [workflow, isPlanningModalOpen]);
+  }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen]);
 
   useEffect(() => {
     if (workflow === 'AGENT' && (agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'data_quality_tables')) {
@@ -603,6 +724,7 @@ export function ChatInterface({
         content: data.answer,
         timestamp: Date.now(),
         steps: data.steps,
+        actions: data.actions,
       };
       const conversationMessages = [...nextMessages, assistantDataQualityMsg];
 
@@ -661,6 +783,12 @@ export function ChatInterface({
     }
     setPlanningError(null);
     setIsPlanningModalOpen(true);
+    void loadPlanningState();
+  };
+
+  const openPlanningMonitor = () => {
+    setPlanningError(null);
+    setIsPlanningMonitorOpen(true);
     void loadPlanningState();
   };
 
@@ -788,7 +916,7 @@ export function ChatInterface({
     }
   };
 
-  const handleChatAction = (action: ChatAction) => {
+  const handleChatAction = (action: ChatAction, message: Message) => {
     if (action.actionType === 'open_planning_form') {
       openPlanningModal(planningAgentState.draft);
       return;
@@ -813,6 +941,12 @@ export function ChatInterface({
     }
     if (action.actionType === 'cancel_file_action') {
       void handleSend('cancel');
+      return;
+    }
+    if (action.actionType === 'export_data_quality_pdf') {
+      const fileName = String(action.payload?.fileName || 'data-quality-summary.pdf');
+      const title = String(action.payload?.title || 'Data Quality Summary');
+      downloadMarkdownPdf(message.content, { fileName, title });
     }
   };
 
@@ -922,7 +1056,10 @@ export function ChatInterface({
       let nextDataQualityAgentState = dataQualityAgentState;
 
       // Route the request based on the selected workflow
-      if (workflow === 'RAG') {
+      if (workflow === 'LLM' && isAppCapabilitiesQuery(text)) {
+        reply = buildAppCapabilitiesReply(text);
+        setIsConnected(true);
+      } else if (workflow === 'RAG') {
         // Call our full-stack RAG backend
         const response = await fetch('/api/chat/rag', {
           method: 'POST',
@@ -957,7 +1094,7 @@ export function ChatInterface({
       } else if (workflow === 'MCP') {
         const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === mcpToolId);
         if (!activeTool?.url) {
-          throw new Error("Aucun outil MCP sélectionné ou URL manquante. Configurez un outil MCP dans les paramètres.");
+          throw new Error("No MCP tool is selected or its URL is missing. Configure an MCP tool in Settings.");
         }
         const response = await fetch('/api/chat/mcp', {
           method: 'POST',
@@ -1532,7 +1669,7 @@ export function ChatInterface({
             <button
               onClick={onGoHome}
               className="glass-button p-2 rounded-xl text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
-              title="Accueil"
+              title="Home"
             >
               <Home className="w-4 h-4" />
             </button>
@@ -1546,7 +1683,7 @@ export function ChatInterface({
       >
       {/* Chat Area */}
       <main className="flex-1 overflow-y-auto p-4 md:p-8 z-10 scroll-smooth">
-        <div className="max-w-[67rem] mx-auto pb-20">
+        <div className="max-w-[77rem] mx-auto pb-20">
           {messages.map((msg) => (
             <ChatMessage
               key={msg.id}
@@ -1558,7 +1695,7 @@ export function ChatInterface({
           ))}
           
           {isLoading && (
-            <div className="flex gap-4 w-full max-w-[67rem] mx-auto mb-8 animate-fade-in-up">
+            <div className="flex gap-4 w-full max-w-[77rem] mx-auto mb-8 animate-fade-in-up">
               <div className="flex-shrink-0 w-10 h-10 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center shadow-sm">
                 <Bot className="w-5 h-5 text-gray-400 dark:text-gray-500" />
               </div>
@@ -1570,7 +1707,7 @@ export function ChatInterface({
           )}
 
           {workflow === 'CREWAI' && (
-            <div className="max-w-[67rem] mx-auto mb-4 p-4 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 dark:from-emerald-900/20 dark:via-teal-900/20 dark:to-cyan-900/20 border border-emerald-200/60 dark:border-emerald-700/40 shadow-sm animate-fade-in-up">
+            <div className="max-w-[77rem] mx-auto mb-4 p-4 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 dark:from-emerald-900/20 dark:via-teal-900/20 dark:to-cyan-900/20 border border-emerald-200/60 dark:border-emerald-700/40 shadow-sm animate-fade-in-up">
               <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2 mb-1.5">
@@ -1590,21 +1727,31 @@ export function ChatInterface({
                   <div className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
                     {planningState.plans.length} plan(s) · {planningState.runs.length} run(s)
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => openPlanningModal(planningAgentState.draft)}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors"
-                  >
-                    <CalendarDays className="w-3.5 h-3.5" />
-                    Open planner form
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openPlanningModal(planningAgentState.draft)}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                    >
+                      <CalendarDays className="w-3.5 h-3.5" />
+                      Open planner form
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openPlanningMonitor}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl border border-emerald-300/70 bg-white/70 text-emerald-900 text-xs font-medium hover:bg-white transition-colors dark:border-emerald-700/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                    >
+                      <BarChart3 className="w-3.5 h-3.5" />
+                      Open activity monitor
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
           {workflow === 'RAG' && (
-            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200/50 dark:border-blue-700/40 shadow-sm animate-fade-in-up">
+            <div className="max-w-[77rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200/50 dark:border-blue-700/40 shadow-sm animate-fade-in-up">
               <div className="flex items-center gap-2 mb-1.5">
                 <Database className="w-4 h-4 text-blue-500" />
                 <h3 className="font-semibold text-blue-900 dark:text-blue-200 text-[13px]">Retrieval-Augmented Generation (RAG)</h3>
@@ -1626,7 +1773,7 @@ export function ChatInterface({
       </main>
 
       {/* Input Area */}
-      <div className="p-4 md:p-8 pt-0 z-10 w-full max-w-[67rem] mx-auto">
+      <div className="p-4 md:p-8 pt-0 z-10 w-full max-w-[77rem] mx-auto">
         <div className="glass-panel rounded-[2rem] p-2 flex flex-col gap-2 shadow-2xl shadow-black/5">
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 px-4 pt-3 pb-1">
@@ -1723,7 +1870,7 @@ export function ChatInterface({
           <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'MCP' ? 'max-h-10 opacity-100' : 'max-h-0 opacity-0'}`}>
             <div className="flex items-center gap-2 pl-2 border-l-2 border-teal-200 overflow-x-auto pb-1 scrollbar-hide">
               {(config.mcpTools ?? []).length === 0 ? (
-                <span className="text-xs text-gray-400 italic">Aucun outil MCP configuré — ouvrez les paramètres.</span>
+                <span className="text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
               ) : (
                 (config.mcpTools ?? []).map((tool: McpTool) => (
                   <button
@@ -1809,9 +1956,6 @@ export function ChatInterface({
           </div>
         </div>
 
-        <div className="text-center mt-3 text-xs text-gray-400 dark:text-gray-600 font-medium">
-          AI can make mistakes. Consider verifying important information.
-        </div>
       </div>
       </div>
       </div>
@@ -1912,6 +2056,13 @@ export function ChatInterface({
         onTogglePlanStatus={togglePlanningPlanStatus}
         onDeletePlan={deletePlanningPlan}
         onRunPlan={runPlanningPlan}
+        onRefresh={loadPlanningState}
+      />
+      <PlanningMonitorModal
+        isOpen={isPlanningMonitorOpen}
+        onClose={() => setIsPlanningMonitorOpen(false)}
+        planningState={planningState}
+        isBusy={planningBusy}
         onRefresh={loadPlanningState}
       />
       <FileManagerConfigModal

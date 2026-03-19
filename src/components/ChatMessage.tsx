@@ -544,7 +544,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
         {!isUser && message.confidence !== undefined && message.confidence < 0.4 && (
           <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg flex items-start gap-2 text-amber-800 dark:text-amber-200 text-xs">
             <XCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-            <p><strong>Attention :</strong> Documents peu pertinents (score: {Math.round(message.confidence * 100)}%). La réponse peut être imprécise.</p>
+            <p><strong>Warning:</strong> Low-relevance documents detected (score: {Math.round(message.confidence * 100)}%). The answer may be imprecise.</p>
           </div>
         )}
 
@@ -556,7 +556,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
               className="flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
             >
               <Database className="w-3.5 h-3.5" />
-              Inspecteur RAG ({message.sources.length} sources)
+              RAG Inspector ({message.sources.length} sources)
               {isSourcesExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
             </button>
             {isSourcesExpanded && (

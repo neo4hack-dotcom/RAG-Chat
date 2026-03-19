@@ -19,7 +19,13 @@ export type AgentStep = {
 export type ChatAction = {
   id: string;
   label: string;
-  actionType: 'open_planning_form' | 'edit_planning_plan' | 'refresh_planning_state' | 'confirm_file_action' | 'cancel_file_action';
+  actionType:
+    | 'open_planning_form'
+    | 'edit_planning_plan'
+    | 'refresh_planning_state'
+    | 'confirm_file_action'
+    | 'cancel_file_action'
+    | 'export_data_quality_pdf';
   variant?: 'primary' | 'secondary';
   payload?: Record<string, unknown>;
 };
@@ -204,10 +210,21 @@ export type DataQualityState = {
 
 export type ManagerDelegateRole = 'clickhouse_query' | 'file_management' | 'data_quality_tables';
 
+export type ManagerPendingPipeline = {
+  kind: 'clickhouse_to_file';
+  stage: 'awaiting_clickhouse' | 'awaiting_export_details';
+  nextDelegate: 'file_management';
+  exportFormat: 'csv' | 'tsv' | 'xlsx' | null;
+  targetPath: string;
+  sourceRequest: string;
+  reason: string;
+};
+
 export type ManagerAgentState = {
   activeDelegate: ManagerDelegateRole | null;
   lastRoutingReason: string;
   lastDelegateLabel: string;
+  pendingPipeline: ManagerPendingPipeline | null;
 };
 
 export type ClickHouseAgentState = {
@@ -537,12 +554,29 @@ export function normalizeManagerAgentState(
   state?: Partial<ManagerAgentState> | null
 ): ManagerAgentState {
   const activeDelegate = (state as any)?.activeDelegate ?? (state as any)?.active_delegate;
+  const pendingPipeline = (state as any)?.pendingPipeline ?? (state as any)?.pending_pipeline;
+  const exportFormat = pendingPipeline?.exportFormat ?? pendingPipeline?.export_format ?? null;
+  const normalizedFormat = exportFormat === 'csv' || exportFormat === 'tsv' || exportFormat === 'xlsx'
+    ? exportFormat
+    : null;
+  const stage = pendingPipeline?.stage;
   return {
     activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'file_management' || activeDelegate === 'data_quality_tables'
       ? activeDelegate
       : null,
     lastRoutingReason: (state as any)?.lastRoutingReason ?? (state as any)?.last_routing_reason ?? '',
     lastDelegateLabel: (state as any)?.lastDelegateLabel ?? (state as any)?.last_delegate_label ?? '',
+    pendingPipeline: pendingPipeline && pendingPipeline.kind === 'clickhouse_to_file' && pendingPipeline.nextDelegate === 'file_management'
+      ? {
+          kind: 'clickhouse_to_file',
+          stage: stage === 'awaiting_export_details' ? 'awaiting_export_details' : 'awaiting_clickhouse',
+          nextDelegate: 'file_management',
+          exportFormat: normalizedFormat,
+          targetPath: String(pendingPipeline?.targetPath ?? pendingPipeline?.target_path ?? ''),
+          sourceRequest: String(pendingPipeline?.sourceRequest ?? pendingPipeline?.source_request ?? ''),
+          reason: String(pendingPipeline?.reason ?? ''),
+        }
+      : null,
   };
 }
 

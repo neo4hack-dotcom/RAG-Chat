@@ -12,24 +12,24 @@ interface ComingSoonProps {
 const PAGE_CONFIG = {
   dataviz: {
     name: 'Agentic Data Viz',
-    tagline: 'Visualisation Intelligente',
+    tagline: 'Intelligent Visualization',
     description:
-      'Des agents IA autonomes transformeront vos données brutes en visualisations interactives et narratives dynamiques.',
+      'Autonomous AI agents will turn your raw data into interactive visualizations and dynamic narrative insights.',
     gradient: 'linear-gradient(135deg, #d1fae5 0%, #a7f3d0 60%, #99f6e4 100%)',
     orb1: 'rgba(16,185,129,0.25)',
     orb2: 'rgba(52,211,153,0.20)',
     accent: '#10b981',
     accentBg: 'rgba(16,185,129,0.10)',
     features: [
-      'Génération de dashboards par prompts naturels',
-      'Agents spécialisés en analyse statistique',
-      'Export interactif HTML / PDF / Notion',
-      'Connecteurs BigQuery, Snowflake, PostgreSQL',
+      'Dashboard generation from natural-language prompts',
+      'Specialized agents for statistical analysis',
+      'Interactive export to HTML / PDF / Notion',
+      'BigQuery, Snowflake, and PostgreSQL connectors',
     ],
   },
   agents: {
     name: 'Agents & Tools',
-    tagline: 'Orchestration Multi-Agents',
+    tagline: 'Multi-Agent Orchestration',
     description:
       'A workflow is a fixed, "If This, Then That" sequence designed for predictable, repetitive tasks like data entry or status updates. In contrast, an AI agent uses reasoning to independently choose tools and adapt its steps to reach a goal.',
     gradient: 'linear-gradient(135deg, #ede9fe 0%, #ddd6fe 60%, #fae8ff 100%)',
@@ -38,10 +38,10 @@ const PAGE_CONFIG = {
     accent: '#8b5cf6',
     accentBg: 'rgba(139,92,246,0.10)',
     features: [
-      "Éditeur visuel de graphes d'agents",
-      'Intégration MCP (Model Context Protocol)',
-      'Mémoire longue terme partagée entre agents',
-      'Monitoring et replay de sessions',
+      'Visual editor for agent graphs',
+      'MCP (Model Context Protocol) integration',
+      'Shared long-term memory across agents',
+      'Session monitoring and replay',
     ],
   },
 };
@@ -88,7 +88,7 @@ export function ComingSoon({ page, onBack }: ComingSoonProps) {
         className="fixed top-6 left-6 z-20 flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/80 backdrop-blur-md border border-gray-200 shadow-sm text-[13px] font-medium text-gray-600 hover:text-gray-900 hover:shadow-md transition-all duration-200"
       >
         <ArrowLeft size={14} />
-        Retour
+        Back
       </motion.button>
 
       {/* Card */}
@@ -127,7 +127,7 @@ export function ComingSoon({ page, onBack }: ComingSoonProps) {
           >
             <Clock size={12} style={{ color: cfg.accent }} />
             <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: cfg.accent }}>
-              En construction
+              Under construction
             </span>
           </motion.div>
 
@@ -182,7 +182,7 @@ export function ComingSoon({ page, onBack }: ComingSoonProps) {
             className="mt-2 px-8 py-3.5 rounded-full text-white text-[14px] font-semibold shadow-lg transition-all duration-200"
             style={{ background: `linear-gradient(135deg, ${cfg.accent}, ${cfg.accent}cc)` }}
           >
-            Revenir à l'accueil
+            Back to home
           </motion.button>
         </div>
       </motion.div>
