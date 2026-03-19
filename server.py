@@ -66,6 +66,85 @@ app.add_middleware(
 )
 
 
+# ── Agent Observability Log Bus ───────────────────────────────────────────────
+
+import collections
+import time as _time
+from fastapi import Request
+from fastapi.responses import StreamingResponse
+
+_LOG_BUS_MAX_AGE_S = 600       # 10 minutes
+_LOG_BUS_MAX_EVENTS = 500      # max retained events
+_log_buffer: collections.deque = collections.deque(maxlen=_LOG_BUS_MAX_EVENTS)
+_log_subscribers: list[asyncio.Queue] = []
+
+def _emit_log(kind: str, agent: str, message: str, data: dict | None = None) -> None:
+    """
+    kind: "info" | "decision" | "tool_call" | "sql" | "llm" | "error" | "success" | "warning"
+    agent: e.g. "manager", "clickhouse", "rag", "mcp", "planner", etc.
+    """
+    event = {
+        "id": uuid.uuid4().hex[:8],
+        "ts": _utc_now_iso(),
+        "ts_epoch": _time.time(),
+        "kind": kind,
+        "agent": agent,
+        "message": message,
+        "data": data or {},
+    }
+    _log_buffer.append(event)
+    for queue in _log_subscribers:
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
+async def _get_live_logs() -> list[dict]:
+    cutoff = _time.time() - _LOG_BUS_MAX_AGE_S
+    return [e for e in _log_buffer if e["ts_epoch"] >= cutoff]
+
+
+@app.delete("/api/logs/clear")
+async def clear_logs():
+    _log_buffer.clear()
+    return {"ok": True}
+
+
+@app.get("/api/logs/stream")
+async def stream_logs(request: Request):
+    async def generator():
+        history = await _get_live_logs()
+        for event in history:
+            yield f"data: {json.dumps(event)}\n\n"
+            
+        queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        _log_subscribers.append(queue)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            try:
+                _log_subscribers.remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive"
+        }
+    )
+
+
 # ── Persistent app database ───────────────────────────────────────────────────
 
 DB_PATH = Path(__file__).parent / "DB.json"
@@ -128,7 +207,7 @@ DEFAULT_APP_CONFIG = {
         "maxIterations": 8,
         "toolkitId": "",
         "systemPrompt": (
-            "You are the Oracle Analyst agent. Reply in English. Use Oracle tools before making assumptions, "
+            "You are the Oracle SQL agent. Reply in English. Use Oracle tools before making assumptions, "
             "generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise."
         ),
     },
@@ -4370,11 +4449,11 @@ def _normalize_pdf_creator_state(payload: Optional[dict]) -> dict[str, Any]:
 
 
 MANAGER_SPECIALIST_LABELS = {
-    "clickhouse_query": "ClickHouse Query",
+    "clickhouse_query": "Clickhouse SQL",
     "data_analyst": "Data analyst",
     "file_management": "File management",
     "pdf_creator": "PDF creator",
-    "oracle_analyst": "Oracle Analyst",
+    "oracle_analyst": "Oracle SQL",
     "data_quality_tables": "Data quality - Tables",
 }
 MANAGER_CLICKHOUSE_FOLLOWUP_STAGES = {
@@ -4408,6 +4487,7 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
         "direct answer": "manager",
         "none": "manager",
         "clickhouse query": "clickhouse_query",
+        "clickhouse sql": "clickhouse_query",
         "clickhouse_query": "clickhouse_query",
         "clickhouse": "clickhouse_query",
         "sql": "clickhouse_query",
@@ -4428,9 +4508,9 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
         "pdf export": "pdf_creator",
         "report pdf": "pdf_creator",
         "oracle analyst": "oracle_analyst",
+        "oracle sql": "oracle_analyst",
         "oracle_analyst": "oracle_analyst",
         "oracle": "oracle_analyst",
-        "oracle sql": "oracle_analyst",
         "pl/sql": "oracle_analyst",
         "data quality": "data_quality_tables",
         "data quality tables": "data_quality_tables",
@@ -4985,13 +5065,20 @@ def _heuristic_manager_delegate(
     ]
     clickhouse_tokens = [
         "clickhouse",
+        "clickhouse sql",
+        "clickhouse query",
+        "chart",
+        "graph",
+        "graphique",
+        "graphe",
+        "courbe",
+    ]
+    generic_sql_tokens = [
         "sql",
         "table",
         "column",
         "database",
         "query",
-        "chart",
-        "graph",
         "rows",
         "count",
         "metrics",
@@ -5002,15 +5089,73 @@ def _heuristic_manager_delegate(
         "requete",
         "base de donnees",
         "colonne",
-        "graphique",
-        "graphe",
-        "courbe",
         "lignes",
         "compte",
         "mesures",
         "agregation",
         "tendance",
         "schema",
+    ]
+    business_metric_tokens = [
+        "revenue",
+        "sales",
+        "orders",
+        "customers",
+        "customer",
+        "transactions",
+        "transaction",
+        "invoice",
+        "invoices",
+        "profit",
+        "margin",
+        "gmv",
+        "users",
+        "sessions",
+        "events",
+        "jobs",
+        "retention",
+        "funnel",
+        "conversion",
+        "kpi",
+        "kpis",
+        "ventes",
+        "commandes",
+        "clients",
+        "client",
+        "factures",
+        "facture",
+        "revenu",
+        "revenus",
+        "marge",
+        "utilisateurs",
+        "evenements",
+        "événements",
+    ]
+    data_request_verbs = [
+        "show",
+        "list",
+        "find",
+        "count",
+        "summarize",
+        "summary",
+        "compare",
+        "display",
+        "break down",
+        "trend",
+        "what",
+        "which",
+        "how many",
+        "give me",
+        "query",
+        "montre",
+        "affiche",
+        "liste",
+        "trouve",
+        "compte",
+        "resume",
+        "résume",
+        "compare",
+        "donne moi",
     ]
     oracle_tokens = [
         "oracle",
@@ -5158,33 +5303,39 @@ def _heuristic_manager_delegate(
     file_creation_or_edit_hit = file_action_hit and file_target_hit
 
     file_hit = file_creation_or_edit_hit or any(token in normalized for token in file_tokens)
-    clickhouse_hit = any(token in normalized for token in clickhouse_tokens)
-    data_analyst_hit = any(token in normalized for token in data_analyst_tokens)
     oracle_hit = any(token in normalized for token in oracle_tokens)
+    clickhouse_hit = any(token in normalized for token in clickhouse_tokens)
+    generic_sql_hit = any(token in normalized for token in generic_sql_tokens)
+    business_query_hit = (
+        any(token in normalized for token in business_metric_tokens)
+        and any(token in normalized for token in data_request_verbs)
+    )
+    sql_execution_hit = oracle_hit or clickhouse_hit or generic_sql_hit or business_query_hit
+    data_analyst_hit = any(token in normalized for token in data_analyst_tokens)
     pdf_hit = any(token in normalized for token in MANAGER_PDF_KEYWORDS)
     data_quality_hit = any(token in normalized for token in data_quality_tokens)
     export_pipeline = _extract_clickhouse_file_export_pipeline(user_message)
     pdf_pipeline = _extract_clickhouse_pdf_export_pipeline(user_message)
-
-    if export_pipeline and clickhouse_hit:
-        return "clickhouse_query", "The request needs a ClickHouse query first and then a file export from the query result."
-    if pdf_pipeline and clickhouse_hit:
-        return "clickhouse_query", "The request needs a ClickHouse query first and then a PDF export from the query result."
+    clickhouse_default_hit = clickhouse_hit or (sql_execution_hit and not oracle_hit)
 
     if data_quality_hit and not file_hit:
         return "data_quality_tables", "The request is explicitly about table profiling or data-quality analysis."
-    if clickhouse_hit and data_analyst_hit and not data_quality_hit:
-        return "data_analyst", "The request asks for a deeper analytical investigation on ClickHouse data."
     if oracle_hit and not data_quality_hit:
-        return "oracle_analyst", "The request explicitly targets Oracle analysis or Oracle SQL work."
-    if pdf_hit and not clickhouse_hit and not data_quality_hit:
+        return "oracle_analyst", "The request requires Oracle SQL execution or Oracle schema exploration, so Oracle SQL should handle it."
+    if export_pipeline and clickhouse_default_hit:
+        return "clickhouse_query", "The request needs Clickhouse SQL first and then a file export from the query result."
+    if pdf_pipeline and clickhouse_default_hit:
+        return "clickhouse_query", "The request needs Clickhouse SQL first and then a PDF export from the query result."
+    if clickhouse_default_hit and data_analyst_hit and not data_quality_hit:
+        return "data_analyst", "The request is a complex ClickHouse investigation, so Data analyst should handle it end to end."
+    if pdf_hit and not sql_execution_hit and not data_quality_hit:
         return "pdf_creator", "The request is explicitly about turning content or the latest analysis into a PDF."
     if file_creation_or_edit_hit and not data_quality_hit:
         return "file_management", "The request explicitly asks to create or modify a file, so File management should handle it."
-    if file_hit and not clickhouse_hit and not data_quality_hit:
+    if file_hit and not sql_execution_hit and not data_quality_hit:
         return "file_management", "The request is explicitly about filesystem or spreadsheet actions."
-    if clickhouse_hit and not file_hit and not data_quality_hit:
-        return "clickhouse_query", "The request is explicitly about database querying or charting."
+    if clickhouse_default_hit and not data_quality_hit:
+        return "clickhouse_query", "The request requires Clickhouse SQL execution, schema inspection, or charting."
     return None
 
 
@@ -5227,11 +5378,11 @@ Choose which specialist should handle the next turn.
 
 Available delegates:
 - manager: use this when no specialist tool is needed and the manager can answer directly.
-- clickhouse_query: use this for SQL, schemas, tables, analytics, metrics, database exploration, and charts from ClickHouse data.
-- data_analyst: use this for multi-step ClickHouse investigations, deeper business analysis, iterative evidence gathering, CSV export of the latest dataset, and optional knowledge-base lookups.
+- clickhouse_query: use this for Clickhouse SQL execution, schema inspection, table selection, metrics, charts, and the first SQL step before a downstream export.
+- data_analyst: use this only for complex multi-step investigations on ClickHouse data when a deeper end-to-end analysis is needed beyond a simple SQL answer.
 - file_management: use this for filesystem actions, directories, files, CSV/Excel/Word/Parquet handling, create/edit/move/delete operations.
 - pdf_creator: use this to create a clean, professional PDF export from an analysis, a report, or the latest relevant result in the chat.
-- oracle_analyst: use this for Oracle database discovery, Oracle SQL generation, schema inspection, query validation, and narrative business answers from Oracle data.
+- oracle_analyst: use this for Oracle SQL execution, Oracle database discovery, schema inspection, query validation, and narrative business answers from Oracle data.
 - data_quality_tables: use this for table profiling, null/outlier/sentinel analysis, column health scoring, and volumetric data-quality checks.
 
 If more than one specialist could be relevant, choose the one that should act first.
@@ -5245,6 +5396,10 @@ Return JSON only with this exact shape:
 Rules:
 - Keep the answer in English.
 - Prefer a specialist when the request depends on real filesystem state, ClickHouse data, or Oracle data.
+- If the request needs SQL execution, delegate to `clickhouse_query` for ClickHouse or `oracle_analyst` for Oracle.
+- If the database is not explicitly Oracle and the task still needs SQL execution, default to `clickhouse_query`.
+- Use `data_analyst` only when the task is a complex ClickHouse investigation that should run several analytical steps autonomously.
+- Never delegate Oracle work to `data_analyst`.
 - If the user asks to create, write, save, edit, move, rename, or delete a file or folder, delegate to `file_management`.
 - If the user asks for a PDF export, a report PDF, or a professional PDF document, delegate to `pdf_creator` unless a ClickHouse query must happen first.
 - Keep `handoff_message` concise and actionable.
@@ -6508,7 +6663,7 @@ async def plan_oracle_react_step(
     llm_api_key: Optional[str] = None,
 ) -> dict[str, Any]:
     prompt = f"""
-You are the Oracle Analyst agent in RAGnarok.
+You are the Oracle SQL agent in RAGnarok.
 Your job is to answer the user's question by reasoning step by step and deciding whether to use one Oracle tool.
 
 Return JSON only with this exact shape:
@@ -6888,6 +7043,7 @@ def _normalize_planner_agent_role(value: Any) -> Optional[str]:
         "manager": "manager",
         "agent manager": "manager",
         "clickhouse query": "clickhouse_query",
+        "clickhouse sql": "clickhouse_query",
         "clickhouse_query": "clickhouse_query",
         "clickhouse": "clickhouse_query",
         "file management": "file_management",
@@ -8444,11 +8600,13 @@ async def chat_crewai_planning(req: PlanningChatRequest):
 
 @app.post("/api/chat/file-manager-agent")
 async def chat_file_manager_agent(req: FileManagerAgentRequest):
+    _emit_log("info", "file_manager", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     state = _normalize_file_manager_state(req.agent_state.model_dump())
     config = _normalize_file_manager_config(req.file_manager_config.model_dump())
     normalized_choice = normalize_choice(user_message).lower()
     export_payload = _try_extract_file_export_payload(user_message)
+
 
     if not user_message:
         return {
@@ -8702,9 +8860,13 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
             tool_input["confirmed"] = False
 
         try:
+            start_exec = _time.time()
             result = execute_file_manager_tool(tool_name, tool_input, config["basePath"])
+            elapsed = _time.time() - start_exec
+            _emit_log("tool_call", "file_manager", f"Executed {tool_name} ({elapsed:.2f}s)", {"tool": tool_name, "input": tool_input, "summary": result.get("summary")})
         except Exception as exc:
             last_error = str(exc)
+            _emit_log("error", "file_manager", f"Tool {tool_name} failed: {exc}", {"tool": tool_name, "error": last_error})
             scratchpad.append(
                 {
                     "type": "tool_error",
@@ -8722,6 +8884,7 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
                 }
             )
             continue
+
 
         state["last_tool_result"] = result["summary"]
         state["last_visited_path"] = result.get("visited_path") or state.get("last_visited_path", "")
@@ -8790,11 +8953,13 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
 
 @app.post("/api/chat/pdf-creator-agent")
 async def chat_pdf_creator_agent(req: PdfCreatorAgentRequest):
+    _emit_log("info", "pdf_creator", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     state = _normalize_pdf_creator_state(req.agent_state.model_dump())
     config = _normalize_file_manager_config(req.file_manager_config.model_dump())
     normalized_choice = normalize_choice(user_message).lower()
     payload = _try_extract_pdf_export_payload(user_message)
+
 
     def _choice_prompt(current_state: dict[str, Any], reason: str) -> dict[str, Any]:
         current_state["stage"] = "awaiting_source_choice"
@@ -9016,6 +9181,7 @@ async def chat_pdf_creator_agent(req: PdfCreatorAgentRequest):
     )
 
     try:
+        start_exec = _time.time()
         result = create_pdf_report_tool(
             path=target_path,
             title=title,
@@ -9024,7 +9190,11 @@ async def chat_pdf_creator_agent(req: PdfCreatorAgentRequest):
             confirmed=False,
             base_path=config["basePath"],
         )
+        elapsed = _time.time() - start_exec
+        _emit_log("tool_call", "pdf_creator", f"Generated PDF ({elapsed:.2f}s)", {"path": target_path})
     except Exception as exc:
+        _emit_log("error", "pdf_creator", f"PDF generation failed: {exc}", {"error": str(exc)})
+
         state["stage"] = "idle"
         state["pending_document"] = None
         return {
@@ -9121,15 +9291,17 @@ def _oracle_tool_preview(value: Any, max_items: int = 20) -> str:
 
 @app.post("/api/chat/oracle-analyst-agent")
 async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
+    _emit_log("info", "oracle", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     state = _normalize_oracle_analyst_state(req.agent_state.model_dump())
     oracle_config = _normalize_oracle_analyst_config(req.oracle_analyst_config.model_dump())
     connections = req.oracle_connections or [OracleConnectionConfig(**DEFAULT_APP_CONFIG["oracleConnections"][0])]
     connection = _resolve_oracle_connection(connections, req.oracle_analyst_config)
+
     if not user_message:
         return {
             "answer": (
-                "## Oracle Analyst Agent\n"
+                "## Oracle SQL Agent\n"
                 "Ask a business question in English and I will inspect the Oracle schema, generate optimized SQL, and return a narrative answer.\n\n"
                 f"- **Connection:** {connection.label or connection.id}\n"
                 f"- **Row limit:** {oracle_config['rowLimit']}\n"
@@ -9141,7 +9313,7 @@ async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
                     "id": "oracle-ready",
                     "title": "Ready for Oracle analysis",
                     "status": "success",
-                    "details": "The Oracle Analyst agent is ready to query Oracle safely with a ReAct loop.",
+                    "details": "The Oracle SQL agent is ready to query Oracle safely with a ReAct loop.",
                 }
             ],
         }
@@ -9294,8 +9466,12 @@ async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
                 sql = str(tool_input.get("sql") or "").strip()
                 if not sql:
                     raise ValueError("execute_query requires SQL.")
+                start_exec = _time.time()
                 result = await execute_oracle_query(connection, sql, oracle_config["rowLimit"])
+                elapsed = _time.time() - start_exec
+                _emit_log("sql", "oracle", f"Executed query successfully ({elapsed:.2f}s)", {"sql": sql, "rows": result["row_count"]})
                 state["last_sql"] = result["sql"]
+
                 state["last_result_meta"] = result["columns"]
                 state["last_result_rows"] = result["rows"]
                 state["action_log"].append("execute_query → Agent")
@@ -9409,6 +9585,7 @@ async def get_data_quality_options(req: DataQualityMetadataRequest):
 
 @app.post("/api/chat/data-quality-agent")
 async def chat_data_quality_agent(req: DataQualityAgentRequest):
+    _emit_log("info", "data_quality", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     normalized_choice = normalize_choice(user_message)
     normalized_lower = normalized_choice.lower()
@@ -9418,6 +9595,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
     state["db_type"] = "clickhouse"
     state["session_id"] = state.get("session_id") or uuid.uuid4().hex
     state["last_error"] = ""
+
 
     async def _reload_tables(current_state: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -9461,6 +9639,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
                 }
             )
 
+        start_llm = _time.time()
         llm_analysis = await data_quality_llm_analysis_node(
             execution_state,
             conversation_memory,
@@ -9469,6 +9648,9 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
             req.llm_provider,
             req.llm_api_key,
         )
+        llm_elapsed = _time.time() - start_llm
+        _emit_log("llm", "data_quality", f"Generated LLM analysis ({llm_elapsed:.2f}s)", {})
+        
         steps.append(
             {
                 "id": "dq-llm-analysis-node",
@@ -9477,6 +9659,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
                 "details": "The local LLM scored the dataset and generated recommendations.",
             }
         )
+
 
         execution_state["final_answer"] = data_quality_synthesizer_node(execution_state, llm_analysis)
         execution_state["stage"] = "ready"
@@ -10261,6 +10444,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
 
 @app.post("/api/chat/data-analyst-agent")
 async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
+    _emit_log("info", "data_analyst", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     state = _normalize_data_analyst_state(req.agent_state.model_dump())
     max_steps = max(1, min(int(req.max_steps or DATA_ANALYST_DEFAULT_MAX_STEPS), DATA_ANALYST_MAX_STEPS))
@@ -10270,6 +10454,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         current_message=memory_anchor,
         max_steps=CHAT_MEMORY_MAX_STEPS,
     )
+
 
     try:
         state["available_tables"] = state["available_tables"] or await list_clickhouse_tables(req.clickhouse)
@@ -10504,6 +10689,14 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
             state["knowledge_hits"] = knowledge_hits[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
             state["final_answer"] = final_answer
             state["last_error"] = last_error
+            
+            _emit_log(
+                "info", 
+                "data_analyst", 
+                "Completed analysis", 
+                {"total_steps": len(step_log), "confidence": confidence_score}
+            )
+            
             return {
                 "answer": final_answer,
                 "agent_state": state,
@@ -10602,6 +10795,9 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 )
                 continue
             state["last_export_path"] = export_path
+            
+            _emit_log("info", "data_analyst", "Exported CSV", {"path": export_path, "rows": len(rows)})
+            
             step_log.append(
                 _data_analyst_format_step(
                     len(step_log) + 1,
@@ -10723,6 +10919,14 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         executed_sqls.append(sql)
         state["last_export_path"] = ""
         summary = _data_analyst_compact_query_summary(last_result_meta, last_result_rows)
+        
+        _emit_log(
+            "info", 
+            "data_analyst", 
+            "Executed query", 
+            {"sql": sql, "rows": len(last_result_rows), "retried": retried}
+        )
+        
         step_log.append(
             _data_analyst_format_step(
                 len(step_log) + 1,
@@ -10792,8 +10996,11 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
 
 @app.post("/api/chat/manager-agent")
 async def chat_manager_agent(req: ManagerAgentRequest):
+    start_t = _time.time()
+    _emit_log("info", "manager", "Received orchestrator request", {"query": req.message})
     user_message = (req.message or "").strip()
     manager_state = _normalize_manager_agent_state(req.manager_state.model_dump())
+
     clickhouse_state = dump_clickhouse_agent_state(req.clickhouse_state)
     data_analyst_state = _normalize_data_analyst_state(req.data_analyst_state.model_dump())
     file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
@@ -10811,7 +11018,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "answer": (
                 "## Agent Manager\n"
                 "Describe the outcome you want, and I will either answer directly or route the task "
-                "to ClickHouse Query, Data analyst, File management, PDF creator, Oracle Analyst, or Data quality - Tables when a specialist is needed."
+                "to Clickhouse SQL, Data analyst, File management, PDF creator, Oracle SQL, or Data quality - Tables when a specialist is needed."
             ),
             "agent_state": {
                 "manager": manager_state,
@@ -10997,6 +11204,13 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     delegate = routing["delegate"]
     manager_state["last_routing_reason"] = routing["reasoning"]
     manager_state["last_delegate_label"] = _manager_specialist_label(delegate)
+    
+    _emit_log(
+        "decision",
+        "manager",
+        f"Delegating to {delegate}",
+        {"agent": delegate, "rationale": routing["reasoning"]}
+    )
 
     base_steps = [
         {
@@ -11010,6 +11224,8 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     if delegate == "manager":
         manager_state["active_delegate"] = None
         manager_state["pending_pipeline"] = None
+        
+        _emit_log("llm", "manager", "Answering directly as manager", {"query": req.message})
         answer = await _run_manager_direct_response(
             req.history,
             req.llm_base_url,
@@ -11387,7 +11603,9 @@ def reset_clickhouse_clarification(state: ClickHouseAgentState) -> None:
 
 @app.post("/api/chat/clickhouse-agent")
 async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
+    _emit_log("info", "clickhouse", "Received request", {"query": req.message})
     state = req.agent_state
+
     user_message = (req.message or "").strip()
     memory_anchor = state.pending_request or user_message
     conversation_memory = _conversation_memory_markdown(
@@ -11673,7 +11891,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
             if not state.pending_request:
                 return {
                     "answer": (
-                        "## ClickHouse Query Agent\n"
+                        "## Clickhouse SQL Agent\n"
                         "Ask your question directly. I will infer the best table when the intent is clear, "
                         "and I will only ask you to choose if the request stays ambiguous."
                     ),
@@ -11750,7 +11968,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     if not state.pending_request:
         return {
             "answer": (
-                f"## ClickHouse Query Agent\nI am focused on table `{state.selected_table}`.\n\n"
+                f"## Clickhouse SQL Agent\nI am focused on table `{state.selected_table}`.\n\n"
                 "Please tell me what you want to know, and I will inspect the schema before writing SQL."
             ),
             "agent_state": dump_clickhouse_agent_state(state),
@@ -11914,10 +12132,15 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         raise HTTPException(status_code=400, detail="The generated SQL was rejected because it is not a safe read-only query.")
 
     try:
+        start_exec = _time.time()
         await execute_clickhouse_sql(req.clickhouse, f"EXPLAIN SYNTAX {sql}", readonly=False, json_format=False)
         result = await execute_clickhouse_sql(req.clickhouse, sql)
+        elapsed = _time.time() - start_exec
+        _emit_log("sql", "clickhouse", f"Executed query successfully ({elapsed:.2f}s)", {"sql": sql, "rows": len(result.get("data", []))})
     except Exception as first_error:
+        _emit_log("warning", "clickhouse", f"First execution failed: {first_error}", {"error": str(first_error), "sql": sql})
         repaired = await generate_clickhouse_sql(
+
             state.pending_request,
             state.selected_table,
             state.table_schema,
@@ -11933,11 +12156,20 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         )
         sql = repaired["sql"]
         if not is_safe_read_only_sql(sql):
+            _emit_log("error", "clickhouse", "Repaired SQL rejected (not read-only)", {"sql": sql})
             raise HTTPException(status_code=400, detail="The repaired SQL was rejected because it is not read-only.")
         generated["reasoning"] = repaired["reasoning"] or generated["reasoning"]
-        result = await execute_clickhouse_sql(req.clickhouse, sql)
+        try:
+            start_exec = _time.time()
+            result = await execute_clickhouse_sql(req.clickhouse, sql)
+            elapsed = _time.time() - start_exec
+            _emit_log("sql", "clickhouse", f"Executed repaired query successfully ({elapsed:.2f}s)", {"sql": sql, "rows": len(result.get("data", []))})
+        except Exception as e:
+            _emit_log("error", "clickhouse", f"Repaired execution failed: {e}", {"error": str(e), "sql": sql})
+            raise
 
     original_request = state.pending_request
+
     result_summary = await summarize_clickhouse_result(
         original_request,
         sql,
@@ -12434,7 +12666,9 @@ async def ingest_document(req: IngestRequest):
 
 @app.post("/api/chat/rag")
 async def chat_rag(req: ChatRequest):
+    _emit_log("info", "rag", "Received RAG request", {"query": req.message})
     message = req.message
+
     history = _normalized_history_messages(
         req.history,
         current_message=message,
@@ -12443,6 +12677,7 @@ async def chat_rag(req: ChatRequest):
 
     # 1. HyDE — generate a hypothetical answer to improve semantic recall
     try:
+        start_hyde = _time.time()
         hyde_answer = await llm_chat(
             [{"role": "user", "content": (
                 "Write a concise factual answer for semantic search. "
@@ -12450,18 +12685,26 @@ async def chat_rag(req: ChatRequest):
             )}],
             req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key,
         )
+        hyde_elapsed = _time.time() - start_hyde
+        _emit_log("llm", "rag", f"HyDE generated ({hyde_elapsed:.2f}s)", {"hyde_reply": hyde_answer})
         search_text = hyde_answer or message
-    except Exception:
+    except Exception as e:
+        _emit_log("warning", "rag", f"HyDE failed", {"error": str(e)})
         search_text = message
 
     # 2. Embed the query
     try:
+        start_embed = _time.time()
         query_vector = await get_embedding(
             search_text, req.embedding_base_url, req.embedding_model,
             req.embedding_api_key, verify_ssl=req.embedding_verify_ssl
         )
+        embed_elapsed = _time.time() - start_embed
+        _emit_log("decision", "rag", f"Query embedded ({embed_elapsed:.2f}s)", {"vector_len": len(query_vector)})
     except Exception as e:
+        _emit_log("error", "rag", f"Embedding failed", {"error": str(e)})
         raise HTTPException(status_code=500, detail=f"Embedding error: {e}")
+
 
     # 3. kNN search in OpenSearch
     def _search():

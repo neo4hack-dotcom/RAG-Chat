@@ -509,7 +509,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     maxIterations: 8,
     toolkitId: '',
     systemPrompt:
-      'You are the Oracle Analyst agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
+      'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
   },
   fileManagerConfig: {
     basePath: '',

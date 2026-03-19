@@ -86,7 +86,7 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       toolkitId: config.oracleAnalystConfig?.toolkitId ?? '',
       systemPrompt:
         config.oracleAnalystConfig?.systemPrompt ??
-        'You are the Oracle Analyst agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
+        'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
     },
     fileManagerConfig: {
       basePath: config.fileManagerConfig?.basePath ?? '',
@@ -724,7 +724,7 @@ export function SettingsModal({
               onClick={() => setActiveTab('oracle')}
               className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'oracle' ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             >
-              Oracle Analyst
+              Oracle SQL
             </button>
             <button
               onClick={() => setActiveTab('apps')}
@@ -833,10 +833,10 @@ export function SettingsModal({
               <div className="p-4 rounded-2xl bg-orange-50/80 dark:bg-orange-900/20 border border-orange-200/70 dark:border-orange-700/40">
                 <div className="flex items-center gap-2 mb-2">
                   <Database className="w-4 h-4 text-orange-600 dark:text-orange-300" />
-                  <h3 className="text-sm font-semibold text-orange-900 dark:text-orange-200">Oracle Analyst</h3>
+                  <h3 className="text-sm font-semibold text-orange-900 dark:text-orange-200">Oracle SQL</h3>
                 </div>
                 <p className="text-xs text-orange-800/90 dark:text-orange-300/90 leading-relaxed">
-                  Configure one or more Oracle connections, then choose which connection the Oracle Analyst agent should use by default. The backend stays Python-only and uses the local LLM to inspect schema, validate SQL, execute safe read-only queries, and summarize the result in English.
+                  Configure one or more Oracle connections, then choose which connection the Oracle SQL agent should use by default. The backend stays Python-only and uses the local LLM to inspect schema, validate SQL, execute safe read-only queries, and summarize the result in English.
                 </p>
               </div>
 
@@ -1035,7 +1035,7 @@ export function SettingsModal({
 
               <div className="pt-2 border-t border-gray-100 dark:border-gray-800 space-y-4">
                 <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
-                  <Bot className="w-4 h-4 text-orange-500" /> Oracle Analyst Defaults
+                  <Bot className="w-4 h-4 text-orange-500" /> Oracle SQL Defaults
                 </h3>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1147,7 +1147,7 @@ export function SettingsModal({
                       },
                     }))}
                     className="w-full min-h-[140px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-3 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all resize-none"
-                    placeholder="You are the Oracle Analyst agent..."
+                    placeholder="You are the Oracle SQL agent..."
                   />
                 </div>
               </div>
@@ -1550,7 +1550,7 @@ export function SettingsModal({
 
               <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
                 <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2">
-                  <Database className="w-4 h-4 text-cyan-500" /> ClickHouse Query Agent
+                  <Database className="w-4 h-4 text-cyan-500" /> Clickhouse SQL Agent
                 </h3>
 
                 <div className="space-y-4">

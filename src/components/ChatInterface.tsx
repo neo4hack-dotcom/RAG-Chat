@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check } from "lucide-react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal } from "lucide-react";
 import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
+import { AgentConsoleModal } from "./AgentConsoleModal";
 import { FileManagerConfigModal } from "./FileManagerConfigModal";
 import { DataQualityModal } from "./DataQualityModal";
 import { downloadMarkdownPdf } from "../lib/pdf";
@@ -43,7 +44,7 @@ function getAgentIntroContent(agentRole: AgentRole): string | null {
 
 This manager works in English and can orchestrate the available specialist agents.
 
-- It routes requests to ClickHouse Query, Data analyst, File management, Oracle Analyst, or Data quality - Tables when needed.
+- It routes requests to Clickhouse SQL, Data analyst, File management, Oracle SQL, or Data quality - Tables when needed.
 - It can also route export-ready results to PDF creator when you want a polished document.
 - It keeps the conversation context while delegated agents ask follow-up questions.
 - It answers directly when no specialist tool is required.`;
@@ -51,7 +52,7 @@ This manager works in English and can orchestrate the available specialist agent
 
   if (agentRole === 'clickhouse_query') {
     return `${AGENT_INTRO_MARKERS.clickhouse_query}
-## ClickHouse Query Agent
+## Clickhouse SQL Agent
 
 This agent works in English and guides the analysis safely before running SQL.
 
@@ -97,7 +98,7 @@ This agent works in English and turns the latest analysis or pasted content into
 
   if (agentRole === 'oracle_analyst') {
     return `${AGENT_INTRO_MARKERS.oracle_analyst}
-## Oracle Analyst Agent
+## Oracle SQL Agent
 
 This agent works in English and queries Oracle safely from natural language.
 
@@ -230,10 +231,10 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 
 - C'est l'agent **chef d'orchestre**.
 - Tu peux lui décrire directement un objectif métier, par exemple : **"analyse les ventes puis exporte le résultat en CSV"**.
-- Il peut déléguer à d'autres agents comme **ClickHouse Query**, **Data Analyst**, **Oracle Analyst**, **File management**, **PDF creator** ou **Data quality - Tables** quand c'est pertinent.
+- Il peut déléguer à d'autres agents comme **Clickhouse SQL**, **Data Analyst**, **Oracle SQL**, **File management**, **PDF creator** ou **Data quality - Tables** quand c'est pertinent.
 - C'est le bon choix si tu ne sais pas encore quel agent utiliser.
 
-### ClickHouse Query
+### Clickhouse SQL
 
 - Cet agent sert à **interroger une base ClickHouse** en langage naturel.
 - Il peut choisir la bonne table automatiquement si la demande est claire, sinon il te propose des choix cliquables.
@@ -246,7 +247,7 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 - Il peut enchaîner plusieurs requêtes, garder le fil de l'enquête dans la conversation, réparer automatiquement une requête SQL trop complexe ou invalide, et exporter le dernier dataset en CSV si tu le demandes explicitement.
 - Utilise-le pour des demandes comme : **"explain the sales drop by week, country, and product"**, **"investigate why failed jobs increased"**, ou **"compare retention patterns and summarize the drivers"**.
 
-### Oracle Analyst
+### Oracle SQL
 
 - Cet agent sert à **interroger une base Oracle** en langage naturel.
 - Il explore les tables accessibles, inspecte le schéma, génère du **SQL Oracle optimisé**, puis répond avec une **synthèse narrative en Markdown**.
@@ -283,9 +284,9 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 ## Comment bien t'en servir
 
 - Si tu veux un résultat métier sans te poser de question, commence par **Agent Manager**.
-- Si tu veux interroger des données, choisis **ClickHouse Query**.
+- Si tu veux interroger des données, choisis **Clickhouse SQL**.
 - Si tu veux une enquête plus poussée en plusieurs étapes, choisis **Data Analyst**.
-- Si tu veux analyser des données Oracle, choisis **Oracle Analyst**.
+- Si tu veux analyser des données Oracle, choisis **Oracle SQL**.
 - Si tu veux produire ou manipuler un fichier, choisis **File management**.
 - Si tu veux transformer un résultat en document prêt à partager, choisis **PDF creator**.
 - Si tu veux auditer la qualité d'une table, choisis **Data quality - Tables** puis **Open form**.
@@ -302,10 +303,10 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 
 - This is the **orchestrator** agent.
 - You can give it a business outcome such as **"analyze sales and export the result to CSV"**.
-- It can delegate to **ClickHouse Query**, **Data Analyst**, **Oracle Analyst**, **File management**, **PDF creator**, or **Data quality - Tables** when needed.
+- It can delegate to **Clickhouse SQL**, **Data Analyst**, **Oracle SQL**, **File management**, **PDF creator**, or **Data quality - Tables** when needed.
 - Use it when you want the app to decide the best path for you.
 
-### ClickHouse Query
+### Clickhouse SQL
 
 - This agent is designed to **query a ClickHouse database from natural language**.
 - It tries to infer the right table automatically, and only asks for clarification when the request stays ambiguous.
@@ -318,7 +319,7 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 - It can chain multiple analytical queries, keep the investigation context alive across the conversation, repair invalid SQL automatically with a simpler fallback, and export the latest dataset to CSV when you explicitly ask for it.
 - Use it for requests like **"explain the sales drop by week, country, and product"**, **"investigate why failed jobs increased"**, or **"compare retention patterns and summarize the drivers"**.
 
-### Oracle Analyst
+### Oracle SQL
 
 - This agent is designed to **query an Oracle database from natural language**.
 - It discovers accessible tables, inspects schema, generates **optimized Oracle SQL**, and returns a **narrative Markdown answer**.
@@ -355,9 +356,9 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 ## How to use the app effectively
 
 - Start with **Agent Manager** if you want the app to figure out the best execution path.
-- Pick **ClickHouse Query** when your goal is to analyze data from ClickHouse.
+- Pick **Clickhouse SQL** when your goal is to analyze data from ClickHouse.
 - Pick **Data Analyst** when your goal is to run a deeper multi-step investigation on ClickHouse.
-- Pick **Oracle Analyst** when your goal is to analyze data from Oracle.
+- Pick **Oracle SQL** when your goal is to analyze data from Oracle.
 - Pick **File management** when your goal is to create, inspect, or export files.
 - Pick **PDF creator** when your goal is to turn an analysis into a polished PDF deliverable.
 - Pick **Data quality - Tables** and click **Open form** when you want a guided table-quality analysis.
@@ -448,6 +449,7 @@ export function ChatInterface({
   const [dataQualityForm, setDataQualityForm] = useState<DataQualityFormState>(() => buildDataQualityFormState(dataQualityAgentState));
   const [dataQualityTables, setDataQualityTables] = useState<string[]>(dataQualityAgentState.availableTables);
   const [dataQualitySchema, setDataQualitySchema] = useState<DataQualitySchemaColumn[]>(dataQualityAgentState.schemaInfo);
+  const [isConsoleOpen, setIsConsoleOpen] = useState(false);
 
   // --- ACTIONS ---
   
@@ -1704,7 +1706,7 @@ export function ChatInterface({
 
         if (!response.ok) {
           const err = await response.json().catch(() => ({}));
-          throw new Error(err.detail || `Oracle Analyst Agent error: ${response.status}`);
+          throw new Error(err.detail || `Oracle SQL agent error: ${response.status}`);
         }
 
         const data = await response.json();
@@ -2188,9 +2190,10 @@ export function ChatInterface({
           </div>
         </div>
 
-        {/* Workflow Selector */}
-        <div className="mt-3 px-2 flex flex-col gap-2">
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
+        {/* Workflow Selector & Console Button */}
+        <div className="mt-3 px-2 flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+          <div className="flex flex-col gap-2 overflow-hidden flex-1">
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
             <button
               onClick={() => onWorkflowChange('LLM')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'LLM' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
@@ -2267,7 +2270,7 @@ export function ChatInterface({
                     onClick={() => onAgentRoleChange('clickhouse_query')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
-                    <Database className="w-3.5 h-3.5" /> ClickHouse Query
+                    <Database className="w-3.5 h-3.5" /> Clickhouse SQL
                   </button>
                   <button
                     onClick={() => onAgentRoleChange('data_analyst')}
@@ -2293,7 +2296,7 @@ export function ChatInterface({
                     onClick={() => onAgentRoleChange('oracle_analyst')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
-                    <Database className="w-3.5 h-3.5" /> Oracle Analyst
+                    <Database className="w-3.5 h-3.5" /> Oracle SQL
                   </button>
                   <button
                     onClick={() => onAgentRoleChange('data_quality_tables')}
@@ -2328,6 +2331,17 @@ export function ChatInterface({
                 </div>
               )}
             </div>
+          </div>
+          </div>
+          
+          <div className="flex-shrink-0 self-end sm:self-auto flex items-center pt-0.5">
+            <button
+               onClick={() => setIsConsoleOpen(true)}
+               className="flex items-center justify-center w-8 h-8 rounded-full border border-gray-200 dark:border-gray-800 text-gray-400 dark:text-gray-500 hover:text-indigo-500 hover:border-indigo-200 dark:hover:border-indigo-900/50 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-all shadow-sm group"
+               title="Agent Console"
+            >
+               <Terminal className="w-4 h-4 group-hover:scale-110 transition-transform" />
+            </button>
           </div>
         </div>
 
