@@ -179,7 +179,10 @@ DEFAULT_APP_CONFIG = {
         "emphasis, and tables when they help. Safe semantic HTML fragments such as "
         "<section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and "
         "<blockquote> are allowed when they genuinely improve the layout. Never return "
-        "a full HTML document, CSS, or JavaScript. When offering choices or clarification "
+        "a full HTML document, CSS, or JavaScript. Put the main answer first. If you add "
+        "technical details, SQL, raw previews, reasoning notes, or appendices, place them "
+        "after the main answer and preferably inside <details><summary>Expand details</summary>"
+        "...</details> blocks. When offering choices or clarification "
         "options, always use markdown task lists (- [ ] Option) so the UI can present "
         "clickable replies."
     ),
@@ -280,12 +283,32 @@ DATA_QUALITY_MAX_GUIDED_TABLES = 20
 DATA_QUALITY_MAX_SAMPLE_ROWS = 2_000_000
 DATA_QUALITY_DEFAULT_SAMPLE_SIZE = 50_000
 DATA_QUALITY_STRING_SENTINELS = ["n/a", "na", "null", "none", "unknown", "-1", "9999", "99999"]
-DATA_ANALYST_DEFAULT_MAX_STEPS = 6
+DATA_ANALYST_DEFAULT_MAX_STEPS = 10
 DATA_ANALYST_MAX_STEPS = 10
 DATA_ANALYST_MAX_RESULT_ROWS = 2000
 DATA_ANALYST_RESULT_PREVIEW_ROWS = 10
 DATA_ANALYST_TABLE_OPTION_LIMIT = 8
 DATA_ANALYST_MAX_KNOWLEDGE_RESULTS = 4
+DATA_ANALYST_FORBIDDEN_DATE_FUNCTIONS = (
+    "tostartofmonth",
+    "tostartofweek",
+    "tostartofyear",
+    "tostartofquarter",
+    "datediff",
+    "adddays",
+    "addmonths",
+    "addyears",
+    "subtractdays",
+    "subtractmonths",
+    "subtractyears",
+    "year(",
+    "month(",
+    "day(",
+    "today(",
+    "yesterday(",
+    "todate(",
+    "todatetime(",
+)
 
 
 def _default_planning_state() -> dict:
@@ -6236,11 +6259,131 @@ def _data_analyst_state_needs_followup(state: dict[str, Any]) -> bool:
     return str(state.get("stage") or "").strip() == "awaiting_table"
 
 
-def _data_analyst_sql_is_valid(sql: str) -> bool:
+def _data_analyst_date_columns(schema: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(column.get("name") or "").strip()
+        for column in schema
+        if str(column.get("name") or "").strip()
+        and classify_clickhouse_column_type(str(column.get("type") or "")) == "date"
+    ]
+
+
+def _data_analyst_numeric_columns(schema: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(column.get("name") or "").strip()
+        for column in schema
+        if str(column.get("name") or "").strip()
+        and classify_clickhouse_column_type(str(column.get("type") or "")) == "numeric"
+    ]
+
+
+def _data_analyst_dimension_columns(schema: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(column.get("name") or "").strip()
+        for column in schema
+        if str(column.get("name") or "").strip()
+        and classify_clickhouse_column_type(str(column.get("type") or "")) in {"string", "other"}
+    ]
+
+
+def _data_analyst_schema_brief(schema: list[dict[str, Any]]) -> str:
+    date_columns = _data_analyst_date_columns(schema)
+    numeric_columns = _data_analyst_numeric_columns(schema)
+    dimension_columns = _data_analyst_dimension_columns(schema)
+    lines = [
+        f"- Date columns: {', '.join(date_columns[:10]) if date_columns else 'none detected'}",
+        f"- Numeric columns: {', '.join(numeric_columns[:12]) if numeric_columns else 'none detected'}",
+        f"- Dimension-like columns: {', '.join(dimension_columns[:12]) if dimension_columns else 'none detected'}",
+    ]
+    return "\n".join(lines)
+
+
+def _data_analyst_target_step_count(user_request: str, max_steps: int) -> int:
+    normalized = normalize_intent_text(user_request)
+    if not normalized:
+        return min(max_steps, 4)
+
+    score = 3
+    if any(
+        token in normalized
+        for token in [
+            "why",
+            "root cause",
+            "investigate",
+            "analysis",
+            "analyze",
+            "deep dive",
+            "deeper",
+            "diagnose",
+            "explain",
+            "understand",
+        ]
+    ):
+        score += 2
+    if any(
+        token in normalized
+        for token in [
+            "trend",
+            "evolution",
+            "over time",
+            "compare",
+            "versus",
+            " vs ",
+            "breakdown",
+            "segment",
+            "channel",
+            "country",
+            "product",
+            "customer",
+            "cohort",
+            "week",
+            "month",
+            "quarter",
+            "day",
+            "hour",
+            "top",
+            "driver",
+            "drivers",
+            "drop",
+            "decline",
+            "growth",
+            "anomaly",
+        ]
+    ):
+        score += 2
+    if any(token in normalized for token in [" and ", " plus ", " puis ", " then ", "after that"]):
+        score += 1
+    return max(3, min(max_steps, score))
+
+
+def _data_analyst_has_forbidden_date_functions(sql: str) -> bool:
+    lowered = clean_sql_text(sql).lower()
+    return any(token in lowered for token in DATA_ANALYST_FORBIDDEN_DATE_FUNCTIONS)
+
+
+def _data_analyst_uses_date_literals_without_between(sql: str, schema: list[dict[str, Any]]) -> bool:
+    cleaned = clean_sql_text(sql)
+    lowered = cleaned.lower()
+    if " between " in f" {lowered} ":
+        return False
+    if not re.search(r"'\d{4}-\d{2}-\d{2}", cleaned):
+        return False
+    for column_name in _data_analyst_date_columns(schema):
+        pattern = rf"\b{re.escape(column_name.lower())}\b"
+        if re.search(pattern, lowered):
+            return True
+    return False
+
+
+def _data_analyst_sql_is_valid(sql: str, schema: Optional[list[dict[str, Any]]] = None) -> bool:
     cleaned = clean_sql_text(sql)
     if not is_safe_read_only_sql(cleaned):
         return False
     if re.search(r"\bselect\s+\*", cleaned, flags=re.IGNORECASE):
+        return False
+    if _data_analyst_has_forbidden_date_functions(cleaned):
+        return False
+    if schema and _data_analyst_uses_date_literals_without_between(cleaned, schema):
         return False
     return True
 
@@ -6313,6 +6456,35 @@ def _data_analyst_steps_context(steps: list[dict[str, Any]]) -> str:
             }
         )
     return json.dumps(compact, ensure_ascii=False, indent=2)
+
+
+def _data_analyst_step_highlights(steps: list[dict[str, Any]], limit: int = 6) -> str:
+    if not steps:
+        return ""
+    lines = []
+    for item in steps[:limit]:
+        lines.append(
+            f"- **Step {item.get('step')} · {_data_analyst_step_label(str(item.get('type') or 'step'))}:** "
+            f"{_truncate_text_preview(str(item.get('result_summary') or ''), 180) or 'No summary available.'}"
+        )
+    return "\n".join(lines)
+
+
+def _data_analyst_needs_more_evidence(
+    user_request: str,
+    step_log: list[dict[str, Any]],
+    max_steps: int,
+) -> bool:
+    target_steps = _data_analyst_target_step_count(user_request, max_steps)
+    successful_queries = sum(1 for step in step_log if step.get("ok") and step.get("type") == "query")
+    successful_steps = sum(1 for step in step_log if step.get("ok"))
+    if successful_queries == 0:
+        return True
+    if target_steps >= 5 and successful_queries < 2:
+        return True
+    if target_steps >= 7 and successful_queries < 3 and successful_steps < target_steps:
+        return True
+    return False
 
 
 def _data_analyst_result_preview_text(rows: list[dict[str, Any]], max_rows: int = DATA_ANALYST_RESULT_PREVIEW_ROWS) -> str:
@@ -6600,7 +6772,9 @@ async def plan_data_analyst_step(
     llm_model: str,
     llm_provider: str,
     llm_api_key: Optional[str],
+    must_continue: bool = False,
 ) -> dict[str, Any]:
+    target_steps = _data_analyst_target_step_count(user_request, max_steps)
     schema_lines = "\n".join(
         f"- {column.get('name')}: {column.get('type')}"
         for column in schema[:160]
@@ -6608,7 +6782,14 @@ async def plan_data_analyst_step(
     prompt = f"""
 You are an autonomous ClickHouse data analyst agent.
 Your goal is to answer the user's question through a sequence of targeted analytical actions.
+Operate as a true ReAct analyst:
+- Observation: inspect the latest evidence and detect what is still unknown.
+- Hypothesis: decide what business question or driver to test next.
+- Action: choose exactly one next action that brings genuinely new evidence.
+
 You may use up to {max_steps} credited actions. Each action must add genuinely new evidence.
+For this request, aim for about {target_steps} credited actions before finishing unless the evidence becomes decisive earlier.
+If the request is investigative, comparative, diagnostic, segmented, or trend-oriented, do not finish after a single obvious query.
 
 Return JSON only with this exact shape:
 {{
@@ -6626,18 +6807,26 @@ Rules:
 - NEVER use SELECT *.
 - Keep SQL read-only and explicit.
 - Add LIMIT when returning raw rows.
-- Use advanced ClickHouse functions only when they clearly help the analysis.
-- Prefer BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD' for fixed date windows.
+- You may use simple subqueries or derived tables when they materially improve the analysis.
+- Subqueries are especially appropriate for top-N isolation, de-duplication, threshold filtering, ranking subsets, comparing segments, or building a clean aggregation before a final select.
+- Avoid unnecessary complexity, but do not avoid subqueries when they are the clearest correct approach.
+- Date handling is strict: for date filters, use `date_column BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'`.
+- Do not use complex date functions for filtering logic: no toStartOf..., year(), month(), day(), dateDiff(), addDays(), toDate(), toDateTime(), today(), or yesterday().
 - `search_knowledge` is {"enabled" if knowledge_enabled else "disabled"}.
 - `export_csv` is {"allowed because the user explicitly requested CSV export" if export_requested else "disabled unless the user explicitly requests CSV export"}.
 - Use `export_csv` only after at least one successful query produced rows.
 - When the evidence is sufficient, choose `finish`.
+- Before finishing, prefer to cover at least two different analytical angles when the request asks for an explanation, root cause, trend, comparison, or driver analysis.
 - If you have already used {used_steps} of {max_steps} actions, be economical.
 - If {used_steps} >= {max_steps}, you MUST choose `finish`.
+{"- You are not allowed to choose `finish` in this turn. Gather one more distinct piece of evidence." if must_continue else ""}
 
 Database table: {selected_table}
 Schema:
 {schema_lines}
+
+Schema profile:
+{_data_analyst_schema_brief(schema)}
 
 Recent conversation memory:
 {conversation_memory}
@@ -6661,8 +6850,11 @@ User request:
         response_format="json",
     )
     parsed = extract_json_object(raw)
+    action = str(parsed.get("action") or "").strip().lower()
+    if must_continue and action == "finish":
+        action = ""
     return {
-        "action": str(parsed.get("action") or "").strip().lower(),
+        "action": action,
         "reasoning": str(parsed.get("reasoning") or "").strip(),
         "sql": clean_sql_text(str(parsed.get("sql") or "")),
         "knowledge_query": str(parsed.get("knowledge_query") or parsed.get("knowledgeQuery") or "").strip(),
@@ -6699,8 +6891,11 @@ Rules:
 - Use only table `{selected_table}`.
 - NEVER use SELECT *.
 - Keep the query read-only.
-- Avoid CTEs, nested subqueries, window functions, and advanced functions unless absolutely necessary.
 - Prefer COUNT, SUM, AVG, MIN, MAX, GROUP BY, ORDER BY, and BETWEEN.
+- A simple subquery or derived table is allowed when it is needed to keep the logic correct.
+- Avoid deep nesting and avoid advanced or brittle functions.
+- Date handling is strict: if you filter on a date column, use `BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'`.
+- Do not use toStartOf..., year(), month(), day(), dateDiff(), addDays(), toDate(), toDateTime(), today(), or yesterday().
 - Add LIMIT {max(1, min(int(query_limit or 200), 1000))} if raw rows are returned.
 
 Schema:
@@ -6748,19 +6943,25 @@ async def synthesize_data_analyst_answer(
 ) -> str:
     prompt = f"""
 You are finishing a complex ClickHouse analysis for an end user.
-Write the final answer in English as concise business-facing Markdown.
+Write the final answer in English as a developed business-facing Markdown analysis.
 
 Required structure:
 - `## Executive Summary`
+- `## Analytical Narrative`
 - `## Key Findings`
+- `## Risks Or Gaps`
 - `## Recommendations`
 
 Rules:
-- Keep the tone functional, clear, and decisive.
+- Keep the tone functional, clear, decisive, and more developed than a short summary.
 - Use short paragraphs or flat bullet points.
 - Highlight the most important values with **bold**.
+- Explicitly explain what the evidence suggests, not only what was queried.
+- Reference concrete metrics, rankings, percentages, counts, deltas, or date ranges whenever available.
+- Distinguish clearly between firm findings and directional hypotheses.
 - Do not include SQL sections or code fences here.
 - If the evidence is partial, say so honestly.
+- Avoid generic filler. Every section should add analytical value.
 
 Selected table: {selected_table}
 Forced finish: {"yes" if forced_finish else "no"}
@@ -6806,8 +7007,13 @@ def build_data_analyst_response_markdown(
     last_export_path: str,
     confidence_score: int,
     confidence_reason: str,
+    step_log: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     sections = [str(final_body or "").strip() or "## Executive Summary\nThe analysis completed, but no final narrative could be generated."]
+    if step_log:
+        step_highlights = _data_analyst_step_highlights(step_log)
+        if step_highlights:
+            sections.append("## Evidence Trail\n" + step_highlights)
     preview_table = _data_analyst_tabular_preview(last_result_meta, last_result_rows)
     if preview_table:
         sections.append("## Data Preview\n" + preview_table)
@@ -10873,7 +11079,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 "Ask a complex business question about your ClickHouse data, and I will gather evidence through several analytical steps.\n\n"
                 f"- **Database:** `{req.clickhouse.database}`\n"
                 f"- **Max credited actions:** {max_steps}\n"
-                "- **Capabilities:** multi-step query loop, optional knowledge-base lookup, safe SQL retry, and CSV export when you explicitly request it.\n"
+                "- **Capabilities:** deeper multi-step ReAct analysis, subqueries when they help, optional knowledge-base lookup, safe SQL retry, and CSV export when you explicitly request it.\n"
                 f"- **Current table focus:** `{state.get('selected_table') or 'not selected yet'}`"
             ),
             "agent_state": state,
@@ -11039,6 +11245,27 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         action = str(planned.get("action") or "").strip().lower()
         reasoning = str(planned.get("reasoning") or "").strip() or "The local LLM selected the next analytical action."
 
+        if action == "finish" and _data_analyst_needs_more_evidence(current_request, step_log, max_steps) and len(step_log) + 1 < max_steps:
+            planned = await plan_data_analyst_step(
+                current_request,
+                str(state["selected_table"]),
+                state["table_schema"],
+                conversation_memory,
+                step_log,
+                max_steps,
+                used_steps,
+                export_requested,
+                knowledge_enabled,
+                last_result_rows,
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+                must_continue=True,
+            )
+            action = str(planned.get("action") or "").strip().lower()
+            reasoning = str(planned.get("reasoning") or "").strip() or "The local LLM selected the next analytical action."
+
         if action == "finish":
             final_body = str(planned.get("final_answer") or "").strip()
             if not final_body:
@@ -11066,6 +11293,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 str(state.get("last_export_path") or ""),
                 confidence_score,
                 confidence_reason,
+                step_log=step_log,
             )
             state["stage"] = "ready"
             state["pending_request"] = ""
@@ -11213,7 +11441,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
 
         sql = enforce_query_limit(clean_sql_text(str(planned.get("sql") or "")), req.clickhouse.query_limit)
         retried = False
-        if not _data_analyst_sql_is_valid(sql):
+        if not _data_analyst_sql_is_valid(sql, state["table_schema"]):
             repaired = await repair_data_analyst_sql(
                 current_request,
                 str(state["selected_table"]),
@@ -11230,8 +11458,11 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
             reasoning = repaired["reasoning"] or reasoning
             retried = True
 
-        if not _data_analyst_sql_is_valid(sql):
-            last_error = "The generated SQL was rejected because it is not a safe read-only query."
+        if not _data_analyst_sql_is_valid(sql, state["table_schema"]):
+            last_error = (
+                "The generated SQL was rejected because it is unsafe, uses forbidden date logic, "
+                "or does not follow the BETWEEN rule for date filters."
+            )
             step_log.append(
                 _data_analyst_format_step(
                     len(step_log) + 1,
@@ -11263,7 +11494,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 req.clickhouse.query_limit,
             )
             repaired_sql = repaired["sql"]
-            if not _data_analyst_sql_is_valid(repaired_sql):
+            if not _data_analyst_sql_is_valid(repaired_sql, state["table_schema"]):
                 last_error = f"Query failed and the repaired SQL was still unsafe.\nOriginal error: {first_error}"
                 step_log.append(
                     _data_analyst_format_step(
@@ -11350,6 +11581,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         str(state.get("last_export_path") or ""),
         confidence_score,
         confidence_reason,
+        step_log=step_log,
     )
     state["stage"] = "ready"
     state["pending_request"] = ""

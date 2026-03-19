@@ -51,6 +51,10 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **Markdown & HTML** | Syntax-highlighted code blocks, proper tables, raw HTML from LLMs, copy button |
 | **Clickable clarifications** | Agent choices are rendered as large clickable tiles in the chat instead of requiring manual retyping when possible |
 | **Chat zoom** | Floating Apple-inspired zoom control on the right side of the chat with fine-grained scaling |
+| **Compact answer layout** | Main answer stays visible while SQL, reasoning, previews, and other technical appendices collapse into expandable details blocks |
+| **Reading-first chat scroll** | New assistant responses scroll into view from their top edge instead of snapping to the very bottom of the thread |
+| **Vertical mode rail** | Pure LLM / RAG / Agents / MCP / CrewAI are grouped in a slimmer left-side rail, vertically centered beside the chat |
+| **Discreet console access** | Agent Console is exposed as a minimal floating button in the bottom-right corner |
 | **Apple-inspired landing** | Animated cards, contact modal, page routing |
 | **Dark mode** | Full dark/light toggle persisted through backend state sync |
 | **File attachments** | Images, PDFs, text files alongside messages |
@@ -459,12 +463,15 @@ When enough evidence is gathered, the agent writes the final answer in English
 
 ### Behaviour
 
-- Uses a credited action budget with an anti-loop cap.
+- Uses a credited action budget with an anti-loop cap, now defaulting to up to **10** credited analytical actions.
 - Keeps the ongoing analytical context inside the same conversation.
+- Runs a stronger ReAct-style loop: inspect evidence, form the next hypothesis, execute the next action, then continue until the analysis is genuinely mature.
+- Allows simple subqueries / derived tables when they make the analysis clearer or more correct.
+- Forces date filtering toward explicit `BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'` windows instead of complex date helper functions.
 - Shows the analytical steps directly in the chat, including reasoning, SQL, result summary, row count, and retry status.
 - Can search the configured knowledge base when OpenSearch is available.
 - Only exports CSV when the user explicitly asks for it.
-- Produces a final business-facing Markdown answer, a data preview, a confidence score, and the executed SQL blocks.
+- Produces a more developed business-facing Markdown answer, plus a data preview, confidence signal, and expandable technical appendices.
 
 ### Backend endpoint
 
@@ -667,10 +674,17 @@ All settings are available in-app (no `.env` file needed).
 
 ### Access
 
-- The Settings entry is now a discreet button on the landing page, in the top-right corner.
+- The Settings entry is now a discreet button on the landing page, in the top-left corner.
 - Access is password-protected.
 - Default password: `MM@2026`
 - This password can be changed inside Settings after unlocking.
+
+### Chat UX Notes
+
+- Introductory helper messages such as the default welcome message and agent intro cards disappear as soon as the user starts typing.
+- Technical sections in many agent / LLM answers are automatically folded into expandable details blocks when possible.
+- When a new assistant answer arrives, the chat scrolls to the **top of that last answer** instead of the bottom of the full thread.
+- The mode selector lives in a slimmer left rail, centered vertically beside the chat area.
 
 ### LLM Settings
 
