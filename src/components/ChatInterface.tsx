@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -29,6 +29,7 @@ interface ChatInterfaceProps {
 const AGENT_INTRO_MARKERS = {
   manager: "<!-- agent-intro:manager -->",
   clickhouse_query: "<!-- agent-intro:clickhouse_query -->",
+  data_analyst: "<!-- agent-intro:data_analyst -->",
   file_management: "<!-- agent-intro:file_management -->",
   pdf_creator: "<!-- agent-intro:pdf_creator -->",
   oracle_analyst: "<!-- agent-intro:oracle_analyst -->",
@@ -42,7 +43,7 @@ function getAgentIntroContent(agentRole: AgentRole): string | null {
 
 This manager works in English and can orchestrate the available specialist agents.
 
-- It routes requests to ClickHouse Query, File management, Oracle Analyst, or Data quality - Tables when needed.
+- It routes requests to ClickHouse Query, Data analyst, File management, Oracle Analyst, or Data quality - Tables when needed.
 - It can also route export-ready results to PDF creator when you want a polished document.
 - It keeps the conversation context while delegated agents ask follow-up questions.
 - It answers directly when no specialist tool is required.`;
@@ -58,6 +59,18 @@ This agent works in English and guides the analysis safely before running SQL.
 - It only asks you to choose a table, field, or date column when the request stays ambiguous.
 - It can generate charts on demand and also suggests a visualization when the result deserves one.
 - It returns a short final answer, the executed SQL, and a concise reasoning summary.`;
+  }
+
+  if (agentRole === 'data_analyst') {
+    return `${AGENT_INTRO_MARKERS.data_analyst}
+## Data Analyst Agent
+
+This agent works in English and handles deeper ClickHouse investigations through a multi-step loop.
+
+- It can run several targeted queries before answering, instead of stopping after a single SQL execution.
+- It keeps one primary table in focus, asks you to choose only when the table stays ambiguous, and preserves the latest analytical context in the same conversation.
+- It can look into the knowledge base when configured, repair failed SQL automatically with a simpler fallback, and export the latest dataset to CSV when you explicitly ask for it.
+- It returns a business-facing markdown answer while exposing the analytical steps performed in the chat.`;
   }
 
   if (agentRole === 'file_management') {
@@ -114,6 +127,8 @@ function hasAgentIntroMessage(messages: Message[], agentRole: AgentRole): boolea
       ? AGENT_INTRO_MARKERS.manager
       : agentRole === 'clickhouse_query'
         ? AGENT_INTRO_MARKERS.clickhouse_query
+        : agentRole === 'data_analyst'
+          ? AGENT_INTRO_MARKERS.data_analyst
         : agentRole === 'file_management'
           ? AGENT_INTRO_MARKERS.file_management
           : agentRole === 'pdf_creator'
@@ -215,7 +230,7 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 
 - C'est l'agent **chef d'orchestre**.
 - Tu peux lui décrire directement un objectif métier, par exemple : **"analyse les ventes puis exporte le résultat en CSV"**.
-- Il peut déléguer à d'autres agents comme **ClickHouse Query**, **Oracle Analyst**, **File management**, **PDF creator** ou **Data quality - Tables** quand c'est pertinent.
+- Il peut déléguer à d'autres agents comme **ClickHouse Query**, **Data Analyst**, **Oracle Analyst**, **File management**, **PDF creator** ou **Data quality - Tables** quand c'est pertinent.
 - C'est le bon choix si tu ne sais pas encore quel agent utiliser.
 
 ### ClickHouse Query
@@ -224,6 +239,12 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 - Il peut choisir la bonne table automatiquement si la demande est claire, sinon il te propose des choix cliquables.
 - Il peut aussi proposer ou générer un **graphique** quand le résultat s'y prête.
 - Utilise-le pour des demandes comme : **"show me the revenue by month"**, **"find the latest failed jobs"**, ou **"compare sales by region"**.
+
+### Data Analyst
+
+- Cet agent sert à mener une **analyse plus approfondie** sur ClickHouse quand une seule requête ne suffit pas.
+- Il peut enchaîner plusieurs requêtes, garder le fil de l'enquête dans la conversation, réparer automatiquement une requête SQL trop complexe ou invalide, et exporter le dernier dataset en CSV si tu le demandes explicitement.
+- Utilise-le pour des demandes comme : **"explain the sales drop by week, country, and product"**, **"investigate why failed jobs increased"**, ou **"compare retention patterns and summarize the drivers"**.
 
 ### Oracle Analyst
 
@@ -263,6 +284,7 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 
 - Si tu veux un résultat métier sans te poser de question, commence par **Agent Manager**.
 - Si tu veux interroger des données, choisis **ClickHouse Query**.
+- Si tu veux une enquête plus poussée en plusieurs étapes, choisis **Data Analyst**.
 - Si tu veux analyser des données Oracle, choisis **Oracle Analyst**.
 - Si tu veux produire ou manipuler un fichier, choisis **File management**.
 - Si tu veux transformer un résultat en document prêt à partager, choisis **PDF creator**.
@@ -280,7 +302,7 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 
 - This is the **orchestrator** agent.
 - You can give it a business outcome such as **"analyze sales and export the result to CSV"**.
-- It can delegate to **ClickHouse Query**, **Oracle Analyst**, **File management**, **PDF creator**, or **Data quality - Tables** when needed.
+- It can delegate to **ClickHouse Query**, **Data Analyst**, **Oracle Analyst**, **File management**, **PDF creator**, or **Data quality - Tables** when needed.
 - Use it when you want the app to decide the best path for you.
 
 ### ClickHouse Query
@@ -289,6 +311,12 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 - It tries to infer the right table automatically, and only asks for clarification when the request stays ambiguous.
 - It can also suggest or generate a **chart** when the result is easier to understand visually.
 - Use it for requests like **"show revenue by month"**, **"find the latest failed jobs"**, or **"compare sales by region"**.
+
+### Data Analyst
+
+- This agent is designed for **deeper ClickHouse investigations** when a single SQL query is not enough.
+- It can chain multiple analytical queries, keep the investigation context alive across the conversation, repair invalid SQL automatically with a simpler fallback, and export the latest dataset to CSV when you explicitly ask for it.
+- Use it for requests like **"explain the sales drop by week, country, and product"**, **"investigate why failed jobs increased"**, or **"compare retention patterns and summarize the drivers"**.
 
 ### Oracle Analyst
 
@@ -328,6 +356,7 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 
 - Start with **Agent Manager** if you want the app to figure out the best execution path.
 - Pick **ClickHouse Query** when your goal is to analyze data from ClickHouse.
+- Pick **Data Analyst** when your goal is to run a deeper multi-step investigation on ClickHouse.
 - Pick **Oracle Analyst** when your goal is to analyze data from Oracle.
 - Pick **File management** when your goal is to create, inspect, or export files.
 - Pick **PDF creator** when your goal is to turn an analysis into a polished PDF deliverable.
@@ -379,6 +408,7 @@ export function ChatInterface({
   const currentConversation = conversations.find(c => c.id === currentId);
   const managerAgentState = normalizeManagerAgentState((currentConversation?.agentState as any)?.manager);
   const clickhouseAgentState = currentConversation?.agentState?.clickhouse;
+  const dataAnalystAgentState = normalizeDataAnalystAgentState((currentConversation?.agentState as any)?.dataAnalyst);
   const planningAgentState = normalizePlanningAgentState((currentConversation?.agentState as any)?.planning, browserTimeZone);
   const fileManagerAgentState = normalizeFileManagerAgentState((currentConversation?.agentState as any)?.fileManager);
   const pdfCreatorAgentState = normalizePdfCreatorAgentState((currentConversation?.agentState as any)?.pdfCreator);
@@ -410,7 +440,7 @@ export function ChatInterface({
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
   const [planningBusy, setPlanningBusy] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
-  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables');
+  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
   const [isDataQualityModalOpen, setIsDataQualityModalOpen] = useState(false);
   const [isDataQualityMetadataLoading, setIsDataQualityMetadataLoading] = useState(false);
@@ -552,14 +582,14 @@ export function ChatInterface({
   }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen]);
 
   useEffect(() => {
-    if (workflow === 'AGENT' && (agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables')) {
+    if (workflow === 'AGENT' && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables')) {
       setIsOtherAgentsOpen(true);
     }
   }, [workflow, agentRole]);
 
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
-    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst' && agentRole !== 'data_quality_tables') return;
+    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst' && agentRole !== 'data_quality_tables') return;
     if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
 
     const bootstrapKey = `${currentConversation.id}:${agentRole}:${currentConversation.updatedAt}`;
@@ -1122,11 +1152,32 @@ export function ChatInterface({
       let confidence = undefined;
       let nextManagerAgentState = managerAgentState;
       let nextClickhouseAgentState = clickhouseAgentState;
+      let nextDataAnalystAgentState = dataAnalystAgentState;
       let nextPlanningAgentState = planningAgentState;
       let nextFileManagerAgentState = fileManagerAgentState;
       let nextPdfCreatorAgentState = pdfCreatorAgentState;
       let nextOracleAnalystAgentState = oracleAnalystAgentState;
       let nextDataQualityAgentState = dataQualityAgentState;
+      const serializedDataAnalystState = {
+        stage: dataAnalystAgentState.stage,
+        pending_request: dataAnalystAgentState.pendingRequest,
+        available_tables: dataAnalystAgentState.availableTables,
+        selected_table: dataAnalystAgentState.selectedTable,
+        table_schema: dataAnalystAgentState.tableSchema,
+        clarification_prompt: dataAnalystAgentState.clarificationPrompt,
+        clarification_options: dataAnalystAgentState.clarificationOptions,
+        last_sqls: dataAnalystAgentState.lastSqls,
+        last_result_meta: dataAnalystAgentState.lastResultMeta,
+        last_result_rows: dataAnalystAgentState.lastResultRows,
+        final_answer: dataAnalystAgentState.finalAnswer,
+        last_error: dataAnalystAgentState.lastError,
+        last_export_path: dataAnalystAgentState.lastExportPath,
+        knowledge_hits: (dataAnalystAgentState.knowledgeHits ?? []).map((hit) => ({
+          doc_name: hit.docName,
+          text: hit.text,
+          score: hit.score,
+        })),
+      };
 
       // Route the request based on the selected workflow
       if (workflow === 'LLM' && isAppCapabilitiesQuery(text)) {
@@ -1279,6 +1330,7 @@ export function ChatInterface({
             history: memoryHistory,
             manager_state: managerAgentState ?? undefined,
             clickhouse_state: clickhouseAgentState ?? undefined,
+            data_analyst_state: serializedDataAnalystState,
             file_manager_state: fileManagerAgentState ?? undefined,
             pdf_creator_state: pdfCreatorAgentState ?? undefined,
             oracle_analyst_state: oracleAnalystAgentState ?? undefined,
@@ -1335,6 +1387,7 @@ export function ChatInterface({
         reply = data.answer;
         nextManagerAgentState = normalizeManagerAgentState((data.agent_state as any)?.manager);
         nextClickhouseAgentState = (data.agent_state as any)?.clickhouse ?? nextClickhouseAgentState;
+        nextDataAnalystAgentState = normalizeDataAnalystAgentState((data.agent_state as any)?.dataAnalyst);
         nextFileManagerAgentState = normalizeFileManagerAgentState((data.agent_state as any)?.fileManager);
         nextPdfCreatorAgentState = normalizePdfCreatorAgentState((data.agent_state as any)?.pdfCreator);
         nextOracleAnalystAgentState = normalizeOracleAnalystAgentState((data.agent_state as any)?.oracleAnalyst);
@@ -1361,6 +1414,7 @@ export function ChatInterface({
               ...(updated[idx].agentState ?? {}),
               manager: nextManagerAgentState,
               clickhouse: nextClickhouseAgentState,
+              dataAnalyst: nextDataAnalystAgentState,
               fileManager: nextFileManagerAgentState,
               pdfCreator: nextPdfCreatorAgentState,
               oracleAnalyst: nextOracleAnalystAgentState,
@@ -1368,6 +1422,69 @@ export function ChatInterface({
             },
             messages: [...updated[idx].messages, assistantManagerMsg],
             memory: buildConversationMemory([...updated[idx].messages, assistantManagerMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (workflow === 'AGENT' && agentRole === 'data_analyst') {
+        const response = await fetch('/api/chat/data-analyst-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: serializedDataAnalystState,
+            max_steps: 6,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: config.clickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Data Analyst Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextDataAnalystAgentState = normalizeDataAnalystAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantDataAnalystMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              dataAnalyst: nextDataAnalystAgentState,
+            },
+            messages: [...updated[idx].messages, assistantDataAnalystMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantDataAnalystMsg]),
             updatedAt: Date.now(),
           };
           return updated;
@@ -1777,6 +1894,8 @@ export function ChatInterface({
       ? "Describe the automation you want to schedule..."
       : workflow === 'AGENT' && agentRole === 'clickhouse_query'
         ? "Ask a ClickHouse question or request a chart..."
+      : workflow === 'AGENT' && agentRole === 'data_analyst'
+        ? "Ask for a deeper multi-step ClickHouse investigation..."
       : workflow === 'AGENT' && agentRole === 'file_management'
         ? "Ask to list, read, create, move, edit, or delete files..."
         : workflow === 'AGENT' && agentRole === 'pdf_creator'
@@ -2142,13 +2261,19 @@ export function ChatInterface({
                 </button>
               </div>
 
-              <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-28 opacity-100' : 'max-h-0 opacity-0'}`}>
+              <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-40 opacity-100' : 'max-h-0 opacity-0'}`}>
                 <div className="flex items-center gap-2 pl-3 ml-1 border-l-2 border-cyan-200 overflow-x-auto scrollbar-hide">
                   <button
                     onClick={() => onAgentRoleChange('clickhouse_query')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
                     <Database className="w-3.5 h-3.5" /> ClickHouse Query
+                  </button>
+                  <button
+                    onClick={() => onAgentRoleChange('data_analyst')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <Cpu className="w-3.5 h-3.5" /> Data Analyst
                   </button>
                   <button
                     onClick={() => onAgentRoleChange('file_management')}

@@ -195,13 +195,15 @@ export function PlanningModal({
   return createPortal(
     <>
       <div
-        className="fixed inset-0 z-[80] bg-black/45 backdrop-blur-sm"
+        className="fixed inset-0 z-[100] bg-black/45 backdrop-blur-sm"
         onClick={onClose}
       />
-      <div className="fixed inset-0 z-[81] overflow-y-auto p-4">
-        <div className="flex min-h-full items-center justify-center">
+      <div className="pointer-events-none fixed inset-0 z-[101] overflow-y-auto p-4">
+        <div className="flex min-h-full items-center justify-center py-4">
           <div
-            className="w-full max-w-[1280px] max-h-[92vh] overflow-hidden rounded-[2rem] border border-white/20 bg-[#f8f8f6] dark:bg-[#101115] shadow-2xl shadow-black/30"
+            role="dialog"
+            aria-modal="true"
+            className="pointer-events-auto w-full max-w-[1280px] max-h-[calc(100vh-2rem)] overflow-hidden rounded-[2rem] border border-white/20 bg-[#f8f8f6] shadow-2xl shadow-black/30 dark:bg-[#101115]"
             onClick={(event) => event.stopPropagation()}
           >
         <div className="flex items-center justify-between gap-4 px-6 py-5 border-b border-gray-200/70 dark:border-gray-800/80 bg-white/80 dark:bg-black/20">

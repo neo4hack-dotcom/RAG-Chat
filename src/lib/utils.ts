@@ -14,6 +14,15 @@ export type AgentStep = {
   title: string;
   status: 'pending' | 'running' | 'success' | 'error';
   details?: string;
+  step?: number;
+  type?: string;
+  reasoning?: string;
+  sql?: string;
+  result_summary?: string;
+  row_count?: number;
+  ok?: boolean;
+  retried?: boolean;
+  suggested_path?: string;
 };
 
 export type ChatAction = {
@@ -232,6 +241,23 @@ export type OracleAnalystAgentState = {
   lastError: string;
 };
 
+export type DataAnalystAgentState = {
+  stage: 'idle' | 'awaiting_table' | 'ready';
+  pendingRequest: string;
+  availableTables: string[];
+  selectedTable: string | null;
+  tableSchema: Array<{ name: string; type: string; defaultKind?: string; defaultExpression?: string }>;
+  clarificationPrompt: string;
+  clarificationOptions: string[];
+  lastSqls: string[];
+  lastResultMeta: Array<{ name: string; type: string }>;
+  lastResultRows: Record<string, unknown>[];
+  finalAnswer: string;
+  lastError: string;
+  lastExportPath: string;
+  knowledgeHits: Array<{ docName: string; text: string; score: number }>;
+};
+
 export type DataQualitySchemaColumn = {
   name: string;
   type: string;
@@ -259,7 +285,7 @@ export type DataQualityState = {
   dateColumns: string[];
 };
 
-export type ManagerDelegateRole = 'clickhouse_query' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'data_quality_tables';
+export type ManagerDelegateRole = 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'data_quality_tables';
 
 export type ManagerFileExportPipeline = {
   kind: 'clickhouse_to_file';
@@ -319,6 +345,7 @@ export type ClickHouseAgentState = {
 export type ConversationAgentState = {
   manager?: ManagerAgentState;
   clickhouse?: ClickHouseAgentState;
+  dataAnalyst?: DataAnalystAgentState;
   planning?: PlanningAgentState;
   fileManager?: FileManagerAgentState;
   pdfCreator?: PdfCreatorAgentState;
@@ -340,11 +367,11 @@ export type Conversation = {
 
 export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP' | 'CREWAI';
 
-export type AgentRole = 'manager' | 'clickhouse_query' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'data_quality_tables';
+export type AgentRole = 'manager' | 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'data_quality_tables';
 
 export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 
-const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'file_management', 'pdf_creator', 'oracle_analyst', 'data_quality_tables'];
+const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'data_quality_tables'];
 
 function isValidAgentRole(value: unknown): value is AgentRole {
   return typeof value === 'string' && VALID_AGENT_ROLES.includes(value as AgentRole);
@@ -721,6 +748,66 @@ export function normalizeOracleAnalystAgentState(
   };
 }
 
+export function normalizeDataAnalystAgentState(
+  state?: Partial<DataAnalystAgentState> | null
+): DataAnalystAgentState {
+  const tableSchema = (state as any)?.tableSchema ?? (state as any)?.table_schema ?? (state as any)?.schema;
+  const lastResultMeta = (state as any)?.lastResultMeta ?? (state as any)?.last_result_meta;
+  const lastResultRows = (state as any)?.lastResultRows ?? (state as any)?.last_result_rows;
+  const knowledgeHits = (state as any)?.knowledgeHits ?? (state as any)?.knowledge_hits;
+  return {
+    stage:
+      (state as any)?.stage === 'awaiting_table' || (state as any)?.stage === 'ready'
+        ? (state as any).stage
+        : 'idle',
+    pendingRequest: String((state as any)?.pendingRequest ?? (state as any)?.pending_request ?? ''),
+    availableTables: Array.isArray((state as any)?.availableTables ?? (state as any)?.available_tables)
+      ? ((state as any)?.availableTables ?? (state as any)?.available_tables).filter(Boolean)
+      : [],
+    selectedTable: (state as any)?.selectedTable ?? (state as any)?.selected_table ?? null,
+    tableSchema: Array.isArray(tableSchema)
+      ? tableSchema
+          .filter(Boolean)
+          .map((column: any) => ({
+            name: String(column?.name ?? ''),
+            type: String(column?.type ?? ''),
+            defaultKind: String(column?.defaultKind ?? column?.default_kind ?? ''),
+            defaultExpression: String(column?.defaultExpression ?? column?.default_expression ?? ''),
+          }))
+          .filter((column: { name: string }) => Boolean(column.name))
+      : [],
+    clarificationPrompt: String((state as any)?.clarificationPrompt ?? (state as any)?.clarification_prompt ?? ''),
+    clarificationOptions: Array.isArray((state as any)?.clarificationOptions ?? (state as any)?.clarification_options)
+      ? ((state as any)?.clarificationOptions ?? (state as any)?.clarification_options).filter(Boolean)
+      : [],
+    lastSqls: Array.isArray((state as any)?.lastSqls ?? (state as any)?.last_sqls)
+      ? ((state as any)?.lastSqls ?? (state as any)?.last_sqls).filter(Boolean).map(String)
+      : [],
+    lastResultMeta: Array.isArray(lastResultMeta)
+      ? lastResultMeta
+          .filter(Boolean)
+          .map((column: any) => ({
+            name: String(column?.name ?? ''),
+            type: String(column?.type ?? ''),
+          }))
+          .filter((column: { name: string }) => Boolean(column.name))
+      : [],
+    lastResultRows: Array.isArray(lastResultRows) ? lastResultRows.filter((row: unknown) => Boolean(row)) as Record<string, unknown>[] : [],
+    finalAnswer: String((state as any)?.finalAnswer ?? (state as any)?.final_answer ?? ''),
+    lastError: String((state as any)?.lastError ?? (state as any)?.last_error ?? ''),
+    lastExportPath: String((state as any)?.lastExportPath ?? (state as any)?.last_export_path ?? ''),
+    knowledgeHits: Array.isArray(knowledgeHits)
+      ? knowledgeHits
+          .filter(Boolean)
+          .map((item: any) => ({
+            docName: String(item?.docName ?? item?.doc_name ?? ''),
+            text: String(item?.text ?? ''),
+            score: Number(item?.score ?? 0),
+          }))
+      : [],
+  };
+}
+
 export function normalizeManagerAgentState(
   state?: Partial<ManagerAgentState> | null
 ): ManagerAgentState {
@@ -732,7 +819,7 @@ export function normalizeManagerAgentState(
     : null;
   const stage = pendingPipeline?.stage;
   return {
-    activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'file_management' || activeDelegate === 'data_quality_tables' || activeDelegate === 'pdf_creator' || activeDelegate === 'oracle_analyst'
+    activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'data_analyst' || activeDelegate === 'file_management' || activeDelegate === 'data_quality_tables' || activeDelegate === 'pdf_creator' || activeDelegate === 'oracle_analyst'
       ? activeDelegate
       : null,
     lastRoutingReason: (state as any)?.lastRoutingReason ?? (state as any)?.last_routing_reason ?? '',
@@ -868,7 +955,7 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
 
 export function normalizeAppPreferences(preferences?: Partial<AppPreferences> | null): AppPreferences {
   const nextAgentRole =
-    preferences?.agentRole === 'clickhouse_query' || preferences?.agentRole === 'file_management' || preferences?.agentRole === 'pdf_creator' || preferences?.agentRole === 'oracle_analyst' || preferences?.agentRole === 'data_quality_tables'
+    preferences?.agentRole === 'clickhouse_query' || preferences?.agentRole === 'data_analyst' || preferences?.agentRole === 'file_management' || preferences?.agentRole === 'pdf_creator' || preferences?.agentRole === 'oracle_analyst' || preferences?.agentRole === 'data_quality_tables'
       ? preferences.agentRole
       : 'manager';
   return {

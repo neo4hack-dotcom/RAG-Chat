@@ -148,9 +148,6 @@ export function AgentsToolsPage({ apps, onBack }: AgentsToolsPageProps) {
           <h1 className="mt-6 text-[44px] md:text-[58px] leading-[0.95] tracking-[-0.05em] font-semibold text-gray-950">
             Agents & Tools
           </h1>
-          <p className="mt-5 text-[16px] leading-[1.8] text-gray-600 max-w-2xl">
-            A workflow is a fixed, "If This, Then That" sequence designed for predictable, repetitive tasks like data entry or status updates. In contrast, an AI agent uses reasoning to independently choose tools and adapt its steps to reach a goal.
-          </p>
           <div className="mt-6 inline-flex items-center gap-2 rounded-full border border-white/80 bg-white/62 px-4 py-2 text-sm font-medium text-gray-700">
             <Layers className="w-4 h-4 text-sky-500" />
             {configuredApps.length} configured app{configuredApps.length === 1 ? '' : 's'}

@@ -152,7 +152,7 @@ DEFAULT_PREFERENCES = {
     "page": "landing",
 }
 
-AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_quality_tables"}
+AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_quality_tables", "data_analyst"}
 PLANNER_AGENT_ROLES = {"manager", "clickhouse_query", "file_management"}
 PLANNER_TRIGGER_KINDS = {
     "once",
@@ -173,6 +173,12 @@ DATA_QUALITY_MAX_GUIDED_TABLES = 20
 DATA_QUALITY_MAX_SAMPLE_ROWS = 2_000_000
 DATA_QUALITY_DEFAULT_SAMPLE_SIZE = 50_000
 DATA_QUALITY_STRING_SENTINELS = ["n/a", "na", "null", "none", "unknown", "-1", "9999", "99999"]
+DATA_ANALYST_DEFAULT_MAX_STEPS = 6
+DATA_ANALYST_MAX_STEPS = 10
+DATA_ANALYST_MAX_RESULT_ROWS = 2000
+DATA_ANALYST_RESULT_PREVIEW_ROWS = 10
+DATA_ANALYST_TABLE_OPTION_LIMIT = 8
+DATA_ANALYST_MAX_KNOWLEDGE_RESULTS = 4
 
 
 def _default_planning_state() -> dict:
@@ -1485,7 +1491,15 @@ async def _data_quality_date_stats(
           max(parsed_dt) AS max_value,
           countIf(parsed_dt > now()) AS future_count,
           countIf(parsed_dt < toDateTime('1970-01-02 00:00:00')) AS epoch_like_count,
-          countIf(parsed_dt < toDateTime('1900-01-01 00:00:00')) AS pre_1900_count,
+          (
+            SELECT count()
+            FROM (
+              SELECT toString({identifier}) AS raw_text
+              FROM ({source_sql}) AS src
+              WHERE NOT isNull(toNullable({identifier}))
+            ) AS raw_profile
+            WHERE match(raw_text, '^(?:0\\d{{3}}|1[0-8]\\d{{2}})-')
+          ) AS pre_1900_count,
           countIf(toDayOfWeek(parsed_dt) >= 6) AS weekend_count
         FROM (
           SELECT parseDateTimeBestEffortOrNull(toString({identifier})) AS parsed_dt
@@ -1757,6 +1771,7 @@ def _data_quality_python_fallback_analysis(state: dict[str, Any]) -> dict[str, A
 
 async def data_quality_llm_analysis_node(
     state: dict[str, Any],
+    conversation_memory: str,
     llm_base_url: str,
     llm_model: str,
     llm_provider: str,
@@ -1790,6 +1805,9 @@ Scoring rules:
 
 Keep everything in English.
 Use the payload only. Do not invent metrics that are not provided.
+
+Recent conversation memory:
+{conversation_memory}
 
 Payload:
 {json.dumps(payload, ensure_ascii=False, indent=2)}
@@ -3439,12 +3457,25 @@ PDF_CREATOR_SOURCE_CHOICES = [
     "Paste the content in your next message",
 ]
 PDF_CREATOR_MAX_TEXT_CHARS = 120_000
-PDF_CREATOR_ACCENT_RGB = (0.215, 0.490, 0.870)
-PDF_CREATOR_SLATE_RGB = (0.098, 0.145, 0.219)
-PDF_CREATOR_TEXT_RGB = (0.180, 0.219, 0.294)
-PDF_CREATOR_MUTED_RGB = (0.463, 0.506, 0.576)
-PDF_CREATOR_CODE_BG_RGB = (0.953, 0.965, 0.980)
-PDF_CREATOR_RULE_RGB = (0.847, 0.871, 0.902)
+PDF_CREATOR_ACCENT_RGB = (0.306, 0.459, 0.949)
+PDF_CREATOR_SLATE_RGB = (0.082, 0.117, 0.211)
+PDF_CREATOR_TEXT_RGB = (0.188, 0.223, 0.305)
+PDF_CREATOR_MUTED_RGB = (0.451, 0.494, 0.576)
+PDF_CREATOR_CODE_BG_RGB = (0.943, 0.957, 0.984)
+PDF_CREATOR_RULE_RGB = (0.835, 0.862, 0.921)
+PDF_CREATOR_PAGE_BG_RGB = (0.972, 0.978, 0.992)
+PDF_CREATOR_CARD_BG_RGB = (1.0, 1.0, 1.0)
+PDF_CREATOR_CARD_BORDER_RGB = (0.879, 0.905, 0.952)
+PDF_CREATOR_HERO_LEFT_RGB = (0.412, 0.231, 0.925)
+PDF_CREATOR_HERO_CENTER_RGB = (0.267, 0.351, 0.933)
+PDF_CREATOR_HERO_RIGHT_RGB = (0.173, 0.592, 0.898)
+PDF_CREATOR_HERO_SOFT_RGB = (0.809, 0.863, 0.988)
+PDF_CREATOR_PILL_BG_RGB = (0.516, 0.430, 0.969)
+PDF_CREATOR_PILL_TEXT_RGB = (0.945, 0.953, 0.996)
+PDF_CREATOR_META_LABEL_RGB = (0.761, 0.815, 0.969)
+PDF_CREATOR_META_VALUE_RGB = (1.0, 1.0, 1.0)
+PDF_CREATOR_SECTION_BG_RGB = (0.961, 0.969, 0.988)
+PDF_CREATOR_SECTION_TEXT_RGB = (0.396, 0.454, 0.588)
 
 
 def _pdf_escape_text(value: str) -> str:
@@ -3497,6 +3528,14 @@ def _wrap_text_for_pdf(text: str, max_chars: int) -> list[str]:
     return lines or [cleaned[:max_chars]]
 
 
+def _parse_markdown_table_cells(line: str) -> list[str]:
+    stripped = str(line or "").strip()
+    if not stripped.startswith("|"):
+        return []
+    parts = [part.strip() for part in stripped.strip("|").split("|")]
+    return [_markdown_inline_to_plain_text(part) for part in parts]
+
+
 def _parse_markdown_for_pdf(markdown: str) -> list[dict[str, Any]]:
     text = re.sub(r"<!--[\s\S]*?-->", "", str(markdown or "")).replace("\r", "")
     lines = text.split("\n")
@@ -3504,6 +3543,7 @@ def _parse_markdown_for_pdf(markdown: str) -> list[dict[str, Any]]:
     paragraph_lines: list[str] = []
     code_lines: list[str] = []
     in_code = False
+    index = 0
 
     def flush_paragraph() -> None:
         nonlocal paragraph_lines
@@ -3518,22 +3558,62 @@ def _parse_markdown_for_pdf(markdown: str) -> list[dict[str, Any]]:
             blocks.append({"kind": "code", "lines": [line.rstrip() for line in code_lines]})
         code_lines = []
 
-    for raw_line in lines:
+    while index < len(lines):
+        raw_line = lines[index]
         stripped = raw_line.rstrip()
         if stripped.strip().startswith("```"):
             flush_paragraph()
             if in_code:
                 flush_code()
             in_code = not in_code
+            index += 1
             continue
 
         if in_code:
             code_lines.append(stripped)
+            index += 1
             continue
 
         if not stripped.strip():
             flush_paragraph()
             blocks.append({"kind": "spacer", "height": 8})
+            index += 1
+            continue
+
+        if (
+            stripped.strip().startswith("|")
+            and index + 1 < len(lines)
+            and re.match(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$", lines[index + 1].strip())
+        ):
+            flush_paragraph()
+            headers = _parse_markdown_table_cells(stripped)
+            table_rows: list[list[str]] = []
+            cursor = index + 2
+            while cursor < len(lines):
+                table_line = lines[cursor].rstrip()
+                if not table_line.strip().startswith("|"):
+                    break
+                cells = _parse_markdown_table_cells(table_line)
+                if cells:
+                    table_rows.append(cells)
+                cursor += 1
+
+            if headers and table_rows:
+                if len(headers) == 2:
+                    for row in table_rows:
+                        label = row[0] if len(row) > 0 else ""
+                        value = row[1] if len(row) > 1 else ""
+                        blocks.append({"kind": "metric", "label": label, "value": value})
+                else:
+                    for row in table_rows:
+                        row_pairs = []
+                        for cell_index, header in enumerate(headers):
+                            cell_value = row[cell_index] if cell_index < len(row) else ""
+                            if cell_value:
+                                row_pairs.append(f"{header}: {cell_value}")
+                        if row_pairs:
+                            blocks.append({"kind": "bullet", "text": " | ".join(row_pairs)})
+            index = cursor
             continue
 
         heading_match = re.match(r"^\s*(#{1,3})\s+(.+)$", stripped)
@@ -3546,20 +3626,24 @@ def _parse_markdown_for_pdf(markdown: str) -> list[dict[str, Any]]:
                     "text": _markdown_inline_to_plain_text(heading_match.group(2)),
                 }
             )
+            index += 1
             continue
 
         bullet_match = re.match(r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(.+)$", stripped)
         if bullet_match:
             flush_paragraph()
             blocks.append({"kind": "bullet", "text": _markdown_inline_to_plain_text(bullet_match.group(1))})
+            index += 1
             continue
 
         quote_match = re.match(r"^\s*>\s?(.*)$", stripped)
         if quote_match:
             paragraph_lines.append(quote_match.group(1))
+            index += 1
             continue
 
         paragraph_lines.append(stripped)
+        index += 1
 
     flush_paragraph()
     flush_code()
@@ -3574,10 +3658,15 @@ def _pdf_content_stream_for_document(
 ) -> tuple[list[str], int]:
     page_width = 595.28
     page_height = 841.89
-    margin_x = 52.0
-    bottom_margin = 54.0
-    first_page_top = 690.0
-    other_page_top = 760.0
+    page_margin = 36.0
+    content_card_x = page_margin
+    content_card_width = page_width - page_margin * 2
+    content_left = content_card_x + 24.0
+    content_width = content_card_width - 48.0
+    content_right = content_left + content_width
+    bottom_margin = 78.0
+    first_page_top = 536.0
+    other_page_top = 714.0
     pages: list[list[str]] = []
     page_index = -1
     cursor_y = 0.0
@@ -3587,50 +3676,128 @@ def _pdf_content_stream_for_document(
         page_index += 1
         cursor_y = first_page_top if page_index == 0 else other_page_top
         ops: list[str] = []
+        ops.extend(
+            [
+                f"{PDF_CREATOR_PAGE_BG_RGB[0]:.3f} {PDF_CREATOR_PAGE_BG_RGB[1]:.3f} {PDF_CREATOR_PAGE_BG_RGB[2]:.3f} rg",
+                f"0 0 {page_width:.2f} {page_height:.2f} re f",
+            ]
+        )
         if page_index == 0:
-            header_height = 116.0
-            header_y = page_height - header_height
+            hero_x = page_margin
+            hero_y = 610.0
+            hero_height = 176.0
+            hero_width = page_width - page_margin * 2
             ops.extend(
                 [
-                    f"{PDF_CREATOR_SLATE_RGB[0]:.3f} {PDF_CREATOR_SLATE_RGB[1]:.3f} {PDF_CREATOR_SLATE_RGB[2]:.3f} rg",
-                    f"0 {header_y:.2f} {page_width:.2f} {header_height:.2f} re f",
-                    f"{PDF_CREATOR_ACCENT_RGB[0]:.3f} {PDF_CREATOR_ACCENT_RGB[1]:.3f} {PDF_CREATOR_ACCENT_RGB[2]:.3f} rg",
-                    f"{margin_x:.2f} {header_y + 18:.2f} {page_width - margin_x * 2:.2f} 3 re f",
+                    f"{PDF_CREATOR_HERO_LEFT_RGB[0]:.3f} {PDF_CREATOR_HERO_LEFT_RGB[1]:.3f} {PDF_CREATOR_HERO_LEFT_RGB[2]:.3f} rg",
+                    f"{hero_x:.2f} {hero_y:.2f} {hero_width * 0.36:.2f} {hero_height:.2f} re f",
+                    f"{PDF_CREATOR_HERO_CENTER_RGB[0]:.3f} {PDF_CREATOR_HERO_CENTER_RGB[1]:.3f} {PDF_CREATOR_HERO_CENTER_RGB[2]:.3f} rg",
+                    f"{hero_x + hero_width * 0.36:.2f} {hero_y:.2f} {hero_width * 0.32:.2f} {hero_height:.2f} re f",
+                    f"{PDF_CREATOR_HERO_RIGHT_RGB[0]:.3f} {PDF_CREATOR_HERO_RIGHT_RGB[1]:.3f} {PDF_CREATOR_HERO_RIGHT_RGB[2]:.3f} rg",
+                    f"{hero_x + hero_width * 0.68:.2f} {hero_y:.2f} {hero_width * 0.32:.2f} {hero_height:.2f} re f",
+                    f"{PDF_CREATOR_PILL_BG_RGB[0]:.3f} {PDF_CREATOR_PILL_BG_RGB[1]:.3f} {PDF_CREATOR_PILL_BG_RGB[2]:.3f} rg",
+                    f"{hero_x + 26:.2f} {hero_y + hero_height - 40:.2f} 196 18 re f",
+                    f"{PDF_CREATOR_HERO_SOFT_RGB[0]:.3f} {PDF_CREATOR_HERO_SOFT_RGB[1]:.3f} {PDF_CREATOR_HERO_SOFT_RGB[2]:.3f} rg",
+                    f"{hero_x + hero_width - 76:.2f} {hero_y + hero_height - 70:.2f} 40 40 re f",
+                    "BT",
+                    "/F2 7.5 Tf",
+                    f"{PDF_CREATOR_PILL_TEXT_RGB[0]:.3f} {PDF_CREATOR_PILL_TEXT_RGB[1]:.3f} {PDF_CREATOR_PILL_TEXT_RGB[2]:.3f} rg",
+                    f"1 0 0 1 {hero_x + 34:.2f} {hero_y + hero_height - 28:.2f} Tm",
+                    "([EXECUTIVE REPORT  |  RAGNAROK]) Tj",
+                    "ET",
                     "BT",
                     "/F2 24 Tf",
                     "1 1 1 rg",
-                    f"1 0 0 1 {margin_x:.2f} {page_height - 58:.2f} Tm",
+                    f"1 0 0 1 {hero_x + 26:.2f} {hero_y + hero_height - 66:.2f} Tm",
                     f"({_pdf_escape_text(title)}) Tj",
                     "ET",
                     "BT",
                     "/F1 11 Tf",
                     "0.89 0.92 0.97 rg",
-                    f"1 0 0 1 {margin_x:.2f} {page_height - 82:.2f} Tm",
+                    f"1 0 0 1 {hero_x + 26:.2f} {hero_y + hero_height - 90:.2f} Tm",
                     f"({_pdf_escape_text(subtitle)}) Tj",
                     "ET",
+                    f"{PDF_CREATOR_HERO_SOFT_RGB[0]:.3f} {PDF_CREATOR_HERO_SOFT_RGB[1]:.3f} {PDF_CREATOR_HERO_SOFT_RGB[2]:.3f} rg",
+                    f"{hero_x + 26:.2f} {hero_y + 72:.2f} {hero_width - 52:.2f} 1.4 re f",
                 ]
             )
-        else:
-            header_height = 44.0
-            header_y = page_height - header_height
+            metadata = [
+                ("GENERATED", generated_label.replace("Generated on ", "")),
+                ("TOOL", "RAGnarok PDF Creator"),
+                ("CLASSIFICATION", "Internal executive report"),
+            ]
+            column_width = (hero_width - 52.0) / 3.0
+            for metadata_index, (label, value) in enumerate(metadata):
+                column_x = hero_x + 26.0 + metadata_index * column_width
+                ops.extend(
+                    [
+                        "BT",
+                        "/F2 8 Tf",
+                        f"{PDF_CREATOR_META_LABEL_RGB[0]:.3f} {PDF_CREATOR_META_LABEL_RGB[1]:.3f} {PDF_CREATOR_META_LABEL_RGB[2]:.3f} rg",
+                        f"1 0 0 1 {column_x:.2f} {hero_y + 52:.2f} Tm",
+                        f"({_pdf_escape_text(label)}) Tj",
+                        "ET",
+                        "BT",
+                        "/F2 10.5 Tf",
+                        f"{PDF_CREATOR_META_VALUE_RGB[0]:.3f} {PDF_CREATOR_META_VALUE_RGB[1]:.3f} {PDF_CREATOR_META_VALUE_RGB[2]:.3f} rg",
+                        f"1 0 0 1 {column_x:.2f} {hero_y + 34:.2f} Tm",
+                        f"({_pdf_escape_text(value)}) Tj",
+                        "ET",
+                    ]
+                )
             ops.extend(
                 [
                     f"{PDF_CREATOR_SLATE_RGB[0]:.3f} {PDF_CREATOR_SLATE_RGB[1]:.3f} {PDF_CREATOR_SLATE_RGB[2]:.3f} rg",
-                    f"0 {header_y:.2f} {page_width:.2f} {header_height:.2f} re f",
+                    f"{hero_x:.2f} {hero_y:.2f} {hero_width:.2f} 16 re f",
+                    "BT",
+                    "/F1 7.8 Tf",
+                    f"{PDF_CREATOR_META_LABEL_RGB[0]:.3f} {PDF_CREATOR_META_LABEL_RGB[1]:.3f} {PDF_CREATOR_META_LABEL_RGB[2]:.3f} rg",
+                    f"1 0 0 1 {hero_x + 26:.2f} {hero_y + 4.5:.2f} Tm",
+                    "(Document generated automatically by RAGnarok  |  Reserved for internal reporting use) Tj",
+                    "ET",
+                ]
+            )
+            content_card_y = 56.0
+            content_card_height = 520.0
+        else:
+            header_height = 46.0
+            header_y = page_height - header_height - page_margin + 8.0
+            ops.extend(
+                [
+                    f"{PDF_CREATOR_SLATE_RGB[0]:.3f} {PDF_CREATOR_SLATE_RGB[1]:.3f} {PDF_CREATOR_SLATE_RGB[2]:.3f} rg",
+                    f"{page_margin:.2f} {header_y:.2f} {page_width - page_margin * 2:.2f} {header_height:.2f} re f",
                     "BT",
                     "/F2 11 Tf",
                     "1 1 1 rg",
-                    f"1 0 0 1 {margin_x:.2f} {page_height - 28:.2f} Tm",
+                    f"1 0 0 1 {page_margin + 20:.2f} {header_y + 17:.2f} Tm",
                     f"({_pdf_escape_text(title)}) Tj",
                     "ET",
                 ]
             )
+            content_card_y = 56.0
+            content_card_height = 676.0
+        ops.extend(
+            [
+                f"{PDF_CREATOR_CARD_BG_RGB[0]:.3f} {PDF_CREATOR_CARD_BG_RGB[1]:.3f} {PDF_CREATOR_CARD_BG_RGB[2]:.3f} rg",
+                f"{content_card_x:.2f} {content_card_y:.2f} {content_card_width:.2f} {content_card_height:.2f} re f",
+                f"{PDF_CREATOR_CARD_BORDER_RGB[0]:.3f} {PDF_CREATOR_CARD_BORDER_RGB[1]:.3f} {PDF_CREATOR_CARD_BORDER_RGB[2]:.3f} RG",
+                f"{content_card_x:.2f} {content_card_y:.2f} {content_card_width:.2f} {content_card_height:.2f} re S",
+                f"{PDF_CREATOR_SECTION_BG_RGB[0]:.3f} {PDF_CREATOR_SECTION_BG_RGB[1]:.3f} {PDF_CREATOR_SECTION_BG_RGB[2]:.3f} rg",
+                f"{content_card_x + 18:.2f} {content_card_y + content_card_height - 30:.2f} 164 18 re f",
+                "BT",
+                "/F2 7.8 Tf",
+                f"{PDF_CREATOR_SECTION_TEXT_RGB[0]:.3f} {PDF_CREATOR_SECTION_TEXT_RGB[1]:.3f} {PDF_CREATOR_SECTION_TEXT_RGB[2]:.3f} rg",
+                f"1 0 0 1 {content_card_x + 28:.2f} {content_card_y + content_card_height - 18:.2f} Tm",
+                f"({_pdf_escape_text('ANALYSIS COMPLETE' if page_index == 0 else 'ANALYSIS CONTINUED')}) Tj",
+                "ET",
+            ]
+        )
         ops.extend(
             [
                 "BT",
                 "/F1 9 Tf",
                 f"{PDF_CREATOR_MUTED_RGB[0]:.3f} {PDF_CREATOR_MUTED_RGB[1]:.3f} {PDF_CREATOR_MUTED_RGB[2]:.3f} rg",
-                f"1 0 0 1 {margin_x:.2f} 24.00 Tm",
+                f"1 0 0 1 {page_margin:.2f} 24.00 Tm",
                 f"({_pdf_escape_text(f'{generated_label}  |  Page {page_index + 1}')}) Tj",
                 "ET",
             ]
@@ -3670,10 +3837,10 @@ def _pdf_content_stream_for_document(
             required = 14 + len(lines) * 24
             ensure_space(required)
             cursor_y -= 4
-            add_text_lines(lines, margin_x, "F2", 18, 22, PDF_CREATOR_SLATE_RGB)
+            add_text_lines(lines, content_left, "F2", 18, 22, PDF_CREATOR_SLATE_RGB)
             pages[page_index].append(
                 f"{PDF_CREATOR_ACCENT_RGB[0]:.3f} {PDF_CREATOR_ACCENT_RGB[1]:.3f} {PDF_CREATOR_ACCENT_RGB[2]:.3f} rg\n"
-                f"{margin_x:.2f} {cursor_y + 8:.2f} 26 2 re f"
+                f"{content_left:.2f} {cursor_y + 8:.2f} 34 2 re f"
             )
             cursor_y -= 10
             continue
@@ -3682,17 +3849,68 @@ def _pdf_content_stream_for_document(
             required = 10 + len(lines) * 19
             ensure_space(required)
             cursor_y -= 2
-            add_text_lines(lines, margin_x, "F2", 13 if kind == "heading_2" else 12, 17, PDF_CREATOR_SLATE_RGB)
+            add_text_lines(lines, content_left, "F2", 13 if kind == "heading_2" else 12, 17, PDF_CREATOR_SLATE_RGB)
             cursor_y -= 6
+            continue
+        if kind == "metric":
+            label = _markdown_inline_to_plain_text(str(block.get("label") or ""))
+            value = _markdown_inline_to_plain_text(str(block.get("value") or ""))
+            label_lines = _wrap_text_for_pdf(label, 28)
+            value_lines = _wrap_text_for_pdf(value, 42)
+            line_count = max(len(label_lines), len(value_lines), 1)
+            row_height = 14 + line_count * 13
+            ensure_space(row_height + 6)
+            row_bottom = cursor_y - row_height + 3
+            pages[page_index].append(
+                f"{PDF_CREATOR_SECTION_BG_RGB[0]:.3f} {PDF_CREATOR_SECTION_BG_RGB[1]:.3f} {PDF_CREATOR_SECTION_BG_RGB[2]:.3f} rg\n"
+                f"{content_left:.2f} {row_bottom:.2f} {content_width:.2f} {row_height:.2f} re f"
+            )
+            pages[page_index].append(
+                f"{PDF_CREATOR_CARD_BORDER_RGB[0]:.3f} {PDF_CREATOR_CARD_BORDER_RGB[1]:.3f} {PDF_CREATOR_CARD_BORDER_RGB[2]:.3f} RG\n"
+                f"{content_left:.2f} {row_bottom:.2f} {content_width:.2f} {row_height:.2f} re S"
+            )
+            pages[page_index].append(
+                f"{PDF_CREATOR_ACCENT_RGB[0]:.3f} {PDF_CREATOR_ACCENT_RGB[1]:.3f} {PDF_CREATOR_ACCENT_RGB[2]:.3f} rg\n"
+                f"{content_left + 12:.2f} {row_bottom + 8:.2f} 3.5 {row_height - 16:.2f} re f"
+            )
+            row_start_y = cursor_y - 14
+            for line_index in range(line_count):
+                if line_index < len(label_lines):
+                    pages[page_index].extend(
+                        [
+                            "BT",
+                            "/F2 10.5 Tf",
+                            f"{PDF_CREATOR_SLATE_RGB[0]:.3f} {PDF_CREATOR_SLATE_RGB[1]:.3f} {PDF_CREATOR_SLATE_RGB[2]:.3f} rg",
+                            f"1 0 0 1 {content_left + 24:.2f} {row_start_y - line_index * 13:.2f} Tm",
+                            f"({_pdf_escape_text(label_lines[line_index])}) Tj",
+                            "ET",
+                        ]
+                    )
+                if line_index < len(value_lines):
+                    pages[page_index].extend(
+                        [
+                            "BT",
+                            "/F1 10.5 Tf",
+                            f"{PDF_CREATOR_TEXT_RGB[0]:.3f} {PDF_CREATOR_TEXT_RGB[1]:.3f} {PDF_CREATOR_TEXT_RGB[2]:.3f} rg",
+                            f"1 0 0 1 {content_left + content_width * 0.43:.2f} {row_start_y - line_index * 13:.2f} Tm",
+                            f"({_pdf_escape_text(value_lines[line_index])}) Tj",
+                            "ET",
+                        ]
+                    )
+            cursor_y -= row_height + 8
             continue
         if kind == "bullet":
             bullet_lines = _wrap_text_for_pdf(str(block.get("text") or ""), 74)
             required = len(bullet_lines) * 15 + 4
             ensure_space(required)
             if bullet_lines:
-                add_text_lines([f"- {bullet_lines[0]}"], margin_x + 4, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
+                pages[page_index].append(
+                    f"{PDF_CREATOR_ACCENT_RGB[0]:.3f} {PDF_CREATOR_ACCENT_RGB[1]:.3f} {PDF_CREATOR_ACCENT_RGB[2]:.3f} rg\n"
+                    f"{content_left:.2f} {cursor_y - 5:.2f} 5 5 re f"
+                )
+                add_text_lines([bullet_lines[0]], content_left + 14, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
                 if len(bullet_lines) > 1:
-                    add_text_lines(bullet_lines[1:], margin_x + 18, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
+                    add_text_lines(bullet_lines[1:], content_left + 14, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
             cursor_y -= 2
             continue
         if kind == "code":
@@ -3705,21 +3923,21 @@ def _pdf_content_stream_for_document(
             rect_bottom = cursor_y - rect_height + 4
             pages[page_index].append(
                 f"{PDF_CREATOR_CODE_BG_RGB[0]:.3f} {PDF_CREATOR_CODE_BG_RGB[1]:.3f} {PDF_CREATOR_CODE_BG_RGB[2]:.3f} rg\n"
-                f"{margin_x:.2f} {rect_bottom:.2f} {page_width - margin_x * 2:.2f} {rect_height:.2f} re f"
+                f"{content_left:.2f} {rect_bottom:.2f} {content_width:.2f} {rect_height:.2f} re f"
             )
             pages[page_index].append(
                 f"{PDF_CREATOR_RULE_RGB[0]:.3f} {PDF_CREATOR_RULE_RGB[1]:.3f} {PDF_CREATOR_RULE_RGB[2]:.3f} RG\n"
-                f"{margin_x:.2f} {rect_bottom:.2f} {page_width - margin_x * 2:.2f} {rect_height:.2f} re S"
+                f"{content_left:.2f} {rect_bottom:.2f} {content_width:.2f} {rect_height:.2f} re S"
             )
             cursor_y -= padding
-            add_text_lines(code_lines, margin_x + 10, "F3", 9, leading, PDF_CREATOR_TEXT_RGB)
+            add_text_lines(code_lines, content_left + 10, "F3", 9, leading, PDF_CREATOR_TEXT_RGB)
             cursor_y -= padding + 4
             continue
 
         paragraph_lines = _wrap_text_for_pdf(str(block.get("text") or ""), 84)
         required = len(paragraph_lines) * 15 + 6
         ensure_space(required)
-        add_text_lines(paragraph_lines, margin_x, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
+        add_text_lines(paragraph_lines, content_left, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
         cursor_y -= 6
 
     if not pages:
@@ -4153,6 +4371,7 @@ def _normalize_pdf_creator_state(payload: Optional[dict]) -> dict[str, Any]:
 
 MANAGER_SPECIALIST_LABELS = {
     "clickhouse_query": "ClickHouse Query",
+    "data_analyst": "Data analyst",
     "file_management": "File management",
     "pdf_creator": "PDF creator",
     "oracle_analyst": "Oracle Analyst",
@@ -4192,6 +4411,12 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
         "clickhouse_query": "clickhouse_query",
         "clickhouse": "clickhouse_query",
         "sql": "clickhouse_query",
+        "data analyst": "data_analyst",
+        "data_analyst": "data_analyst",
+        "analyst": "data_analyst",
+        "analysis agent": "data_analyst",
+        "clickhouse analyst": "data_analyst",
+        "analytics agent": "data_analyst",
         "file management": "file_management",
         "file manager": "file_management",
         "file_management": "file_management",
@@ -4307,6 +4532,7 @@ def _manager_trimmed_history(history: list[dict[str, Any]], limit: int = 10) -> 
 
 def _manager_specialist_state_summary(
     clickhouse_state: dict[str, Any],
+    data_analyst_state: dict[str, Any],
     file_manager_state: dict[str, Any],
     pdf_creator_state: dict[str, Any],
     oracle_state: dict[str, Any],
@@ -4318,6 +4544,13 @@ def _manager_specialist_state_summary(
         "selected_table": clickhouse_state.get("selected_table"),
         "has_last_sql": bool(clickhouse_state.get("last_sql")),
         "has_last_rows": bool(clickhouse_state.get("last_result_rows")),
+    }
+    data_analyst_summary = {
+        "stage": data_analyst_state.get("stage") or "idle",
+        "selected_table": data_analyst_state.get("selected_table"),
+        "last_sql_count": len(data_analyst_state.get("last_sqls") or []),
+        "has_last_rows": bool(data_analyst_state.get("last_result_rows")),
+        "last_export_path": data_analyst_state.get("last_export_path") or "",
     }
     file_summary = {
         "pending_confirmation": bool(file_manager_state.get("pending_confirmation")),
@@ -4352,6 +4585,7 @@ def _manager_specialist_state_summary(
                 "pending_pipeline": (manager_state or {}).get("pending_pipeline"),
             },
             "clickhouse": clickhouse_summary,
+            "data_analyst": data_analyst_summary,
             "file_management": file_summary,
             "pdf_creator": pdf_summary,
             "oracle_analyst": oracle_summary,
@@ -4640,6 +4874,7 @@ def _heuristic_manager_delegate(
     user_message: str,
     manager_state: dict[str, Any],
     clickhouse_state: dict[str, Any],
+    data_analyst_state: dict[str, Any],
     file_manager_state: dict[str, Any],
     pdf_creator_state: dict[str, Any],
     oracle_state: dict[str, Any],
@@ -4653,6 +4888,8 @@ def _heuristic_manager_delegate(
         return "file_management", "Continuing the active file-management confirmation flow."
     if active_delegate == "clickhouse_query" and _clickhouse_state_needs_followup(clickhouse_state):
         return "clickhouse_query", "Continuing the active ClickHouse clarification flow."
+    if active_delegate == "data_analyst" and _data_analyst_state_needs_followup(data_analyst_state):
+        return "data_analyst", "Continuing the active Data analyst table-selection flow."
     if active_delegate == "pdf_creator" and _pdf_creator_state_needs_followup(pdf_creator_state):
         return "pdf_creator", "Continuing the active PDF-creation flow."
     if active_delegate == "oracle_analyst" and _oracle_state_needs_followup(oracle_state):
@@ -4669,6 +4906,8 @@ def _heuristic_manager_delegate(
 
     if _clickhouse_state_needs_followup(clickhouse_state):
         return "clickhouse_query", "The user is continuing a ClickHouse clarification step."
+    if _data_analyst_state_needs_followup(data_analyst_state):
+        return "data_analyst", "The user is continuing a Data analyst clarification step."
     if _pdf_creator_state_needs_followup(pdf_creator_state):
         return "pdf_creator", "The user is continuing a PDF export clarification or confirmation."
     if _oracle_state_needs_followup(oracle_state):
@@ -4685,6 +4924,8 @@ def _heuristic_manager_delegate(
 
     if clickhouse_state.get("last_result_rows") and is_chart_followup_request(user_message):
         return "clickhouse_query", "The user is continuing the latest ClickHouse result with a chart follow-up."
+    if data_analyst_state.get("last_result_rows") and _data_analyst_export_requested(user_message):
+        return "data_analyst", "The user is asking the Data analyst to export the latest analytical dataset to CSV."
 
     file_tokens = [
         "file",
@@ -4808,6 +5049,51 @@ def _heuristic_manager_delegate(
         "derive des donnees",
         "qualite des colonnes",
     ]
+    data_analyst_tokens = [
+        "analyze",
+        "analysis",
+        "analyse",
+        "analyses",
+        "deep dive",
+        "investigate",
+        "investigation",
+        "root cause",
+        "why did",
+        "why is",
+        "diagnose",
+        "diagnostic",
+        "break down",
+        "breakdown",
+        "segment",
+        "cohort",
+        "retention",
+        "funnel",
+        "compare",
+        "comparison",
+        "driver",
+        "drivers",
+        "insight",
+        "insights",
+        "drill down",
+        "trend analysis",
+        "what changed",
+        "pourquoi",
+        "analyse approfondie",
+        "analyse complexe",
+        "investigue",
+        "investiguer",
+        "diagnostique",
+        "cause racine",
+        "segmente",
+        "segmenter",
+        "cohorte",
+        "entonnoir",
+        "comparer",
+        "derive",
+        "derivee",
+        "insight",
+        "insights",
+    ]
     file_action_tokens = [
         "create",
         "make",
@@ -4873,6 +5159,7 @@ def _heuristic_manager_delegate(
 
     file_hit = file_creation_or_edit_hit or any(token in normalized for token in file_tokens)
     clickhouse_hit = any(token in normalized for token in clickhouse_tokens)
+    data_analyst_hit = any(token in normalized for token in data_analyst_tokens)
     oracle_hit = any(token in normalized for token in oracle_tokens)
     pdf_hit = any(token in normalized for token in MANAGER_PDF_KEYWORDS)
     data_quality_hit = any(token in normalized for token in data_quality_tokens)
@@ -4886,6 +5173,8 @@ def _heuristic_manager_delegate(
 
     if data_quality_hit and not file_hit:
         return "data_quality_tables", "The request is explicitly about table profiling or data-quality analysis."
+    if clickhouse_hit and data_analyst_hit and not data_quality_hit:
+        return "data_analyst", "The request asks for a deeper analytical investigation on ClickHouse data."
     if oracle_hit and not data_quality_hit:
         return "oracle_analyst", "The request explicitly targets Oracle analysis or Oracle SQL work."
     if pdf_hit and not clickhouse_hit and not data_quality_hit:
@@ -4904,6 +5193,7 @@ async def analyze_manager_routing(
     history: list[dict[str, Any]],
     manager_state: dict[str, Any],
     clickhouse_state: dict[str, Any],
+    data_analyst_state: dict[str, Any],
     file_manager_state: dict[str, Any],
     pdf_creator_state: dict[str, Any],
     oracle_state: dict[str, Any],
@@ -4917,6 +5207,7 @@ async def analyze_manager_routing(
         user_message,
         manager_state,
         clickhouse_state,
+        data_analyst_state,
         file_manager_state,
         pdf_creator_state,
         oracle_state,
@@ -4937,6 +5228,7 @@ Choose which specialist should handle the next turn.
 Available delegates:
 - manager: use this when no specialist tool is needed and the manager can answer directly.
 - clickhouse_query: use this for SQL, schemas, tables, analytics, metrics, database exploration, and charts from ClickHouse data.
+- data_analyst: use this for multi-step ClickHouse investigations, deeper business analysis, iterative evidence gathering, CSV export of the latest dataset, and optional knowledge-base lookups.
 - file_management: use this for filesystem actions, directories, files, CSV/Excel/Word/Parquet handling, create/edit/move/delete operations.
 - pdf_creator: use this to create a clean, professional PDF export from an analysis, a report, or the latest relevant result in the chat.
 - oracle_analyst: use this for Oracle database discovery, Oracle SQL generation, schema inspection, query validation, and narrative business answers from Oracle data.
@@ -4945,7 +5237,7 @@ Available delegates:
 If more than one specialist could be relevant, choose the one that should act first.
 Return JSON only with this exact shape:
 {{
-  "delegate": "manager" | "clickhouse_query" | "file_management" | "pdf_creator" | "oracle_analyst" | "data_quality_tables",
+  "delegate": "manager" | "clickhouse_query" | "data_analyst" | "file_management" | "pdf_creator" | "oracle_analyst" | "data_quality_tables",
   "reasoning": "short English explanation",
   "handoff_message": "short English specialist instruction preserving the user's intent"
 }}
@@ -4962,7 +5254,7 @@ Current manager state:
 {json.dumps(manager_state, ensure_ascii=False, indent=2)}
 
 Current specialist state summary:
-{_manager_specialist_state_summary(clickhouse_state, file_manager_state, pdf_creator_state, oracle_state, data_quality_state, manager_state)}
+{_manager_specialist_state_summary(clickhouse_state, data_analyst_state, file_manager_state, pdf_creator_state, oracle_state, data_quality_state, manager_state)}
 
 Recent conversation:
 {json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
@@ -5336,6 +5628,694 @@ def build_clickhouse_response_markdown(
         sections.append(sql_section)
 
     return "\n\n".join(sections)
+
+
+def _default_data_analyst_state() -> dict[str, Any]:
+    return {
+        "stage": "idle",
+        "pending_request": "",
+        "available_tables": [],
+        "selected_table": None,
+        "table_schema": [],
+        "clarification_prompt": "",
+        "clarification_options": [],
+        "last_sqls": [],
+        "last_result_meta": [],
+        "last_result_rows": [],
+        "final_answer": "",
+        "last_error": "",
+        "last_export_path": "",
+        "knowledge_hits": [],
+    }
+
+
+def _normalize_data_analyst_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_data_analyst_state()
+    if not isinstance(payload, dict):
+        return state
+
+    stage = str(payload.get("stage") or "").strip()
+    if stage in {"awaiting_table", "ready"}:
+        state["stage"] = stage
+
+    state["pending_request"] = str(payload.get("pending_request") or payload.get("pendingRequest") or "").strip()
+    available_tables = payload.get("available_tables") or payload.get("availableTables")
+    if isinstance(available_tables, list):
+        state["available_tables"] = [str(item).strip() for item in available_tables if str(item).strip()]
+    selected_table = payload.get("selected_table") or payload.get("selectedTable")
+    state["selected_table"] = (
+        str(selected_table).strip() or None
+        if selected_table is not None
+        else None
+    )
+    table_schema = payload.get("table_schema") or payload.get("tableSchema") or payload.get("schema")
+    if isinstance(table_schema, list):
+        state["table_schema"] = [
+            {
+                "name": str(column.get("name") or "").strip(),
+                "type": str(column.get("type") or "").strip(),
+                "default_kind": str(column.get("default_kind") or column.get("defaultKind") or "").strip(),
+                "default_expression": str(column.get("default_expression") or column.get("defaultExpression") or "").strip(),
+            }
+            for column in table_schema
+            if isinstance(column, dict) and str(column.get("name") or "").strip()
+        ]
+    state["clarification_prompt"] = str(
+        payload.get("clarification_prompt") or payload.get("clarificationPrompt") or ""
+    ).strip()
+    clarification_options = payload.get("clarification_options") or payload.get("clarificationOptions")
+    if isinstance(clarification_options, list):
+        state["clarification_options"] = [str(item).strip() for item in clarification_options if str(item).strip()]
+    last_sqls = payload.get("last_sqls") or payload.get("lastSqls")
+    if isinstance(last_sqls, list):
+        state["last_sqls"] = [clean_sql_text(str(item)) for item in last_sqls if clean_sql_text(str(item))]
+    last_result_meta = payload.get("last_result_meta") or payload.get("lastResultMeta")
+    if isinstance(last_result_meta, list):
+        state["last_result_meta"] = [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "type": str(item.get("type") or "").strip(),
+            }
+            for item in last_result_meta
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+    last_result_rows = payload.get("last_result_rows") or payload.get("lastResultRows")
+    if isinstance(last_result_rows, list):
+        state["last_result_rows"] = [row for row in last_result_rows if isinstance(row, dict)]
+    state["final_answer"] = str(payload.get("final_answer") or payload.get("finalAnswer") or "").strip()
+    state["last_error"] = str(payload.get("last_error") or payload.get("lastError") or "").strip()
+    state["last_export_path"] = str(payload.get("last_export_path") or payload.get("lastExportPath") or "").strip()
+    knowledge_hits = payload.get("knowledge_hits") or payload.get("knowledgeHits")
+    if isinstance(knowledge_hits, list):
+        state["knowledge_hits"] = [
+            {
+                "doc_name": str(item.get("doc_name") or item.get("docName") or "").strip(),
+                "text": str(item.get("text") or "").strip(),
+                "score": float(item.get("score") or 0.0),
+            }
+            for item in knowledge_hits
+            if isinstance(item, dict)
+        ]
+    return state
+
+
+def _data_analyst_state_needs_followup(state: dict[str, Any]) -> bool:
+    return str(state.get("stage") or "").strip() == "awaiting_table"
+
+
+def _data_analyst_sql_is_valid(sql: str) -> bool:
+    cleaned = clean_sql_text(sql)
+    if not is_safe_read_only_sql(cleaned):
+        return False
+    if re.search(r"\bselect\s+\*", cleaned, flags=re.IGNORECASE):
+        return False
+    return True
+
+
+def _data_analyst_step_label(action_type: str) -> str:
+    labels = {
+        "query": "Query",
+        "search_knowledge": "Knowledge search",
+        "export_csv": "CSV export",
+        "finish": "Final answer",
+    }
+    return labels.get(action_type, action_type.replace("_", " ").title())
+
+
+def _data_analyst_format_step(
+    step_number: int,
+    action_type: str,
+    reasoning: str,
+    result_summary: str,
+    row_count: int,
+    ok: bool,
+    sql: str = "",
+    retried: bool = False,
+    suggested_path: str = "",
+) -> dict[str, Any]:
+    details_lines = []
+    if reasoning:
+        details_lines.append(f"Reasoning: {reasoning}")
+    if result_summary:
+        details_lines.append(f"Result: {result_summary}")
+    details_lines.append(f"Rows: {row_count}")
+    if suggested_path:
+        details_lines.append(f"Suggested path: {suggested_path}")
+    if retried:
+        details_lines.append("Retry: The first SQL failed, so the agent repaired it automatically.")
+    if sql:
+        details_lines.append(f"SQL:\n{clean_sql_text(sql)}")
+    return {
+        "id": f"data-analyst-step-{step_number}",
+        "title": f"Step {step_number} · {_data_analyst_step_label(action_type)}",
+        "status": "success" if ok else "error",
+        "details": "\n\n".join(line for line in details_lines if line),
+        "step": step_number,
+        "type": action_type,
+        "reasoning": reasoning,
+        "sql": clean_sql_text(sql) if sql else "",
+        "result_summary": result_summary,
+        "row_count": row_count,
+        "ok": ok,
+        "retried": retried,
+        "suggested_path": suggested_path,
+    }
+
+
+def _data_analyst_steps_context(steps: list[dict[str, Any]]) -> str:
+    if not steps:
+        return "No prior analytical steps."
+    compact = []
+    for item in steps[-DATA_ANALYST_MAX_STEPS:]:
+        compact.append(
+            {
+                "step": item.get("step"),
+                "type": item.get("type"),
+                "reasoning": _truncate_text_preview(str(item.get("reasoning") or ""), 220),
+                "result_summary": _truncate_text_preview(str(item.get("result_summary") or ""), 420),
+                "row_count": int(item.get("row_count") or 0),
+                "ok": bool(item.get("ok")),
+                "retried": bool(item.get("retried")),
+                "suggested_path": str(item.get("suggested_path") or "").strip(),
+            }
+        )
+    return json.dumps(compact, ensure_ascii=False, indent=2)
+
+
+def _data_analyst_result_preview_text(rows: list[dict[str, Any]], max_rows: int = DATA_ANALYST_RESULT_PREVIEW_ROWS) -> str:
+    preview_rows = rows[:max_rows]
+    if not preview_rows:
+        return "[]"
+    return json.dumps(preview_rows, ensure_ascii=False, indent=2)
+
+
+def _data_analyst_tabular_preview(
+    meta: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    max_rows: int = 8,
+) -> str:
+    preview_rows = rows[:max_rows]
+    if not preview_rows:
+        return ""
+    headers = [
+        str(item.get("name") or "").strip()
+        for item in meta
+        if str(item.get("name") or "").strip()
+    ]
+    if not headers:
+        headers = [str(key) for key in preview_rows[0].keys()]
+    if not headers:
+        return ""
+
+    def _cell(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    header_line = "| " + " | ".join(headers) + " |"
+    divider_line = "| " + " | ".join(["---"] * len(headers)) + " |"
+    body = [
+        "| " + " | ".join(_cell(row.get(header)) for header in headers) + " |"
+        for row in preview_rows
+    ]
+    table = "\n".join([header_line, divider_line, *body])
+    if len(rows) > max_rows:
+        table += f"\n\n_Showing the first {max_rows} rows out of {len(rows)}._"
+    return table
+
+
+def _data_analyst_export_requested(user_message: str) -> bool:
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return False
+    export_tokens = [
+        "export csv",
+        "csv export",
+        "save csv",
+        "write csv",
+        "create csv",
+        "download csv",
+        "exporter csv",
+        "exporter en csv",
+        "creer un csv",
+        "créer un csv",
+        "sauvegarder en csv",
+    ]
+    return any(token in normalized for token in export_tokens) or bool(re.search(r"\bcsv\b", normalized))
+
+
+def _data_analyst_suggest_export_path(user_message: str, table_name: str) -> str:
+    detected = _extract_manager_export_path(user_message, "csv")
+    if detected:
+        return detected if detected.lower().endswith(".csv") else f"{detected}.csv"
+    safe_table = re.sub(r"[^A-Za-z0-9._-]+", "-", table_name or "analysis").strip("-") or "analysis"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"exports/{safe_table}-analysis-{timestamp}.csv"
+
+
+def _data_analyst_unique_export_path(path: str) -> str:
+    candidate_path = path if path.lower().endswith(".csv") else f"{path}.csv"
+    target = _resolve_agent_path(candidate_path)
+    if not target.exists():
+        return candidate_path
+
+    suffix = target.suffix or ".csv"
+    stem = target.stem or "analysis"
+    parent = target.parent
+    counter = 2
+    while True:
+        next_target = parent / f"{stem}-{counter}{suffix}"
+        if not next_target.exists():
+            try:
+                return str(next_target.relative_to(Path.cwd()))
+            except Exception:
+                return str(next_target)
+        counter += 1
+
+
+def _data_analyst_compact_query_summary(
+    meta: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> str:
+    if not rows:
+        return "The query returned no rows."
+    headers = [
+        str(item.get("name") or "").strip()
+        for item in meta
+        if str(item.get("name") or "").strip()
+    ]
+    if not headers:
+        headers = [str(key) for key in rows[0].keys()]
+    preview = rows[:2]
+    preview_text = "; ".join(
+        ", ".join(f"{key}={json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value}" for key, value in row.items())
+        for row in preview
+    )
+    return (
+        f"Returned {len(rows)} row(s)"
+        + (f" with columns {', '.join(headers[:8])}." if headers else ".")
+        + (f" Preview: {preview_text}" if preview_text else "")
+    )
+
+
+def _data_analyst_confidence_score(
+    step_log: list[dict[str, Any]],
+    forced_finish: bool,
+) -> tuple[int, str]:
+    score = 72
+    success_count = sum(1 for step in step_log if step.get("ok"))
+    query_success_count = sum(1 for step in step_log if step.get("ok") and step.get("type") == "query")
+    retry_count = sum(1 for step in step_log if step.get("retried"))
+    error_count = sum(1 for step in step_log if not step.get("ok"))
+    knowledge_count = sum(1 for step in step_log if step.get("type") == "search_knowledge" and step.get("ok"))
+    export_count = sum(1 for step in step_log if step.get("type") == "export_csv" and step.get("ok"))
+
+    score += min(12, query_success_count * 6)
+    score += min(6, knowledge_count * 3)
+    score += min(4, export_count * 2)
+    score -= retry_count * 6
+    score -= error_count * 8
+    if forced_finish:
+        score -= 10
+    score = max(35, min(98, score))
+
+    if score >= 88:
+        reason = "Multiple successful evidence-gathering steps converged on a stable answer."
+    elif score >= 74:
+        reason = "The answer is supported by query results, with only limited uncertainty."
+    elif score >= 60:
+        reason = "The answer is useful, but there were retries or partial signals during the analysis."
+    else:
+        reason = "The answer is directional and should be double-checked with a narrower follow-up query."
+    return score, reason
+
+
+def _app_opensearch_config(app_config: dict) -> Optional[OSConfig]:
+    url = str(app_config.get("elasticsearchUrl") or "").strip()
+    index = str(app_config.get("elasticsearchIndex") or "").strip()
+    if not url or not index:
+        return None
+    return OSConfig(
+        url=url,
+        index=index,
+        username=str(app_config.get("elasticsearchUsername") or "").strip() or None,
+        password=str(app_config.get("elasticsearchPassword") or "").strip() or None,
+    )
+
+
+def _app_embedding_config(app_config: dict) -> dict[str, Any]:
+    return {
+        "embedding_base_url": str(app_config.get("embeddingBaseUrl") or "http://localhost:11434/v1").strip() or "http://localhost:11434/v1",
+        "embedding_api_key": str(app_config.get("embeddingApiKey") or "").strip() or None,
+        "embedding_model": str(app_config.get("embeddingModel") or "nomic-embed-text").strip() or "nomic-embed-text",
+        "embedding_verify_ssl": bool(app_config.get("embeddingVerifySsl", True)),
+        "knn_neighbors": max(1, min(int(app_config.get("knnNeighbors") or 8), 12)),
+    }
+
+
+async def _data_analyst_search_knowledge(
+    query_text: str,
+) -> dict[str, Any]:
+    state = await read_db_state()
+    app_config = state.get("config") or {}
+    os_config = _app_opensearch_config(app_config)
+    if not os_config:
+        return {
+            "ok": False,
+            "summary": "Knowledge-base search is not configured in RAGnarok.",
+            "results": [],
+            "context": "",
+        }
+
+    embedding_config = _app_embedding_config(app_config)
+    try:
+        query_vector = await get_embedding(
+            query_text,
+            embedding_config["embedding_base_url"],
+            embedding_config["embedding_model"],
+            embedding_config["embedding_api_key"],
+            verify_ssl=embedding_config["embedding_verify_ssl"],
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "summary": f"Knowledge search could not compute an embedding: {exc}",
+            "results": [],
+            "context": "",
+        }
+
+    def _search() -> list[dict[str, Any]]:
+        client = get_os_client(os_config.url, os_config.username, os_config.password)
+        if not client.indices.exists(index=os_config.index):
+            return []
+        response = client.search(
+            index=os_config.index,
+            body={
+                "size": embedding_config["knn_neighbors"],
+                "query": {
+                    "knn": {
+                        "embedding": {
+                            "vector": query_vector,
+                            "k": embedding_config["knn_neighbors"],
+                        }
+                    }
+                },
+                "_source": ["doc_name", "text"],
+            },
+        )
+        return [
+            {
+                "doc_name": hit.get("_source", {}).get("doc_name", "document"),
+                "text": hit.get("_source", {}).get("text", ""),
+                "score": float(hit.get("_score") or 0.0),
+            }
+            for hit in response.get("hits", {}).get("hits", [])
+        ]
+
+    try:
+        results = await asyncio.to_thread(_search)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "summary": f"Knowledge search failed: {exc}",
+            "results": [],
+            "context": "",
+        }
+
+    if not results:
+        return {
+            "ok": True,
+            "summary": "No relevant knowledge-base documents were found.",
+            "results": [],
+            "context": "",
+        }
+
+    for item in results:
+        item["score"] = item["score"] * 0.7 + keyword_score(query_text, item.get("text", "")) * 0.3
+    ranked = sorted(results, key=lambda item: item.get("score", 0.0), reverse=True)[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
+    summary = "Top knowledge signals: " + "; ".join(
+        f"{item['doc_name']} (score {item['score']:.2f})"
+        for item in ranked
+    )
+    context = "\n\n".join(
+        f"[{item['doc_name']}]\n{_truncate_text_preview(str(item.get('text') or ''), 700)}"
+        for item in ranked
+    )
+    return {
+        "ok": True,
+        "summary": summary,
+        "results": ranked,
+        "context": context,
+    }
+
+
+async def plan_data_analyst_step(
+    user_request: str,
+    selected_table: str,
+    schema: list[dict[str, Any]],
+    conversation_memory: str,
+    step_log: list[dict[str, Any]],
+    max_steps: int,
+    used_steps: int,
+    export_requested: bool,
+    knowledge_enabled: bool,
+    last_result_rows: list[dict[str, Any]],
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> dict[str, Any]:
+    schema_lines = "\n".join(
+        f"- {column.get('name')}: {column.get('type')}"
+        for column in schema[:160]
+    )
+    prompt = f"""
+You are an autonomous ClickHouse data analyst agent.
+Your goal is to answer the user's question through a sequence of targeted analytical actions.
+You may use up to {max_steps} credited actions. Each action must add genuinely new evidence.
+
+Return JSON only with this exact shape:
+{{
+  "action": "query|search_knowledge|export_csv|finish",
+  "reasoning": "short English explanation",
+  "sql": "SELECT ...",
+  "knowledge_query": "optional short knowledge-base search query",
+  "suggested_path": "optional csv path",
+  "final_answer": "markdown answer when action=finish"
+}}
+
+Rules:
+- Reply in English.
+- Use only the ClickHouse table `{selected_table}` for SQL in this turn.
+- NEVER use SELECT *.
+- Keep SQL read-only and explicit.
+- Add LIMIT when returning raw rows.
+- Use advanced ClickHouse functions only when they clearly help the analysis.
+- Prefer BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD' for fixed date windows.
+- `search_knowledge` is {"enabled" if knowledge_enabled else "disabled"}.
+- `export_csv` is {"allowed because the user explicitly requested CSV export" if export_requested else "disabled unless the user explicitly requests CSV export"}.
+- Use `export_csv` only after at least one successful query produced rows.
+- When the evidence is sufficient, choose `finish`.
+- If you have already used {used_steps} of {max_steps} actions, be economical.
+- If {used_steps} >= {max_steps}, you MUST choose `finish`.
+
+Database table: {selected_table}
+Schema:
+{schema_lines}
+
+Recent conversation memory:
+{conversation_memory}
+
+Completed analytical steps:
+{_data_analyst_steps_context(step_log)}
+
+Latest query preview:
+{_data_analyst_result_preview_text(last_result_rows)}
+
+User request:
+{user_request}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    return {
+        "action": str(parsed.get("action") or "").strip().lower(),
+        "reasoning": str(parsed.get("reasoning") or "").strip(),
+        "sql": clean_sql_text(str(parsed.get("sql") or "")),
+        "knowledge_query": str(parsed.get("knowledge_query") or parsed.get("knowledgeQuery") or "").strip(),
+        "suggested_path": str(parsed.get("suggested_path") or parsed.get("suggestedPath") or "").strip(),
+        "final_answer": str(parsed.get("final_answer") or parsed.get("finalAnswer") or "").strip(),
+    }
+
+
+async def repair_data_analyst_sql(
+    user_request: str,
+    selected_table: str,
+    schema: list[dict[str, Any]],
+    failed_sql: str,
+    error_feedback: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+    query_limit: int,
+) -> dict[str, str]:
+    schema_lines = "\n".join(
+        f"- {column.get('name')}: {column.get('type')}"
+        for column in schema[:160]
+    )
+    prompt = f"""
+You are repairing a failed ClickHouse SQL query.
+Generate a simpler safe replacement query and return JSON only:
+{{
+  "sql": "SELECT ...",
+  "reasoning": "short English explanation"
+}}
+
+Rules:
+- Use only table `{selected_table}`.
+- NEVER use SELECT *.
+- Keep the query read-only.
+- Avoid CTEs, nested subqueries, window functions, and advanced functions unless absolutely necessary.
+- Prefer COUNT, SUM, AVG, MIN, MAX, GROUP BY, ORDER BY, and BETWEEN.
+- Add LIMIT {max(1, min(int(query_limit or 200), 1000))} if raw rows are returned.
+
+Schema:
+{schema_lines}
+
+User request:
+{user_request}
+
+Failed SQL:
+{failed_sql}
+
+Database error:
+{error_feedback}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    sql = enforce_query_limit(clean_sql_text(str(parsed.get("sql") or "")), query_limit)
+    return {
+        "sql": sql,
+        "reasoning": str(parsed.get("reasoning") or "").strip(),
+    }
+
+
+async def synthesize_data_analyst_answer(
+    user_request: str,
+    selected_table: str,
+    conversation_memory: str,
+    step_log: list[dict[str, Any]],
+    last_result_meta: list[dict[str, Any]],
+    last_result_rows: list[dict[str, Any]],
+    knowledge_hits: list[dict[str, Any]],
+    forced_finish: bool,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> str:
+    prompt = f"""
+You are finishing a complex ClickHouse analysis for an end user.
+Write the final answer in English as concise business-facing Markdown.
+
+Required structure:
+- `## Executive Summary`
+- `## Key Findings`
+- `## Recommendations`
+
+Rules:
+- Keep the tone functional, clear, and decisive.
+- Use short paragraphs or flat bullet points.
+- Highlight the most important values with **bold**.
+- Do not include SQL sections or code fences here.
+- If the evidence is partial, say so honestly.
+
+Selected table: {selected_table}
+Forced finish: {"yes" if forced_finish else "no"}
+
+Recent conversation memory:
+{conversation_memory}
+
+Analytical steps:
+{_data_analyst_steps_context(step_log)}
+
+Latest query preview:
+{_data_analyst_result_preview_text(last_result_rows)}
+
+Knowledge signals:
+{json.dumps([
+    {
+        "doc_name": item.get("doc_name"),
+        "score": item.get("score"),
+        "text": _truncate_text_preview(str(item.get("text") or ""), 300),
+    }
+    for item in knowledge_hits[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
+], ensure_ascii=False, indent=2)}
+
+User request:
+{user_request}
+""".strip()
+
+    return await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+    )
+
+
+def build_data_analyst_response_markdown(
+    final_body: str,
+    executed_sqls: list[str],
+    last_result_meta: list[dict[str, Any]],
+    last_result_rows: list[dict[str, Any]],
+    knowledge_hits: list[dict[str, Any]],
+    last_export_path: str,
+    confidence_score: int,
+    confidence_reason: str,
+) -> str:
+    sections = [str(final_body or "").strip() or "## Executive Summary\nThe analysis completed, but no final narrative could be generated."]
+    preview_table = _data_analyst_tabular_preview(last_result_meta, last_result_rows)
+    if preview_table:
+        sections.append("## Data Preview\n" + preview_table)
+    if knowledge_hits:
+        knowledge_lines = "\n".join(
+            f"- **{item.get('doc_name') or 'Document'}**: {_truncate_text_preview(str(item.get('text') or ''), 180)}"
+            for item in knowledge_hits[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
+        )
+        sections.append("## Knowledge Signals\n" + knowledge_lines)
+    if last_export_path:
+        sections.append(
+            "## CSV Export\n"
+            f"The latest dataset was exported to `{last_export_path}`."
+        )
+    sections.append(
+        "## Confidence\n"
+        f"**Score:** {confidence_score}/100\n\n{confidence_reason}"
+    )
+    sql_section = _build_clickhouse_sql_section(executed_sqls)
+    if sql_section:
+        sections.append(sql_section)
+    return "\n\n".join(section for section in sections if section.strip())
 
 
 def _default_oracle_analyst_state() -> dict[str, Any]:
@@ -6072,6 +7052,7 @@ def _planning_summary_markdown(draft: dict, missing_fields: list[str]) -> str:
 
 async def analyze_planning_request(
     user_message: str,
+    history: list[dict[str, Any]],
     current_draft: dict,
     llm_base_url: str,
     llm_model: str,
@@ -6118,6 +7099,9 @@ Only fill fields when the user clearly implies them or they already exist in the
 
 Current draft:
 {json.dumps(current_draft, ensure_ascii=False, indent=2)}
+
+Recent conversation memory:
+{_conversation_memory_markdown(history, current_message=user_message)}
 
 User message:
 {user_message}
@@ -7048,6 +8032,23 @@ class DataQualityAgentStateModel(BaseModel):
     date_columns: list[str] = Field(default_factory=list)
 
 
+class DataAnalystAgentStateModel(BaseModel):
+    stage: str = "idle"
+    pending_request: str = ""
+    available_tables: list[str] = Field(default_factory=list)
+    selected_table: Optional[str] = None
+    table_schema: list[dict] = Field(default_factory=list)
+    clarification_prompt: str = ""
+    clarification_options: list[str] = Field(default_factory=list)
+    last_sqls: list[str] = Field(default_factory=list)
+    last_result_meta: list[dict] = Field(default_factory=list)
+    last_result_rows: list[dict] = Field(default_factory=list)
+    final_answer: str = ""
+    last_error: str = ""
+    last_export_path: str = ""
+    knowledge_hits: list[dict] = Field(default_factory=list)
+
+
 class DataQualityAgentRequest(BaseModel):
     message: str
     history: list[dict] = []
@@ -7057,6 +8058,18 @@ class DataQualityAgentRequest(BaseModel):
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
     agent_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
+
+
+class DataAnalystAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    clickhouse: ClickHouseConfig
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    max_steps: int = DATA_ANALYST_DEFAULT_MAX_STEPS
+    agent_state: DataAnalystAgentStateModel = Field(default_factory=DataAnalystAgentStateModel)
 
 
 class DataQualityMetadataRequest(BaseModel):
@@ -7079,6 +8092,7 @@ class ManagerAgentRequest(BaseModel):
     pdf_creator_state: PdfCreatorAgentStateModel = Field(default_factory=PdfCreatorAgentStateModel)
     oracle_analyst_state: OracleAnalystAgentStateModel = Field(default_factory=OracleAnalystAgentStateModel)
     data_quality_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
+    data_analyst_state: DataAnalystAgentStateModel = Field(default_factory=DataAnalystAgentStateModel)
     oracle_connections: list[OracleConnectionConfig] = Field(default_factory=list)
     oracle_analyst_config: OracleAnalystConfigModel = Field(default_factory=OracleAnalystConfigModel)
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
@@ -7374,6 +8388,7 @@ async def chat_crewai_planning(req: PlanningChatRequest):
 
     analysis = await analyze_planning_request(
         user_message,
+        req.history,
         current_draft,
         req.llm_base_url,
         req.llm_model,
@@ -8397,6 +9412,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
     user_message = (req.message or "").strip()
     normalized_choice = normalize_choice(user_message)
     normalized_lower = normalized_choice.lower()
+    conversation_memory = _conversation_memory_markdown(req.history, current_message=user_message)
     state = _normalize_data_quality_state(req.agent_state.model_dump())
     state["agent_id"] = "data_quality_tables"
     state["db_type"] = "clickhouse"
@@ -8447,6 +9463,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
 
         llm_analysis = await data_quality_llm_analysis_node(
             execution_state,
+            conversation_memory,
             req.llm_base_url,
             req.llm_model,
             req.llm_provider,
@@ -8490,6 +9507,15 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
                 }
             ],
         }
+
+    async def _run_data_quality_analysis_safe(current_state: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await _run_data_quality_analysis(current_state)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            current_state["last_error"] = str(exc)
+            raise HTTPException(status_code=400, detail=f"Data-quality analysis failed: {exc}") from exc
 
     start_over_requested = any(
         token in normalized_lower for token in ["start over", "reset", "new analysis", "clear analysis"]
@@ -8547,7 +9573,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
         else:
             state["time_column"] = None
 
-        return await _run_data_quality_analysis(state)
+        return await _run_data_quality_analysis_safe(state)
 
     if state.get("stage") == "ready" and user_message:
         state = _default_data_quality_state()
@@ -9049,7 +10075,7 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
             selected_review_action = "Launch analysis"
 
         if selected_review_action == "Launch analysis":
-            return await _run_data_quality_analysis(state)
+            return await _run_data_quality_analysis_safe(state)
         if selected_review_action == "Edit table":
             state["stage"] = "awaiting_table"
             return {
@@ -9233,11 +10259,543 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
     }
 
 
+@app.post("/api/chat/data-analyst-agent")
+async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
+    user_message = (req.message or "").strip()
+    state = _normalize_data_analyst_state(req.agent_state.model_dump())
+    max_steps = max(1, min(int(req.max_steps or DATA_ANALYST_DEFAULT_MAX_STEPS), DATA_ANALYST_MAX_STEPS))
+    memory_anchor = state.get("pending_request") or user_message
+    conversation_memory = _conversation_memory_markdown(
+        req.history,
+        current_message=memory_anchor,
+        max_steps=CHAT_MEMORY_MAX_STEPS,
+    )
+
+    try:
+        state["available_tables"] = state["available_tables"] or await list_clickhouse_tables(req.clickhouse)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"ClickHouse connection error: {exc}") from exc
+
+    if not state["available_tables"]:
+        raise HTTPException(status_code=400, detail="No tables were found in the configured ClickHouse database.")
+
+    explicit_table_switch = resolve_user_choice(user_message, state["available_tables"])
+    if state.get("selected_table") and explicit_table_switch and explicit_table_switch != state.get("selected_table"):
+        state["selected_table"] = explicit_table_switch
+        state["table_schema"] = []
+        state["last_sqls"] = []
+        state["last_result_meta"] = []
+        state["last_result_rows"] = []
+        state["final_answer"] = ""
+        state["last_error"] = ""
+        state["last_export_path"] = ""
+        state["knowledge_hits"] = []
+        state["pending_request"] = ""
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        state["stage"] = "ready"
+
+    if not user_message:
+        return {
+            "answer": (
+                "## Data Analyst Agent\n"
+                "Ask a complex business question about your ClickHouse data, and I will gather evidence through several analytical steps.\n\n"
+                f"- **Database:** `{req.clickhouse.database}`\n"
+                f"- **Max credited actions:** {max_steps}\n"
+                "- **Capabilities:** multi-step query loop, optional knowledge-base lookup, safe SQL retry, and CSV export when you explicitly request it.\n"
+                f"- **Current table focus:** `{state.get('selected_table') or 'not selected yet'}`"
+            ),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "data-analyst-ready",
+                    "title": "Ready for multi-step analysis",
+                    "status": "success",
+                    "details": "The agent is ready to inspect ClickHouse tables, run iterative queries, and synthesize a business-facing answer.",
+                }
+            ],
+        }
+
+    if state.get("stage") == "awaiting_table":
+        table_options = state.get("clarification_options") or state["available_tables"][:DATA_ANALYST_TABLE_OPTION_LIMIT]
+        selected_table = resolve_user_choice(user_message, table_options) or resolve_user_choice(user_message, state["available_tables"])
+        if not selected_table:
+            return {
+                "answer": build_choice_markdown(
+                    "Table Clarification",
+                    state.get("clarification_prompt") or "Which table should I use for this analysis?",
+                    table_options,
+                ),
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "data-analyst-await-table",
+                        "title": "Waiting for table selection",
+                        "status": "running",
+                        "details": "The analysis needs one primary ClickHouse table before it can continue.",
+                    }
+                ],
+            }
+        state["selected_table"] = selected_table
+        state["stage"] = "ready"
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        user_message = state.get("pending_request") or user_message
+
+    current_request = state.get("pending_request") or user_message
+    if not state.get("selected_table"):
+        direct_table = resolve_user_choice(current_request, state["available_tables"])
+        if direct_table:
+            state["selected_table"] = direct_table
+            state["stage"] = "ready"
+        elif len(state["available_tables"]) == 1:
+            state["selected_table"] = state["available_tables"][0]
+            state["stage"] = "ready"
+        else:
+            state["pending_request"] = current_request
+            table_analysis = await analyze_clickhouse_tables(
+                current_request,
+                state["available_tables"],
+                conversation_memory,
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+            )
+            matched_candidates = match_available_options(
+                table_analysis.get("table_candidates") or [],
+                state["available_tables"],
+            )
+            matched_selected = match_available_options(
+                [table_analysis.get("selected_table") or ""],
+                state["available_tables"],
+            )
+            if matched_selected and not table_analysis.get("table_choice_required"):
+                state["selected_table"] = matched_selected[0]
+                state["stage"] = "ready"
+            elif len(matched_candidates) == 1 and not table_analysis.get("table_choice_required"):
+                state["selected_table"] = matched_candidates[0]
+                state["stage"] = "ready"
+            else:
+                state["stage"] = "awaiting_table"
+                state["clarification_prompt"] = (
+                    str(table_analysis.get("table_choice_prompt") or "").strip()
+                    or "Which table should I use for this analysis?"
+                )
+                state["clarification_options"] = (matched_candidates or state["available_tables"])[:DATA_ANALYST_TABLE_OPTION_LIMIT]
+                return {
+                    "answer": build_choice_markdown(
+                        "Table Clarification",
+                        state["clarification_prompt"],
+                        state["clarification_options"],
+                    ),
+                    "agent_state": state,
+                    "steps": [
+                        {
+                            "id": "data-analyst-table-routing",
+                            "title": "Need table confirmation",
+                            "status": "running",
+                            "details": str(table_analysis.get("reasoning") or "Several tables remain plausible for the current analysis request."),
+                        }
+                    ],
+                }
+
+    current_request = user_message or state.get("pending_request") or ""
+    if not current_request:
+        return {
+            "answer": (
+                f"## Data Analyst Agent\nI am ready to work from table `{state.get('selected_table')}`.\n\n"
+                "Ask a complex analytical question, and I will decide which evidence-gathering steps to run next."
+            ),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "data-analyst-await-request",
+                    "title": "Waiting for analytical request",
+                    "status": "running",
+                    "details": "The primary table is selected, but the user has not asked the actual analysis question yet.",
+                }
+            ],
+        }
+
+    state["pending_request"] = current_request
+    state["clarification_prompt"] = ""
+    state["clarification_options"] = []
+
+    if not state.get("table_schema"):
+        try:
+            state["table_schema"] = await describe_clickhouse_table(req.clickhouse, str(state["selected_table"]))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {state['selected_table']}: {exc}") from exc
+
+    if not state["table_schema"]:
+        raise HTTPException(status_code=400, detail=f"Table '{state['selected_table']}' has no readable columns.")
+
+    persisted_state = await read_db_state()
+    knowledge_enabled = _app_opensearch_config((persisted_state or {}).get("config") or {}) is not None
+    export_requested = _data_analyst_export_requested(current_request)
+    if not export_requested:
+        state["last_export_path"] = ""
+    last_result_meta = list(state.get("last_result_meta") or [])
+    last_result_rows = list(state.get("last_result_rows") or [])
+    knowledge_hits = list(state.get("knowledge_hits") or [])
+    executed_sqls: list[str] = []
+    step_log: list[dict[str, Any]] = []
+    last_error = ""
+    absolute_iteration_limit = max_steps * 4
+
+    for _ in range(absolute_iteration_limit):
+        used_steps = len(step_log)
+        if used_steps >= max_steps:
+            break
+
+        planned = await plan_data_analyst_step(
+            current_request,
+            str(state["selected_table"]),
+            state["table_schema"],
+            conversation_memory,
+            step_log,
+            max_steps,
+            used_steps,
+            export_requested,
+            knowledge_enabled,
+            last_result_rows,
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+        action = str(planned.get("action") or "").strip().lower()
+        reasoning = str(planned.get("reasoning") or "").strip() or "The local LLM selected the next analytical action."
+
+        if action == "finish":
+            final_body = str(planned.get("final_answer") or "").strip()
+            if not final_body:
+                final_body = await synthesize_data_analyst_answer(
+                    current_request,
+                    str(state["selected_table"]),
+                    conversation_memory,
+                    step_log,
+                    last_result_meta,
+                    last_result_rows,
+                    knowledge_hits,
+                    forced_finish=False,
+                    llm_base_url=req.llm_base_url,
+                    llm_model=req.llm_model,
+                    llm_provider=req.llm_provider,
+                    llm_api_key=req.llm_api_key,
+                )
+            confidence_score, confidence_reason = _data_analyst_confidence_score(step_log, forced_finish=False)
+            final_answer = build_data_analyst_response_markdown(
+                final_body,
+                executed_sqls or list(state.get("last_sqls") or []),
+                last_result_meta,
+                last_result_rows,
+                knowledge_hits,
+                str(state.get("last_export_path") or ""),
+                confidence_score,
+                confidence_reason,
+            )
+            state["stage"] = "ready"
+            state["pending_request"] = ""
+            state["last_sqls"] = executed_sqls or list(state.get("last_sqls") or [])
+            state["last_result_meta"] = last_result_meta
+            state["last_result_rows"] = last_result_rows[:DATA_ANALYST_MAX_RESULT_ROWS]
+            state["knowledge_hits"] = knowledge_hits[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
+            state["final_answer"] = final_answer
+            state["last_error"] = last_error
+            return {
+                "answer": final_answer,
+                "agent_state": state,
+                "steps": step_log + [
+                    {
+                        "id": "data-analyst-finish",
+                        "title": "Prepared final answer",
+                        "status": "success",
+                        "details": reasoning,
+                        "step": len(step_log) + 1,
+                        "type": "finish",
+                        "reasoning": reasoning,
+                        "result_summary": "The agent consolidated the evidence into the final business-facing answer.",
+                        "row_count": len(last_result_rows),
+                        "ok": True,
+                    }
+                ],
+                "total_steps": len(step_log),
+            }
+
+        if action == "search_knowledge":
+            knowledge_query = str(planned.get("knowledge_query") or "").strip() or current_request
+            search_result = await _data_analyst_search_knowledge(knowledge_query)
+            if search_result.get("ok"):
+                knowledge_hits = list(search_result.get("results") or [])
+            else:
+                last_error = str(search_result.get("summary") or "")
+            step_log.append(
+                _data_analyst_format_step(
+                    len(step_log) + 1,
+                    "search_knowledge",
+                    reasoning,
+                    str(search_result.get("summary") or "Knowledge search completed."),
+                    len(search_result.get("results") or []),
+                    bool(search_result.get("ok")),
+                )
+            )
+            continue
+
+        if action == "export_csv":
+            export_path = _data_analyst_unique_export_path(
+                str(planned.get("suggested_path") or "").strip()
+                or _data_analyst_suggest_export_path(current_request, str(state["selected_table"]))
+            )
+            if not export_requested:
+                last_error = "CSV export is only allowed when the user explicitly asks for it."
+                step_log.append(
+                    _data_analyst_format_step(
+                        len(step_log) + 1,
+                        "export_csv",
+                        reasoning,
+                        last_error,
+                        0,
+                        False,
+                        suggested_path=export_path,
+                    )
+                )
+                continue
+            if not last_result_rows:
+                last_error = "There is no dataset to export yet. Run at least one successful query first."
+                step_log.append(
+                    _data_analyst_format_step(
+                        len(step_log) + 1,
+                        "export_csv",
+                        reasoning,
+                        last_error,
+                        0,
+                        False,
+                        suggested_path=export_path,
+                    )
+                )
+                continue
+            headers, rows = _manager_export_headers_and_rows(
+                {
+                    "last_result_meta": last_result_meta,
+                    "last_result_rows": last_result_rows,
+                }
+            )
+            try:
+                result = create_file_tool(
+                    export_path,
+                    _serialize_delimited_rows(headers, rows, "|"),
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                step_log.append(
+                    _data_analyst_format_step(
+                        len(step_log) + 1,
+                        "export_csv",
+                        reasoning,
+                        f"CSV export failed: {exc}",
+                        len(rows),
+                        False,
+                        suggested_path=export_path,
+                    )
+                )
+                continue
+            state["last_export_path"] = export_path
+            step_log.append(
+                _data_analyst_format_step(
+                    len(step_log) + 1,
+                    "export_csv",
+                    reasoning,
+                    f"{result.get('summary') or 'The CSV export completed successfully.'} The file uses a pipe (`|`) delimiter.",
+                    len(rows),
+                    True,
+                    suggested_path=export_path,
+                )
+            )
+            continue
+
+        if action != "query":
+            last_error = "The analytical planner returned an unsupported action."
+            step_log.append(
+                _data_analyst_format_step(
+                    len(step_log) + 1,
+                    action or "unknown",
+                    reasoning,
+                    last_error,
+                    0,
+                    False,
+                )
+            )
+            continue
+
+        sql = enforce_query_limit(clean_sql_text(str(planned.get("sql") or "")), req.clickhouse.query_limit)
+        retried = False
+        if not _data_analyst_sql_is_valid(sql):
+            repaired = await repair_data_analyst_sql(
+                current_request,
+                str(state["selected_table"]),
+                state["table_schema"],
+                sql,
+                "The proposed SQL was unsafe, empty, or used SELECT *.",
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+                req.clickhouse.query_limit,
+            )
+            sql = repaired["sql"]
+            reasoning = repaired["reasoning"] or reasoning
+            retried = True
+
+        if not _data_analyst_sql_is_valid(sql):
+            last_error = "The generated SQL was rejected because it is not a safe read-only query."
+            step_log.append(
+                _data_analyst_format_step(
+                    len(step_log) + 1,
+                    "query",
+                    reasoning,
+                    last_error,
+                    0,
+                    False,
+                    sql=sql,
+                    retried=retried,
+                )
+            )
+            continue
+
+        try:
+            await execute_clickhouse_sql(req.clickhouse, f"EXPLAIN SYNTAX {sql}", readonly=False, json_format=False)
+            result = await execute_clickhouse_sql(req.clickhouse, sql)
+        except Exception as first_error:
+            repaired = await repair_data_analyst_sql(
+                current_request,
+                str(state["selected_table"]),
+                state["table_schema"],
+                sql,
+                str(first_error),
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+                req.clickhouse.query_limit,
+            )
+            repaired_sql = repaired["sql"]
+            if not _data_analyst_sql_is_valid(repaired_sql):
+                last_error = f"Query failed and the repaired SQL was still unsafe.\nOriginal error: {first_error}"
+                step_log.append(
+                    _data_analyst_format_step(
+                        len(step_log) + 1,
+                        "query",
+                        reasoning,
+                        last_error,
+                        0,
+                        False,
+                        sql=sql,
+                        retried=True,
+                    )
+                )
+                continue
+            try:
+                await execute_clickhouse_sql(req.clickhouse, f"EXPLAIN SYNTAX {repaired_sql}", readonly=False, json_format=False)
+                result = await execute_clickhouse_sql(req.clickhouse, repaired_sql)
+                sql = repaired_sql
+                reasoning = repaired["reasoning"] or reasoning
+                retried = True
+            except Exception as second_error:
+                last_error = f"Query failed twice. First error: {first_error}. Retry error: {second_error}"
+                step_log.append(
+                    _data_analyst_format_step(
+                        len(step_log) + 1,
+                        "query",
+                        reasoning,
+                        last_error,
+                        0,
+                        False,
+                        sql=repaired_sql,
+                        retried=True,
+                    )
+                )
+                continue
+
+        last_result_meta = result.get("meta", [])
+        last_result_rows = (result.get("data") or [])[:DATA_ANALYST_MAX_RESULT_ROWS]
+        executed_sqls.append(sql)
+        state["last_export_path"] = ""
+        summary = _data_analyst_compact_query_summary(last_result_meta, last_result_rows)
+        step_log.append(
+            _data_analyst_format_step(
+                len(step_log) + 1,
+                "query",
+                reasoning,
+                summary,
+                len(result.get("data") or []),
+                True,
+                sql=sql,
+                retried=retried,
+            )
+        )
+
+    final_body = await synthesize_data_analyst_answer(
+        current_request,
+        str(state["selected_table"]),
+        conversation_memory,
+        step_log,
+        last_result_meta,
+        last_result_rows,
+        knowledge_hits,
+        forced_finish=True,
+        llm_base_url=req.llm_base_url,
+        llm_model=req.llm_model,
+        llm_provider=req.llm_provider,
+        llm_api_key=req.llm_api_key,
+    )
+    confidence_score, confidence_reason = _data_analyst_confidence_score(step_log, forced_finish=True)
+    final_answer = build_data_analyst_response_markdown(
+        final_body,
+        executed_sqls or list(state.get("last_sqls") or []),
+        last_result_meta,
+        last_result_rows,
+        knowledge_hits,
+        str(state.get("last_export_path") or ""),
+        confidence_score,
+        confidence_reason,
+    )
+    state["stage"] = "ready"
+    state["pending_request"] = ""
+    state["last_sqls"] = executed_sqls or list(state.get("last_sqls") or [])
+    state["last_result_meta"] = last_result_meta
+    state["last_result_rows"] = last_result_rows[:DATA_ANALYST_MAX_RESULT_ROWS]
+    state["knowledge_hits"] = knowledge_hits[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
+    state["final_answer"] = final_answer
+    state["last_error"] = last_error
+    return {
+        "answer": final_answer,
+        "agent_state": state,
+        "steps": step_log + [
+            {
+                "id": "data-analyst-forced-finish",
+                "title": "Reached step budget",
+                "status": "error",
+                "details": "The agent reached the maximum step budget and generated the best final answer it could with the available evidence.",
+                "step": len(step_log) + 1,
+                "type": "finish",
+                "reasoning": "The anti-loop limit forced the agent to stop and synthesize the answer.",
+                "result_summary": "The final answer was synthesized after the step budget was exhausted.",
+                "row_count": len(last_result_rows),
+                "ok": False,
+            }
+        ],
+        "total_steps": len(step_log),
+    }
+
+
 @app.post("/api/chat/manager-agent")
 async def chat_manager_agent(req: ManagerAgentRequest):
     user_message = (req.message or "").strip()
     manager_state = _normalize_manager_agent_state(req.manager_state.model_dump())
     clickhouse_state = dump_clickhouse_agent_state(req.clickhouse_state)
+    data_analyst_state = _normalize_data_analyst_state(req.data_analyst_state.model_dump())
     file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
     pdf_creator_state = _normalize_pdf_creator_state(req.pdf_creator_state.model_dump())
     oracle_analyst_state = _normalize_oracle_analyst_state(req.oracle_analyst_state.model_dump())
@@ -9253,11 +10811,12 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "answer": (
                 "## Agent Manager\n"
                 "Describe the outcome you want, and I will either answer directly or route the task "
-                "to ClickHouse Query, File management, PDF creator, Oracle Analyst, or Data quality - Tables when a specialist is needed."
+                "to ClickHouse Query, Data analyst, File management, PDF creator, Oracle Analyst, or Data quality - Tables when a specialist is needed."
             ),
             "agent_state": {
                 "manager": manager_state,
                 "clickhouse": clickhouse_state,
+                "dataAnalyst": data_analyst_state,
                 "fileManager": file_manager_state,
                 "pdfCreator": pdf_creator_state,
                 "oracleAnalyst": oracle_analyst_state,
@@ -9288,6 +10847,21 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     max_iterations=file_manager_config["maxIterations"],
                     system_prompt=file_manager_config["systemPrompt"],
                 ),
+            )
+        )
+
+    async def _delegate_data_analyst(message: str) -> dict[str, Any]:
+        return await chat_data_analyst_agent(
+            DataAnalystAgentRequest(
+                message=message,
+                history=req.history,
+                clickhouse=req.clickhouse,
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_api_key=req.llm_api_key,
+                llm_provider=req.llm_provider,
+                max_steps=DATA_ANALYST_DEFAULT_MAX_STEPS,
+                agent_state=DataAnalystAgentStateModel(**data_analyst_state),
             )
         )
 
@@ -9344,6 +10918,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                 "agent_state": {
                     "manager": manager_state,
                     "clickhouse": clickhouse_state,
+                    "dataAnalyst": data_analyst_state,
                     "fileManager": file_manager_state,
                     "pdfCreator": pdf_creator_state,
                     "oracleAnalyst": oracle_analyst_state,
@@ -9368,6 +10943,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                 "agent_state": {
                     "manager": manager_state,
                     "clickhouse": clickhouse_state,
+                    "dataAnalyst": data_analyst_state,
                     "fileManager": file_manager_state,
                     "pdfCreator": pdf_creator_state,
                     "oracleAnalyst": oracle_analyst_state,
@@ -9398,6 +10974,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             req.history,
             manager_state,
             clickhouse_state,
+            data_analyst_state,
             file_manager_state,
             pdf_creator_state,
             oracle_analyst_state,
@@ -9446,6 +11023,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "agent_state": {
                 "manager": manager_state,
                 "clickhouse": clickhouse_state,
+                "dataAnalyst": data_analyst_state,
                 "fileManager": file_manager_state,
                 "pdfCreator": pdf_creator_state,
                 "oracleAnalyst": oracle_analyst_state,
@@ -9486,6 +11064,12 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             )
             manager_state["active_delegate"] = (
                 "clickhouse_query" if _clickhouse_state_needs_followup(clickhouse_state) else None
+            )
+        elif delegate == "data_analyst":
+            delegated = await _delegate_data_analyst(routing["handoff_message"])
+            data_analyst_state = _normalize_data_analyst_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "data_analyst" if _data_analyst_state_needs_followup(data_analyst_state) else None
             )
         elif delegate == "file_management":
             delegated = await _delegate_file_manager(routing["handoff_message"])
@@ -9584,6 +11168,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "agent_state": {
                         "manager": manager_state,
                         "clickhouse": clickhouse_state,
+                        "dataAnalyst": data_analyst_state,
                         "fileManager": file_manager_state,
                         "pdfCreator": pdf_creator_state,
                         "oracleAnalyst": oracle_analyst_state,
@@ -9624,6 +11209,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "agent_state": {
                         "manager": manager_state,
                         "clickhouse": clickhouse_state,
+                        "dataAnalyst": data_analyst_state,
                         "fileManager": file_manager_state,
                         "pdfCreator": pdf_creator_state,
                         "oracleAnalyst": oracle_analyst_state,
@@ -9653,6 +11239,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "agent_state": {
                         "manager": manager_state,
                         "clickhouse": clickhouse_state,
+                        "dataAnalyst": data_analyst_state,
                         "fileManager": file_manager_state,
                         "pdfCreator": pdf_creator_state,
                         "oracleAnalyst": oracle_analyst_state,
@@ -9697,6 +11284,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "agent_state": {
                         "manager": manager_state,
                         "clickhouse": clickhouse_state,
+                        "dataAnalyst": data_analyst_state,
                         "fileManager": file_manager_state,
                         "pdfCreator": pdf_creator_state,
                         "oracleAnalyst": oracle_analyst_state,
@@ -9726,6 +11314,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "agent_state": {
                         "manager": manager_state,
                         "clickhouse": clickhouse_state,
+                        "dataAnalyst": data_analyst_state,
                         "fileManager": file_manager_state,
                         "pdfCreator": pdf_creator_state,
                         "oracleAnalyst": oracle_analyst_state,
@@ -9741,6 +11330,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
         "agent_state": {
             "manager": manager_state,
             "clickhouse": clickhouse_state,
+            "dataAnalyst": data_analyst_state,
             "fileManager": file_manager_state,
             "pdfCreator": pdf_creator_state,
             "oracleAnalyst": oracle_analyst_state,

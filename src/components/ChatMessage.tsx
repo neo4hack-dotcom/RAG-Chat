@@ -15,6 +15,56 @@ interface ChatMessageProps {
   showSteps?: boolean;
 }
 
+function extractNodeText(node: React.ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(extractNodeText).join("");
+  if (React.isValidElement(node)) {
+    const element = node as React.ReactElement<{ children?: React.ReactNode }>;
+    return extractNodeText(element.props.children);
+  }
+  return "";
+}
+
+function normalizeChoiceLabel(text: string): string {
+  return text
+    .replace(/^\s*\[(?: |x|X)\]\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasTaskListClassName(className: unknown): boolean {
+  if (typeof className === "string") return className.includes("task-list-item");
+  if (Array.isArray(className)) return className.some((item) => String(item).includes("task-list-item"));
+  return false;
+}
+
+function stepActionLabel(step: AgentStep): string {
+  const rawType = ((step as any).type ?? '').toString().trim();
+  if (!rawType) return '';
+  return rawType.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function stepReasoning(step: AgentStep): string {
+  return ((step as any).reasoning ?? '').toString().trim();
+}
+
+function stepResultSummary(step: AgentStep): string {
+  return (((step as any).result_summary ?? (step as any).resultSummary) ?? '').toString().trim();
+}
+
+function stepSql(step: AgentStep): string {
+  return ((step as any).sql ?? '').toString().trim();
+}
+
+function stepRowCount(step: AgentStep): number | null {
+  const raw = (step as any).row_count ?? (step as any).rowCount;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+}
+
+function stepSuggestedPath(step: AgentStep): string {
+  return (((step as any).suggested_path ?? (step as any).suggestedPath) ?? '').toString().trim();
+}
+
 function MessageCopyButton({ text, isUser }: { text: string; isUser: boolean }) {
   const [copied, setCopied] = useState(false);
 
@@ -354,25 +404,18 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
     ul: ({ children, ...props }: any) => <ul className="list-none pl-0 mb-3 space-y-1" {...props}>{children}</ul>,
     ol: ({ children, ...props }: any) => <ol className="list-decimal pl-5 mb-3 space-y-1 text-[14px] text-gray-800 dark:text-gray-200" {...props}>{children}</ol>,
     li({ node, checked, className, children, ...props }: any) {
-      const isTask = checked !== null && checked !== undefined;
+      const rawText = extractNodeText(children).trim();
+      const choiceLabel = normalizeChoiceLabel(rawText);
+      const looksLikeUncheckedTask = /^\[(?: |x|X)\]\s+/.test(rawText);
+      const isTask = (checked !== null && checked !== undefined) || hasTaskListClassName(className) || looksLikeUncheckedTask;
       if (isTask) {
-        let text = '';
-        const extractText = (c: React.ReactNode): string => {
-          if (typeof c === 'string') return c;
-          if (React.isValidElement(c)) {
-            const el = c as React.ReactElement<{ children?: React.ReactNode }>;
-            if (el.props.children) return extractText(el.props.children);
-          }
-          if (Array.isArray(c)) return c.map(extractText).join('');
-          return '';
-        };
-        text = extractText(children).trim();
         return (
           <li className="list-none my-2" {...props}>
             <button
               type="button"
-              onClick={() => onCheckboxToggle?.(messageId, text, true)}
+              onClick={() => onCheckboxToggle?.(messageId, choiceLabel || rawText, true)}
               className="group w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/85 dark:bg-gray-900/70 px-4 py-3 text-left shadow-sm hover:border-blue-300 hover:bg-blue-50/70 dark:hover:border-blue-600 dark:hover:bg-blue-900/20 transition-all"
+              aria-label={choiceLabel || rawText}
             >
               <div className="flex items-start gap-3">
                 <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300 border border-blue-100 dark:border-blue-800/60 flex-shrink-0">
@@ -380,7 +423,7 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-[14px] font-medium text-gray-900 dark:text-gray-100 leading-relaxed">
-                    {children}
+                    {choiceLabel || rawText}
                   </div>
                   <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                     Click to choose
@@ -496,7 +539,52 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
                         <p className={cn("text-[13px] font-medium", step.status === 'error' ? "text-red-700 dark:text-red-400" : "text-gray-800 dark:text-gray-200")}>
                           {step.title}
                         </p>
-                        {step.details && (
+                        {(stepActionLabel(step) || stepRowCount(step) !== null || (step as any).retried || stepSuggestedPath(step)) && (
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+                            {stepActionLabel(step) && (
+                              <span className="inline-flex items-center rounded-full bg-purple-100 px-2 py-0.5 font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-200">
+                                {stepActionLabel(step)}
+                              </span>
+                            )}
+                            {stepRowCount(step) !== null && (
+                              <span className="text-gray-500 dark:text-gray-400">
+                                {stepRowCount(step)} row(s)
+                              </span>
+                            )}
+                            {(step as any).retried && (
+                              <span className="text-amber-600 dark:text-amber-300">
+                                Auto-retried
+                              </span>
+                            )}
+                            {stepSuggestedPath(step) && (
+                              <span className="text-gray-500 dark:text-gray-400">
+                                {stepSuggestedPath(step)}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {stepReasoning(step) && (
+                          <p className="text-[12px] text-gray-600 dark:text-gray-300 mt-2 leading-relaxed">
+                            {stepReasoning(step)}
+                          </p>
+                        )}
+                        {stepResultSummary(step) && (
+                          <p className="text-[12px] text-gray-500 dark:text-gray-400 mt-1 leading-relaxed whitespace-pre-wrap">
+                            {stepResultSummary(step)}
+                          </p>
+                        )}
+                        {stepSql(step) && (
+                          <div className="relative mt-2 overflow-hidden rounded-xl border border-gray-200 bg-gray-950/95 dark:border-gray-700">
+                            <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+                              <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400">SQL</span>
+                              <CopyButton text={stepSql(step)} />
+                            </div>
+                            <pre className="overflow-x-auto px-3 py-3 text-[11px] leading-relaxed text-gray-100">
+                              <code>{stepSql(step)}</code>
+                            </pre>
+                          </div>
+                        )}
+                        {step.details && !stepReasoning(step) && !stepResultSummary(step) && !stepSql(step) && (
                           <p className="text-[12px] text-gray-500 dark:text-gray-400 mt-1 leading-relaxed whitespace-pre-wrap font-mono">
                             {step.details}
                           </p>
