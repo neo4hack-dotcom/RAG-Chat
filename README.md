@@ -15,6 +15,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - [CrewAI Planning](#crewai-planning)
 - [RAG Pipeline](#rag-pipeline)
 - [ClickHouse Query Agent](#clickhouse-query-agent)
+- [Data Analyst Agent](#data-analyst-agent)
 - [Oracle Analyst Agent](#oracle-analyst-agent)
 - [File Management Agent](#file-management-agent)
 - [PDF Creator Agent](#pdf-creator-agent)
@@ -32,10 +33,11 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | Category | Details |
 |----------|---------|
 | **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, CrewAI - Planning |
-| **6 agent roles** | Agent Manager, ClickHouse Query, Oracle Analyst, File management, PDF creator, Data quality - Tables |
+| **7 agent roles** | Agent Manager, ClickHouse Query, Data Analyst, Oracle Analyst, File management, PDF creator, Data quality - Tables |
 | **Manager orchestration** | Agent Manager can delegate to every specialist agent and keep follow-up context across clarifications and confirmations |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
+| **Data Analyst agent** | Multi-step ClickHouse investigations with iterative evidence gathering, optional knowledge-base search, automatic SQL simplification retry, and CSV export on demand |
 | **Oracle agent** | Natural-language Oracle analysis, schema discovery, SQL validation, automatic repair on query errors, narrative Markdown output |
 | **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions |
 | **PDF creator agent** | Backend Python-only PDF export agent to turn the latest useful analysis or pasted content into a polished document |
@@ -84,6 +86,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
                            │  │  /api/chat/rag               │
                            │  │  /api/clickhouse/test        │
                            │  │  /api/chat/clickhouse-agent  │
+                           │  │  /api/chat/data-analyst-agent│
                            │  │  /api/chat/file-manager-agent│
                            │  │  /api/chat/pdf-creator-agent │
                            │  │  /api/oracle/test            │
@@ -202,12 +205,13 @@ Answers include cited sources `[1]`, `[2]` and a confidence score.
 
 ### Agents
 
-Multi-agent orchestration with six roles:
+Multi-agent orchestration with seven roles:
 
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
 | **ClickHouse Query** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
+| **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, and can export the latest dataset to CSV |
 | **Oracle Analyst** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries and answers in business-facing Markdown |
 | **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations |
 | **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
@@ -226,6 +230,25 @@ Multi-agent orchestration with six roles:
    - and, when relevant, an inline chart or a chart suggestion.
 
 The ClickHouse agent uses the backend only and always relies on the configured local/application LLM endpoint for planning and summarisation.
+
+#### Data Analyst quick flow
+
+1. Configure ClickHouse in **Settings → RAG & OpenSearch → ClickHouse Query Agent**.
+2. Optionally configure OpenSearch + embeddings if you want the agent to use knowledge-base lookups as part of the analysis.
+3. Switch to **Agents** mode and select **Data Analyst**.
+4. Ask a deeper analytical question, for example:
+   - root-cause analysis,
+   - multi-angle comparison,
+   - retention / cohort / driver investigation,
+   - or a request that should end with a CSV export.
+5. The backend agent can:
+   - infer the best primary table or ask for a clickable table choice when needed,
+   - inspect schema,
+   - run several distinct ClickHouse queries in sequence,
+   - search the knowledge base when it helps,
+   - retry failed SQL with a simpler alternative without spending an extra credited step,
+   - export the latest dataset to CSV when explicitly requested,
+   - and return a business-facing Markdown answer with visible analytical steps in the chat.
 
 #### Oracle Analyst quick flow
 
@@ -402,6 +425,51 @@ Optional chart generation when requested or clearly useful
 |----------|-------------|
 | `POST /api/clickhouse/test` | Test ClickHouse connectivity and preview available tables |
 | `POST /api/chat/clickhouse-agent` | Guided ClickHouse agent workflow: discover tables, inspect schema, clarify fields/dates, generate and execute SQL |
+
+---
+
+## Data Analyst Agent
+
+The Data Analyst agent is a deeper ClickHouse specialist designed for complex investigations that need more than one SQL query.
+
+### Workflow
+
+```text
+User enters a complex analytical request
+    ↓
+Agent infers the best primary ClickHouse table
+    ↓
+If ambiguous: user selects a table via clickable tiles
+    ↓
+Backend inspects the selected table schema
+    ↓
+Local LLM decides the next action:
+    - query
+    - search_knowledge
+    - export_csv
+    - finish
+    ↓
+Each successful step adds new evidence to the running context
+    ↓
+If a query fails, the agent generates a simpler repaired SQL automatically
+    ↓
+When enough evidence is gathered, the agent writes the final answer in English
+```
+
+### Behaviour
+
+- Uses a credited action budget with an anti-loop cap.
+- Keeps the ongoing analytical context inside the same conversation.
+- Shows the analytical steps directly in the chat, including reasoning, SQL, result summary, row count, and retry status.
+- Can search the configured knowledge base when OpenSearch is available.
+- Only exports CSV when the user explicitly asks for it.
+- Produces a final business-facing Markdown answer, a data preview, a confidence score, and the executed SQL blocks.
+
+### Backend endpoint
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/chat/data-analyst-agent` | Multi-step ClickHouse analyst loop with table selection, iterative queries, knowledge lookup, SQL retry, and optional CSV export |
 
 ---
 
@@ -655,6 +723,8 @@ All settings are available in-app (no `.env` file needed).
 | Default Query Limit | `200` | Safety cap applied to row-returning ClickHouse queries |
 
 Use **Test ClickHouse** in the settings panel to verify the connection and preview the first available tables.
+
+The **Data Analyst** agent reuses the same ClickHouse connection and query limit settings. If OpenSearch and embeddings are configured, it can also add knowledge-base search as one of its analytical steps.
 
 ### App Portal Settings
 

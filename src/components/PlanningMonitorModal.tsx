@@ -71,13 +71,15 @@ export function PlanningMonitorModal({
   return createPortal(
     <>
       <div
-        className="fixed inset-0 z-[82] bg-black/50 backdrop-blur-sm"
+        className="fixed inset-0 z-[102] bg-black/50 backdrop-blur-sm"
         onClick={onClose}
       />
-      <div className="fixed inset-0 z-[83] overflow-y-auto p-4">
-        <div className="flex min-h-full items-center justify-center">
+      <div className="pointer-events-none fixed inset-0 z-[103] overflow-y-auto p-4">
+        <div className="flex min-h-full items-center justify-center py-4">
           <div
-            className="flex h-full w-full max-w-[1440px] flex-col overflow-hidden rounded-[2rem] border border-white/20 bg-[#f8f8f6] shadow-2xl shadow-black/30 dark:bg-[#101115]"
+            role="dialog"
+            aria-modal="true"
+            className="pointer-events-auto flex h-full max-h-[calc(100vh-2rem)] w-full max-w-[1440px] flex-col overflow-hidden rounded-[2rem] border border-white/20 bg-[#f8f8f6] shadow-2xl shadow-black/30 dark:bg-[#101115]"
             onClick={(event) => event.stopPropagation()}
           >
           <div className="flex items-center justify-between gap-4 border-b border-gray-200/70 bg-white/80 px-6 py-5 dark:border-gray-800/80 dark:bg-black/20">
