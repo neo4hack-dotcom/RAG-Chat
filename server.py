@@ -5662,7 +5662,7 @@ Recent conversation memory:
 User request:
 {user_request}
 
-{f"Previous execution error to fix: {error_feedback}" if error_feedback else ""}
+{("Previous execution error to fix: " + str(error_feedback)) if error_feedback else ""}
 """.strip()
 
     raw = await llm_chat(
@@ -9452,7 +9452,8 @@ async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
                     "columns_filter": columns_filter,
                     "schema": schema,
                 }
-                action_label = f"get_schema('{table_name}'{f', columns_filter=\"{columns_filter}\"' if columns_filter else ''}) → Agent"
+                columns_filter_suffix = f', columns_filter="{columns_filter}"' if columns_filter else ""
+                action_label = f"get_schema('{table_name}'{columns_filter_suffix}) → Agent"
                 step_detail = f"Loaded {len(schema)} column(s) from `{table_name}`."
             elif tool_name == "check_query":
                 sql = str(tool_input.get("sql") or "").strip()
