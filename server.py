@@ -166,6 +166,7 @@ DEFAULT_APP_CONFIG = {
         "beautifully using markdown. When offering choices or clarification options, "
         "always use markdown task lists (- [ ] Option) so the UI can present clickable replies."
     ),
+    "disableSslVerification": False,
     "elasticsearchUrl": "http://localhost:9200",
     "elasticsearchIndex": "rag_documents",
     "elasticsearchUsername": "",
@@ -650,6 +651,47 @@ def _httpx_async_client_kwargs(
         kwargs["trust_env"] = False
 
     return kwargs
+
+
+def _ssl_verification_disabled(payload: Optional[dict[str, Any]]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    raw = payload.get("disableSslVerification", payload.get("disable_ssl_verification", False))
+    return bool(raw)
+
+
+def _effective_verify_ssl(verify_ssl: bool, disable_ssl_verification: bool) -> bool:
+    return False if disable_ssl_verification else bool(verify_ssl)
+
+
+def _build_mcp_http_client_factory(
+    target: str,
+    *,
+    disable_ssl_verification: bool = False,
+):
+    normalized_target = _normalize_local_service_url(target)
+    hostname = urlparse(normalized_target).hostname
+
+    def factory(
+        headers: dict[str, Any] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        kwargs: dict[str, Any] = {
+            "follow_redirects": True,
+            "timeout": timeout or httpx.Timeout(30.0, read=300.0),
+        }
+        if headers is not None:
+            kwargs["headers"] = headers
+        if auth is not None:
+            kwargs["auth"] = auth
+        if disable_ssl_verification:
+            kwargs["verify"] = False
+        if _is_local_service_host(hostname):
+            kwargs["trust_env"] = False
+        return httpx.AsyncClient(**kwargs)
+
+    return factory
 
 def quote_clickhouse_literal(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
@@ -2650,11 +2692,19 @@ async def llm_chat(
     provider: str = "ollama",
     api_key: str = None,
     response_format: str = None,
+    disable_ssl_verification: Optional[bool] = None,
 ) -> str:
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     normalized_base_url = _normalize_local_service_url(base_url)
+    if disable_ssl_verification is None:
+        try:
+            state = await read_db_state()
+            disable_ssl_verification = _ssl_verification_disabled(state.get("config") or {})
+        except Exception:
+            disable_ssl_verification = False
+    effective_verify = False if disable_ssl_verification else None
 
     if provider == "ollama":
         payload: dict = {"model": model, "messages": messages, "stream": False}
@@ -2663,7 +2713,7 @@ async def llm_chat(
         endpoint = normalized_base_url.rstrip("/") + "/api/chat"
         try:
             async with httpx.AsyncClient(
-                **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+                **_httpx_async_client_kwargs(endpoint, timeout=120.0, verify=effective_verify)
             ) as client:
                 resp = await client.post(endpoint, json=payload, headers=headers)
                 resp.raise_for_status()
@@ -2680,7 +2730,7 @@ async def llm_chat(
         endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
         try:
             async with httpx.AsyncClient(
-                **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+                **_httpx_async_client_kwargs(endpoint, timeout=120.0, verify=effective_verify)
             ) as client:
                 resp = await client.post(endpoint, json=payload, headers=headers)
                 resp.raise_for_status()
@@ -6231,11 +6281,12 @@ def _app_opensearch_config(app_config: dict) -> Optional[OSConfig]:
 
 
 def _app_embedding_config(app_config: dict) -> dict[str, Any]:
+    disable_ssl_verification = _ssl_verification_disabled(app_config)
     return {
         "embedding_base_url": str(app_config.get("embeddingBaseUrl") or "http://localhost:11434/v1").strip() or "http://localhost:11434/v1",
         "embedding_api_key": str(app_config.get("embeddingApiKey") or "").strip() or None,
         "embedding_model": str(app_config.get("embeddingModel") or "nomic-embed-text").strip() or "nomic-embed-text",
-        "embedding_verify_ssl": bool(app_config.get("embeddingVerifySsl", True)),
+        "embedding_verify_ssl": _effective_verify_ssl(bool(app_config.get("embeddingVerifySsl", True)), disable_ssl_verification),
         "knn_neighbors": max(1, min(int(app_config.get("knnNeighbors") or 8), 12)),
     }
 
@@ -7461,10 +7512,12 @@ def _app_llm_config(app_config: dict) -> dict:
         "llm_model": str(app_config.get("model") or "llama3"),
         "llm_provider": str(app_config.get("provider") or "ollama"),
         "llm_api_key": app_config.get("apiKey") or None,
+        "disable_ssl_verification": _ssl_verification_disabled(app_config),
     }
 
 
 def _app_clickhouse_config(app_config: dict) -> "ClickHouseConfig":
+    disable_ssl_verification = _ssl_verification_disabled(app_config)
     return ClickHouseConfig(
         host=str(app_config.get("clickhouseHost") or "localhost"),
         port=int(app_config.get("clickhousePort") or 8123),
@@ -7472,7 +7525,7 @@ def _app_clickhouse_config(app_config: dict) -> "ClickHouseConfig":
         username=str(app_config.get("clickhouseUsername") or "default"),
         password=str(app_config.get("clickhousePassword") or ""),
         secure=bool(app_config.get("clickhouseSecure", False)),
-        verify_ssl=bool(app_config.get("clickhouseVerifySsl", True)),
+        verify_ssl=_effective_verify_ssl(bool(app_config.get("clickhouseVerifySsl", True)), disable_ssl_verification),
         http_path=str(app_config.get("clickhouseHttpPath") or ""),
         query_limit=int(app_config.get("clickhouseQueryLimit") or 200),
     )
@@ -8025,6 +8078,7 @@ async def planning_scheduler_loop(stop_event: asyncio.Event) -> None:
 
 class MCPTestRequest(BaseModel):
     url: str
+    disable_ssl_verification: bool = False
 
 
 class MCPChatRequest(BaseModel):
@@ -8036,6 +8090,20 @@ class MCPChatRequest(BaseModel):
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
     system_prompt: str = ""
+    disable_ssl_verification: bool = False
+
+
+class LlmModelsRequest(BaseModel):
+    provider: str = "ollama"
+    base_url: str = "http://localhost:11434"
+    api_key: Optional[str] = None
+    disable_ssl_verification: bool = False
+
+
+class EmbeddingModelsRequest(BaseModel):
+    base_url: str = "http://localhost:11434/v1"
+    api_key: Optional[str] = None
+    disable_ssl_verification: bool = False
 
 
 class OSConfig(BaseModel):
@@ -8147,6 +8215,7 @@ class ChatRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
 
 
 class ClickHouseTestRequest(BaseModel):
@@ -8197,6 +8266,7 @@ class ClickHouseAgentRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     agent_state: ClickHouseAgentState = Field(default_factory=ClickHouseAgentState)
 
 
@@ -8226,6 +8296,7 @@ class FileManagerAgentRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     agent_state: FileManagerAgentStateModel = Field(default_factory=FileManagerAgentStateModel)
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
 
@@ -8245,6 +8316,7 @@ class PdfCreatorAgentRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     agent_state: PdfCreatorAgentStateModel = Field(default_factory=PdfCreatorAgentStateModel)
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
 
@@ -8274,6 +8346,7 @@ class OracleAnalystAgentRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     agent_state: OracleAnalystAgentStateModel = Field(default_factory=OracleAnalystAgentStateModel)
 
 
@@ -8323,6 +8396,7 @@ class DataQualityAgentRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     agent_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
 
 
@@ -8334,6 +8408,7 @@ class DataAnalystAgentRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     max_steps: int = DATA_ANALYST_DEFAULT_MAX_STEPS
     agent_state: DataAnalystAgentStateModel = Field(default_factory=DataAnalystAgentStateModel)
 
@@ -8351,6 +8426,7 @@ class ManagerAgentRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     system_prompt: str = DEFAULT_APP_CONFIG["systemPrompt"]
     manager_state: ManagerAgentStateModel = Field(default_factory=ManagerAgentStateModel)
     clickhouse_state: ClickHouseAgentState = Field(default_factory=ClickHouseAgentState)
@@ -8378,6 +8454,7 @@ class PlanningChatRequest(BaseModel):
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
     llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
     agent_state: PlanningAgentStateModel = Field(default_factory=PlanningAgentStateModel)
 
 
@@ -12442,11 +12519,81 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
 
 # ── MCP endpoints ─────────────────────────────────────────────────────────────
 
+@app.post("/api/llm/models")
+async def list_llm_models(req: LlmModelsRequest):
+    normalized_base_url = _normalize_local_service_url(req.base_url)
+    provider = (req.provider or "ollama").strip().lower()
+    headers = {"Content-Type": "application/json"}
+    if req.api_key:
+        headers["Authorization"] = f"Bearer {req.api_key}"
+
+    if provider == "ollama":
+        endpoint = normalized_base_url.rstrip("/") + "/api/tags"
+    else:
+        endpoint = normalized_base_url.rstrip("/") + "/models"
+
+    try:
+        async with httpx.AsyncClient(
+            **_httpx_async_client_kwargs(
+                endpoint,
+                timeout=60.0,
+                verify=False if req.disable_ssl_verification else None,
+            )
+        ) as client:
+            response = await client.get(endpoint, headers=headers)
+            response.raise_for_status()
+        data = response.json()
+        models = (
+            [str(model.get("name") or "").strip() for model in data.get("models", []) if str(model.get("name") or "").strip()]
+            if provider == "ollama"
+            else [str(model.get("id") or "").strip() for model in data.get("data", []) if str(model.get("id") or "").strip()]
+        )
+        return {"status": "ok", "models": models, "model_count": len(models)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/embedding/models")
+async def list_embedding_models(req: EmbeddingModelsRequest):
+    normalized_base_url = _normalize_local_service_url(req.base_url)
+    if normalized_base_url.rstrip("/").endswith("/embeddings"):
+        endpoint = normalized_base_url.rstrip("/")[: -len("/embeddings")] + "/models"
+    else:
+        endpoint = normalized_base_url.rstrip("/") + "/models"
+    headers = {"Content-Type": "application/json"}
+    if req.api_key:
+        headers["Authorization"] = f"Bearer {req.api_key}"
+
+    try:
+        async with httpx.AsyncClient(
+            **_httpx_async_client_kwargs(
+                endpoint,
+                timeout=60.0,
+                verify=False if req.disable_ssl_verification else None,
+            )
+        ) as client:
+            response = await client.get(endpoint, headers=headers)
+            response.raise_for_status()
+        data = response.json()
+        models = [str(model.get("id") or "").strip() for model in data.get("data", []) if str(model.get("id") or "").strip()]
+        if not models and isinstance(data.get("models"), list):
+            models = [str(model.get("name") or "").strip() for model in data.get("models", []) if str(model.get("name") or "").strip()]
+        return {"status": "ok", "models": models, "model_count": len(models)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 @app.post("/api/mcp/test")
 async def test_mcp_connection(req: MCPTestRequest):
     """Connect to an MCP server via SSE and return its available tools."""
     try:
-        async with sse_client(req.url) as (read, write):
+        normalized_url = _normalize_local_service_url(req.url)
+        async with sse_client(
+            normalized_url,
+            httpx_client_factory=_build_mcp_http_client_factory(
+                normalized_url,
+                disable_ssl_verification=req.disable_ssl_verification,
+            ),
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools_result = await session.list_tools()
@@ -12478,7 +12625,14 @@ def _mcp_tool_to_openai(tool) -> dict:
 async def chat_mcp(req: MCPChatRequest):
     """Agentic loop: connects to MCP server, lets LLM call tools, returns final answer."""
     try:
-        async with sse_client(req.mcp_url) as (read, write):
+        normalized_mcp_url = _normalize_local_service_url(req.mcp_url)
+        async with sse_client(
+            normalized_mcp_url,
+            httpx_client_factory=_build_mcp_http_client_factory(
+                normalized_mcp_url,
+                disable_ssl_verification=req.disable_ssl_verification,
+            ),
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools_result = await session.list_tools()
@@ -12517,7 +12671,11 @@ async def chat_mcp(req: MCPChatRequest):
                             "tools": openai_tools,
                         }
                         async with httpx.AsyncClient(
-                            **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+                            **_httpx_async_client_kwargs(
+                                endpoint,
+                                timeout=120.0,
+                                verify=False if req.disable_ssl_verification else None,
+                            )
                         ) as client:
                             resp = await client.post(endpoint, json=payload, headers=headers)
                             resp.raise_for_status()
@@ -12533,7 +12691,11 @@ async def chat_mcp(req: MCPChatRequest):
                             "tools": openai_tools,
                         }
                         async with httpx.AsyncClient(
-                            **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+                            **_httpx_async_client_kwargs(
+                                endpoint,
+                                timeout=120.0,
+                                verify=False if req.disable_ssl_verification else None,
+                            )
                         ) as client:
                             resp = await client.post(endpoint, json=payload, headers=headers)
                             resp.raise_for_status()
@@ -12599,7 +12761,12 @@ async def chat_mcp(req: MCPChatRequest):
                     "content": "Please summarise the results above as a final answer.",
                 })
                 final = await llm_chat(
-                    messages, req.llm_base_url, req.llm_model, req.llm_provider, req.llm_api_key
+                    messages,
+                    req.llm_base_url,
+                    req.llm_model,
+                    req.llm_provider,
+                    req.llm_api_key,
+                    disable_ssl_verification=req.disable_ssl_verification,
                 )
                 return {"answer": final, "tool_calls": tool_calls_log}
 

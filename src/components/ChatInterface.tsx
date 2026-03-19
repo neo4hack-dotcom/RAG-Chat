@@ -642,7 +642,7 @@ export function ChatInterface({
             username: config.clickhouseUsername,
             password: config.clickhousePassword,
             secure: config.clickhouseSecure,
-            verify_ssl: config.clickhouseVerifySsl,
+            verify_ssl: config.disableSslVerification ? false : (config.clickhouseVerifySsl ?? true),
             http_path: config.clickhouseHttpPath,
             query_limit: config.clickhouseQueryLimit,
           },
@@ -795,7 +795,7 @@ export function ChatInterface({
             username: config.clickhouseUsername,
             password: config.clickhousePassword,
             secure: config.clickhouseSecure,
-            verify_ssl: config.clickhouseVerifySsl,
+            verify_ssl: config.disableSslVerification ? false : (config.clickhouseVerifySsl ?? true),
             http_path: config.clickhouseHttpPath,
             query_limit: config.clickhouseQueryLimit,
           },
@@ -803,6 +803,7 @@ export function ChatInterface({
           llm_model: config.model,
           llm_api_key: config.apiKey || undefined,
           llm_provider: config.provider,
+          disable_ssl_verification: config.disableSslVerification ?? false,
         }),
       });
 
@@ -1160,6 +1161,9 @@ export function ChatInterface({
       let nextPdfCreatorAgentState = pdfCreatorAgentState;
       let nextOracleAnalystAgentState = oracleAnalystAgentState;
       let nextDataQualityAgentState = dataQualityAgentState;
+      const disableSslVerification = config.disableSslVerification ?? false;
+      const effectiveEmbeddingVerifySsl = disableSslVerification ? false : (config.embeddingVerifySsl ?? true);
+      const effectiveClickhouseVerifySsl = disableSslVerification ? false : (config.clickhouseVerifySsl ?? true);
       const serializedDataAnalystState = {
         stage: dataAnalystAgentState.stage,
         pending_request: dataAnalystAgentState.pendingRequest,
@@ -1202,12 +1206,13 @@ export function ChatInterface({
             embedding_base_url:   config.embeddingBaseUrl,
             embedding_api_key:    config.embeddingApiKey  || undefined,
             embedding_model:      config.embeddingModel,
-            embedding_verify_ssl: config.embeddingVerifySsl ?? true,
+            embedding_verify_ssl: effectiveEmbeddingVerifySsl,
             knn_neighbors:        config.knnNeighbors,
             llm_base_url:       config.baseUrl,
             llm_model:          config.model,
             llm_api_key:        config.apiKey || undefined,
             llm_provider:       config.provider,
+            disable_ssl_verification: disableSslVerification,
           })
         });
 
@@ -1234,6 +1239,7 @@ export function ChatInterface({
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
             system_prompt: config.systemPrompt,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
         if (!response.ok) {
@@ -1281,6 +1287,7 @@ export function ChatInterface({
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
 
@@ -1344,7 +1351,7 @@ export function ChatInterface({
               username: config.clickhouseUsername,
               password: config.clickhousePassword,
               secure: config.clickhouseSecure,
-              verify_ssl: config.clickhouseVerifySsl,
+              verify_ssl: effectiveClickhouseVerifySsl,
               http_path: config.clickhouseHttpPath,
               query_limit: config.clickhouseQueryLimit,
             },
@@ -1377,6 +1384,7 @@ export function ChatInterface({
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
             system_prompt: config.systemPrompt,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
 
@@ -1446,7 +1454,7 @@ export function ChatInterface({
               username: config.clickhouseUsername,
               password: config.clickhousePassword,
               secure: config.clickhouseSecure,
-              verify_ssl: config.clickhouseVerifySsl,
+              verify_ssl: effectiveClickhouseVerifySsl,
               http_path: config.clickhouseHttpPath,
               query_limit: config.clickhouseQueryLimit,
             },
@@ -1454,6 +1462,7 @@ export function ChatInterface({
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
 
@@ -1508,7 +1517,7 @@ export function ChatInterface({
               username: config.clickhouseUsername,
               password: config.clickhousePassword,
               secure: config.clickhouseSecure,
-              verify_ssl: config.clickhouseVerifySsl,
+              verify_ssl: effectiveClickhouseVerifySsl,
               http_path: config.clickhouseHttpPath,
               query_limit: config.clickhouseQueryLimit,
             },
@@ -1516,6 +1525,7 @@ export function ChatInterface({
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
 
@@ -1573,6 +1583,7 @@ export function ChatInterface({
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
 
@@ -1630,6 +1641,7 @@ export function ChatInterface({
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
 
@@ -1701,6 +1713,7 @@ export function ChatInterface({
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
           }),
         });
 

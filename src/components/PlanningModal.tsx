@@ -1,17 +1,14 @@
-import React from "react";
-import { createPortal } from "react-dom";
+import React, { useEffect } from "react";
 import {
-  X,
-  RefreshCw,
-  CalendarDays,
-  Clock3,
-  FolderOpen,
-  Database,
-  Play,
-  Pause,
-  Trash2,
   Bot,
   CheckCircle2,
+  Database,
+  FolderOpen,
+  Pause,
+  Play,
+  RefreshCw,
+  Trash2,
+  X,
 } from "lucide-react";
 import {
   AgentRole,
@@ -45,71 +42,61 @@ const AGENT_OPTIONS: Array<{
   label: string;
   description: string;
   icon: React.ComponentType<{ className?: string }>;
-  accent: string;
 }> = [
   {
     role: "manager",
-    label: "Manager",
-    description: "Operational synthesis and prioritization.",
+    label: "Agent Manager",
+    description: "Operational synthesis and orchestration.",
     icon: Bot,
-    accent: "from-amber-500 to-orange-500",
   },
   {
     role: "clickhouse_query",
-    label: "ClickHouse Query",
-    description: "Safe SQL generation and execution against ClickHouse.",
+    label: "Clickhouse SQL",
+    description: "Safe SQL generation and execution on ClickHouse.",
     icon: Database,
-    accent: "from-cyan-500 to-teal-500",
   },
   {
     role: "file_management",
     label: "File management",
-    description: "Filesystem actions with previews, confirmations, and sandbox support.",
+    description: "Filesystem actions with confirmations and previews.",
     icon: FolderOpen,
-    accent: "from-emerald-500 to-lime-500",
   },
 ];
-
-const WEEKDAYS: PlanningWeekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 const TRIGGER_OPTIONS = [
   {
     kind: "once",
-    title: "One Time",
-    description: "Run once on a precise date and time.",
-    icon: CalendarDays,
+    title: "One time",
+    description: "Run once on a specific date and time.",
   },
   {
     kind: "daily",
     title: "Daily",
     description: "Run every day at a fixed time.",
-    icon: Clock3,
   },
   {
     kind: "weekly",
     title: "Weekly",
     description: "Run on selected weekdays.",
-    icon: CalendarDays,
   },
   {
     kind: "interval",
     title: "Interval",
     description: "Run every N minutes.",
-    icon: RefreshCw,
   },
   {
     kind: "clickhouse_watch",
-    title: "ClickHouse Watch",
-    description: "Trigger from a SQL result change or new rows.",
-    icon: Database,
+    title: "ClickHouse watch",
+    description: "Run when a ClickHouse result changes or returns rows.",
   },
   {
     kind: "file_watch",
-    title: "File Watch",
-    description: "Trigger when new files arrive in a directory.",
-    icon: FolderOpen,
+    title: "File watch",
+    description: "Run when new files appear in a directory.",
   },
 ] as const;
+
+const WEEKDAYS: PlanningWeekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 function formatDateLabel(value: string | null | undefined) {
   if (!value) return "—";
@@ -124,6 +111,18 @@ function statusTone(status: CrewPlan["status"] | CrewPlan["lastStatus"] | null |
   if (status === "running") return "text-sky-700 bg-sky-50 border-sky-200";
   if (status === "error") return "text-red-700 bg-red-50 border-red-200";
   return "text-gray-600 bg-gray-50 border-gray-200";
+}
+
+function triggerSummary(trigger: CrewPlanDraft["trigger"]) {
+  if (trigger.kind === "once") return trigger.oneTimeAt || "Pick a date and time";
+  if (trigger.kind === "daily") return `Every day at ${trigger.timeOfDay || "09:00"}`;
+  if (trigger.kind === "weekly") {
+    const days = trigger.weekdays.length > 0 ? trigger.weekdays.map((day) => day.toUpperCase()).join(", ") : "No weekday selected";
+    return `${days} at ${trigger.timeOfDay || "09:00"}`;
+  }
+  if (trigger.kind === "interval") return `Every ${trigger.intervalMinutes || 60} minute(s)`;
+  if (trigger.kind === "clickhouse_watch") return trigger.watchSql.trim() ? "ClickHouse watch query configured" : "Add a watch SQL query";
+  return trigger.directory.trim() ? `Watching ${trigger.directory}` : "Set a directory to watch";
 }
 
 export function PlanningModal({
@@ -143,7 +142,20 @@ export function PlanningModal({
   onRunPlan,
   onRefresh,
 }: PlanningModalProps) {
-  if (!isOpen || typeof document === "undefined") return null;
+  useEffect(() => {
+    if (!isOpen) return undefined;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
 
   const updateDraft = (next: Partial<CrewPlanDraft>) => {
     onDraftChange({
@@ -164,8 +176,7 @@ export function PlanningModal({
 
   const toggleAgent = (role: AgentRole) => {
     const hasRole = draft.agents.includes(role);
-    onDraftChange({
-      ...draft,
+    updateDraft({
       agents: hasRole
         ? draft.agents.filter((item) => item !== role)
         : [...draft.agents, role],
@@ -181,523 +192,610 @@ export function PlanningModal({
     });
   };
 
-  const loadPlanIntoForm = (plan: CrewPlan) => {
-    onEditPlan(plan);
-  };
-
   const handleSave = async () => {
     await onSavePlan(draft, editingPlanId);
   };
 
-  const planCount = planningState.plans.length;
-  const runCount = planningState.runs.length;
-
-  return createPortal(
-    <>
+  return (
+    <div className="fixed inset-0 z-[110]">
       <div
-        className="fixed inset-0 z-[100] bg-black/45 backdrop-blur-sm"
-      />
-      <div
-        className="fixed inset-0 z-[101] overflow-y-auto p-4"
+        className="absolute inset-0 bg-black/45 backdrop-blur-sm"
         onClick={onClose}
-      >
-        <div className="flex min-h-full items-center justify-center py-4">
-          <div
-            role="dialog"
-            aria-modal="true"
-            className="w-full max-w-[1280px] max-h-[calc(100vh-2rem)] overflow-hidden rounded-[2rem] border border-white/20 bg-[#f8f8f6] shadow-2xl shadow-black/30 dark:bg-[#101115]"
-            onClick={(event) => event.stopPropagation()}
-          >
-        <div className="flex items-center justify-between gap-4 px-6 py-5 border-b border-gray-200/70 dark:border-gray-800/80 bg-white/80 dark:bg-black/20">
-          <div>
-            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              CrewAI - Planning
+      />
+
+      <div className="relative flex h-full items-center justify-center p-4">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="CrewAI planning"
+          className="relative flex h-[min(94vh,980px)] w-full max-w-[1380px] flex-col overflow-hidden rounded-[2rem] border border-white/30 bg-[#f7f7f4] shadow-[0_30px_80px_rgba(15,23,42,0.35)] dark:border-white/10 dark:bg-[#101115]"
+        >
+          <div className="flex items-start justify-between gap-4 border-b border-gray-200/80 bg-white/75 px-6 py-5 backdrop-blur-xl dark:border-gray-800/80 dark:bg-black/20">
+            <div>
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-emerald-600 dark:text-emerald-300">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                CrewAI - Planning
+              </div>
+              <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
+                Schedule existing agents with fixed time or event triggers
+              </h2>
+              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Simple planner form with direct editing, agent selection, and trigger configuration.
+              </p>
             </div>
-            <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
-              Schedule existing agents with fixed time or event triggers
-            </h2>
-            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              {planCount} saved plan(s) · {runCount} recent run(s)
-            </p>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void onRefresh()}
+                disabled={isBusy}
+                className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-60 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                <RefreshCw className={cn("h-4 w-4", isBusy && "animate-spin")} />
+                Refresh
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-600 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void onRefresh()}
-              disabled={isBusy}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors disabled:opacity-60"
+          <div className="grid min-h-0 flex-1 gap-0 xl:grid-cols-[1.08fr,0.92fr]">
+            <form
+              className="min-h-0 overflow-y-auto border-r border-gray-200/80 px-6 py-6 dark:border-gray-800/80"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleSave();
+              }}
             >
-              <RefreshCw className={cn("w-4 h-4", isBusy && "animate-spin")} />
-              Refresh
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex items-center justify-center w-10 h-10 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-
-        <div className="overflow-y-auto max-h-[calc(92vh-88px)]">
-          <div className="grid lg:grid-cols-[1.3fr,0.9fr] gap-6 p-6">
-            <div className="space-y-6">
-              {error && (
-                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                  {error}
-                </div>
-              )}
-
-              <div className="rounded-[1.75rem] border border-gray-200/80 dark:border-gray-800/70 bg-white/85 dark:bg-gray-900/60 p-5 shadow-sm">
-                <div className="flex items-center justify-between gap-3 mb-4">
-                  <div>
-                    <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                      {editingPlanId ? "Edit Planning Job" : "New Planning Job"}
-                    </h3>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">
-                      Build a reusable automation for one or more existing agents.
-                    </p>
+              <div className="space-y-6">
+                {error && (
+                  <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {error}
                   </div>
-                  <button
-                    type="button"
-                    onClick={onStartNewDraft}
-                    className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                  >
-                    Start fresh
-                  </button>
-                </div>
+                )}
 
-                <div className="grid md:grid-cols-2 gap-4">
-                  <label className="space-y-2 md:col-span-2">
-                    <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Plan Name</span>
-                    <input
-                      type="text"
-                      value={draft.name}
-                      onChange={(e) => updateDraft({ name: e.target.value })}
-                      placeholder="Morning anomaly monitor"
-                      className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                    />
-                  </label>
-
-                  <label className="space-y-2 md:col-span-2">
-                    <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Objective / Prompt</span>
-                    <textarea
-                      value={draft.prompt}
-                      onChange={(e) => updateDraft({ prompt: e.target.value })}
-                      placeholder="Describe exactly what the scheduled agents should do when the trigger fires."
-                      rows={4}
-                      className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400 resize-y"
-                    />
-                  </label>
-
-                  <label className="space-y-2">
-                    <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Status</span>
-                    <select
-                      value={draft.status}
-                      onChange={(e) => updateDraft({ status: e.target.value as CrewPlanDraft["status"] })}
-                      className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
+                <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                        Planning job
+                      </h3>
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        Name the automation and describe what the agents should do.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onStartNewDraft}
+                      className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
                     >
-                      <option value="active">Active</option>
-                      <option value="paused">Paused</option>
-                    </select>
-                  </label>
+                      Start fresh
+                    </button>
+                  </div>
 
-                  <label className="space-y-2">
-                    <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Time Zone</span>
-                    <input
-                      type="text"
-                      value={draft.trigger.timezone}
-                      onChange={(e) => updateTrigger({ timezone: e.target.value })}
-                      placeholder="Europe/Paris"
-                      className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                    />
-                  </label>
-                </div>
-              </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block md:col-span-2">
+                      <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        Plan name
+                      </span>
+                      <input
+                        type="text"
+                        value={draft.name}
+                        onChange={(event) => updateDraft({ name: event.target.value })}
+                        placeholder="Morning anomaly monitor"
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-emerald-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                      />
+                    </label>
 
-              <div className="rounded-[1.75rem] border border-gray-200/80 dark:border-gray-800/70 bg-white/85 dark:bg-gray-900/60 p-5 shadow-sm">
-                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Existing Agents</h3>
-                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  Select one or more existing agents that should run when the plan is triggered.
-                </p>
-                <div className="grid md:grid-cols-2 gap-3 mt-4">
-                  {AGENT_OPTIONS.map((agent) => {
-                    const Icon = agent.icon;
-                    const isSelected = draft.agents.includes(agent.role);
-                    return (
-                      <button
-                        key={agent.role}
-                        type="button"
-                        onClick={() => toggleAgent(agent.role)}
-                        className={cn(
-                          "rounded-2xl border px-4 py-4 text-left transition-all",
-                          isSelected
-                            ? "border-transparent bg-gray-950 text-white shadow-lg"
-                            : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 hover:border-gray-300 dark:hover:border-gray-600"
-                        )}
+                    <label className="block md:col-span-2">
+                      <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        Objective / prompt
+                      </span>
+                      <textarea
+                        value={draft.prompt}
+                        onChange={(event) => updateDraft({ prompt: event.target.value })}
+                        rows={5}
+                        placeholder="Describe the recurring workflow in plain English."
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-emerald-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                      />
+                    </label>
+
+                    <label className="block">
+                      <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        Status
+                      </span>
+                      <select
+                        value={draft.status}
+                        onChange={(event) => updateDraft({ status: event.target.value as CrewPlanDraft["status"] })}
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-emerald-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
                       >
-                        <div className="flex items-center gap-3">
-                          <div className={cn("flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br text-white", agent.accent)}>
-                            <Icon className="w-5 h-5" />
-                          </div>
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold">{agent.label}</div>
-                            <div className={cn("text-xs mt-1", isSelected ? "text-white/70" : "text-gray-500 dark:text-gray-400")}>
-                              {agent.description}
+                        <option value="active">Active</option>
+                        <option value="paused">Paused</option>
+                      </select>
+                    </label>
+
+                    <label className="block">
+                      <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        Time zone
+                      </span>
+                      <input
+                        type="text"
+                        value={draft.trigger.timezone}
+                        onChange={(event) => updateTrigger({ timezone: event.target.value })}
+                        placeholder="Europe/Paris"
+                        className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-emerald-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                      />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                    Agents to run
+                  </h3>
+                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    Select one or more existing agents.
+                  </p>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    {AGENT_OPTIONS.map((agent) => {
+                      const Icon = agent.icon;
+                      const checked = draft.agents.includes(agent.role);
+                      return (
+                        <label
+                          key={agent.role}
+                          className={cn(
+                            "flex cursor-pointer items-start gap-3 rounded-2xl border px-4 py-4 transition-colors",
+                            checked
+                              ? "border-emerald-300 bg-emerald-50 dark:border-emerald-600 dark:bg-emerald-900/20"
+                              : "border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-950"
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleAgent(agent.role)}
+                            className="mt-1 h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                              <Icon className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />
+                              {agent.label}
                             </div>
+                            <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                              {agent.description}
+                            </p>
                           </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
 
-              <div className="rounded-[1.75rem] border border-gray-200/80 dark:border-gray-800/70 bg-white/85 dark:bg-gray-900/60 p-5 shadow-sm">
-                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Trigger Type</h3>
-                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  Choose between a fixed schedule or an event-driven automation.
-                </p>
+                <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                    Trigger configuration
+                  </h3>
+                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    Choose how the automation starts, then fill the matching parameters.
+                  </p>
 
-                <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-3 mt-4">
-                  {TRIGGER_OPTIONS.map((option) => {
-                    const Icon = option.icon;
-                    const isSelected = draft.trigger.kind === option.kind;
-                    return (
-                      <button
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    {TRIGGER_OPTIONS.map((option) => (
+                      <label
                         key={option.kind}
-                        type="button"
-                        onClick={() => updateTrigger({ kind: option.kind })}
                         className={cn(
-                          "rounded-2xl border px-4 py-4 text-left transition-all",
-                          isSelected
-                            ? "border-blue-400 bg-blue-50 dark:bg-blue-950/40 shadow-sm"
-                            : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 hover:border-gray-300 dark:hover:border-gray-600"
+                          "flex cursor-pointer items-start gap-3 rounded-2xl border px-4 py-4 transition-colors",
+                          draft.trigger.kind === option.kind
+                            ? "border-sky-300 bg-sky-50 dark:border-sky-600 dark:bg-sky-900/20"
+                            : "border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-950"
                         )}
                       >
-                        <div className="flex items-center gap-3">
-                          <div className={cn(
-                            "flex h-10 w-10 items-center justify-center rounded-2xl",
-                            isSelected
-                              ? "bg-blue-600 text-white"
-                              : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300"
-                          )}>
-                            <Icon className="w-5 h-5" />
+                        <input
+                          type="radio"
+                          name="planning-trigger-kind"
+                          checked={draft.trigger.kind === option.kind}
+                          onChange={() => updateTrigger({ kind: option.kind })}
+                          className="mt-1 h-4 w-4 border-gray-300 text-sky-600 focus:ring-sky-500"
+                        />
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            {option.title}
                           </div>
-                          <div>
-                            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{option.title}</div>
-                            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{option.description}</div>
-                          </div>
+                          <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                            {option.description}
+                          </p>
                         </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                      </label>
+                    ))}
+                  </div>
 
-                <div className="mt-5 grid md:grid-cols-2 gap-4">
-                  {draft.trigger.kind === "once" && (
-                    <label className="space-y-2 md:col-span-2">
-                      <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Run At</span>
-                      <input
-                        type="datetime-local"
-                        value={draft.trigger.oneTimeAt}
-                        onChange={(e) => updateTrigger({ oneTimeAt: e.target.value })}
-                        className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                      />
-                    </label>
-                  )}
+                  <div className="mt-5 grid gap-4 md:grid-cols-2">
+                    {draft.trigger.kind === "once" && (
+                      <label className="block md:col-span-2">
+                        <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                          Run at
+                        </span>
+                        <input
+                          type="datetime-local"
+                          value={draft.trigger.oneTimeAt}
+                          onChange={(event) => updateTrigger({ oneTimeAt: event.target.value })}
+                          className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                        />
+                      </label>
+                    )}
 
-                  {draft.trigger.kind === "daily" && (
-                    <label className="space-y-2">
-                      <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Time Of Day</span>
-                      <input
-                        type="time"
-                        value={draft.trigger.timeOfDay}
-                        onChange={(e) => updateTrigger({ timeOfDay: e.target.value })}
-                        className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                      />
-                    </label>
-                  )}
-
-                  {draft.trigger.kind === "weekly" && (
-                    <>
-                      <label className="space-y-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Time Of Day</span>
+                    {draft.trigger.kind === "daily" && (
+                      <label className="block">
+                        <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                          Time of day
+                        </span>
                         <input
                           type="time"
                           value={draft.trigger.timeOfDay}
-                          onChange={(e) => updateTrigger({ timeOfDay: e.target.value })}
-                          className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
+                          onChange={(event) => updateTrigger({ timeOfDay: event.target.value })}
+                          className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
                         />
                       </label>
-                      <div className="space-y-2 md:col-span-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Weekdays</span>
-                        <div className="flex flex-wrap gap-2">
-                          {WEEKDAYS.map((day) => (
-                            <button
-                              key={day}
-                              type="button"
-                              onClick={() => toggleWeekday(day)}
-                              className={cn(
-                                "px-3 py-2 rounded-xl border text-sm font-medium transition-colors",
-                                draft.trigger.weekdays.includes(day)
-                                  ? "border-blue-400 bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-200"
-                                  : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-600 dark:text-gray-300"
-                              )}
-                            >
-                              {day.toUpperCase()}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
+                    )}
 
-                  {draft.trigger.kind === "interval" && (
-                    <label className="space-y-2">
-                      <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Interval (minutes)</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={draft.trigger.intervalMinutes}
-                        onChange={(e) => updateTrigger({ intervalMinutes: parseInt(e.target.value, 10) || 1 })}
-                        className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                      />
-                    </label>
-                  )}
+                    {draft.trigger.kind === "weekly" && (
+                      <>
+                        <label className="block">
+                          <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Time of day
+                          </span>
+                          <input
+                            type="time"
+                            value={draft.trigger.timeOfDay}
+                            onChange={(event) => updateTrigger({ timeOfDay: event.target.value })}
+                            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                          />
+                        </label>
 
-                  {draft.trigger.kind === "clickhouse_watch" && (
-                    <>
-                      <label className="space-y-2 md:col-span-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Watch SQL</span>
-                        <textarea
-                          value={draft.trigger.watchSql}
-                          onChange={(e) => updateTrigger({ watchSql: e.target.value })}
-                          rows={5}
-                          placeholder="SELECT * FROM events WHERE created_at > now() - INTERVAL 5 MINUTE"
-                          className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm font-mono text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400 resize-y"
-                        />
-                      </label>
-                      <label className="space-y-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Watch Mode</span>
-                        <select
-                          value={draft.trigger.watchMode}
-                          onChange={(e) => updateTrigger({ watchMode: e.target.value as CrewPlanDraft["trigger"]["watchMode"] })}
-                          className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                        >
-                          <option value="result_changes">Trigger when the result changes</option>
-                          <option value="returns_rows">Trigger when new rows appear</option>
-                          <option value="count_increases">Trigger when the numeric count increases</option>
-                        </select>
-                      </label>
-                      <label className="space-y-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Polling (minutes)</span>
+                        <fieldset className="md:col-span-2">
+                          <legend className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Weekdays
+                          </legend>
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+                            {WEEKDAYS.map((day) => {
+                              const checked = draft.trigger.weekdays.includes(day);
+                              return (
+                                <label
+                                  key={day}
+                                  className={cn(
+                                    "flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-colors",
+                                    checked
+                                      ? "border-sky-300 bg-sky-50 text-sky-800 dark:border-sky-600 dark:bg-sky-900/20 dark:text-sky-100"
+                                      : "border-gray-200 bg-white text-gray-700 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200"
+                                  )}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggleWeekday(day)}
+                                    className="h-4 w-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                                  />
+                                  {day.toUpperCase()}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </fieldset>
+                      </>
+                    )}
+
+                    {draft.trigger.kind === "interval" && (
+                      <label className="block">
+                        <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                          Interval (minutes)
+                        </span>
                         <input
                           type="number"
                           min={1}
-                          value={draft.trigger.pollMinutes}
-                          onChange={(e) => updateTrigger({ pollMinutes: parseInt(e.target.value, 10) || 1 })}
-                          className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
+                          value={draft.trigger.intervalMinutes}
+                          onChange={(event) => updateTrigger({ intervalMinutes: parseInt(event.target.value, 10) || 1 })}
+                          className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
                         />
                       </label>
-                    </>
-                  )}
+                    )}
 
-                  {draft.trigger.kind === "file_watch" && (
-                    <>
-                      <label className="space-y-2 md:col-span-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Directory</span>
-                        <input
-                          type="text"
-                          value={draft.trigger.directory}
-                          onChange={(e) => updateTrigger({ directory: e.target.value })}
-                          placeholder="/Users/mathieumasson/inbox"
-                          className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                        />
-                      </label>
-                      <label className="space-y-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Pattern</span>
-                        <input
-                          type="text"
-                          value={draft.trigger.pattern}
-                          onChange={(e) => updateTrigger({ pattern: e.target.value || "*" })}
-                          placeholder="*.csv"
-                          className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                        />
-                      </label>
-                      <label className="space-y-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Polling (minutes)</span>
-                        <input
-                          type="number"
-                          min={1}
-                          value={draft.trigger.pollMinutes}
-                          onChange={(e) => updateTrigger({ pollMinutes: parseInt(e.target.value, 10) || 1 })}
-                          className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-blue-400"
-                        />
-                      </label>
-                      <label className="inline-flex items-center gap-3 text-sm text-gray-700 dark:text-gray-200 md:col-span-2">
-                        <input
-                          type="checkbox"
-                          checked={draft.trigger.recursive}
-                          onChange={(e) => updateTrigger({ recursive: e.target.checked })}
-                          className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600"
-                        />
-                        Watch subdirectories too
-                      </label>
-                    </>
-                  )}
-                </div>
+                    {draft.trigger.kind === "clickhouse_watch" && (
+                      <>
+                        <label className="block md:col-span-2">
+                          <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Watch SQL
+                          </span>
+                          <textarea
+                            value={draft.trigger.watchSql}
+                            onChange={(event) => updateTrigger({ watchSql: event.target.value })}
+                            rows={5}
+                            placeholder="SELECT count(*) AS new_rows FROM events WHERE created_at >= now() - INTERVAL 5 MINUTE"
+                            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 font-mono text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                          />
+                        </label>
+
+                        <label className="block">
+                          <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Watch mode
+                          </span>
+                          <select
+                            value={draft.trigger.watchMode}
+                            onChange={(event) => updateTrigger({ watchMode: event.target.value as CrewPlanDraft["trigger"]["watchMode"] })}
+                            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                          >
+                            <option value="result_changes">Trigger when the result changes</option>
+                            <option value="returns_rows">Trigger when rows are returned</option>
+                            <option value="count_increases">Trigger when the count increases</option>
+                          </select>
+                        </label>
+
+                        <label className="block">
+                          <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Polling (minutes)
+                          </span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={draft.trigger.pollMinutes}
+                            onChange={(event) => updateTrigger({ pollMinutes: parseInt(event.target.value, 10) || 1 })}
+                            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                          />
+                        </label>
+                      </>
+                    )}
+
+                    {draft.trigger.kind === "file_watch" && (
+                      <>
+                        <label className="block md:col-span-2">
+                          <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Directory
+                          </span>
+                          <input
+                            type="text"
+                            value={draft.trigger.directory}
+                            onChange={(event) => updateTrigger({ directory: event.target.value })}
+                            placeholder="/Users/mathieumasson/inbox"
+                            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                          />
+                        </label>
+
+                        <label className="block">
+                          <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Pattern
+                          </span>
+                          <input
+                            type="text"
+                            value={draft.trigger.pattern}
+                            onChange={(event) => updateTrigger({ pattern: event.target.value || "*" })}
+                            placeholder="*.csv"
+                            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                          />
+                        </label>
+
+                        <label className="block">
+                          <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            Polling (minutes)
+                          </span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={draft.trigger.pollMinutes}
+                            onChange={(event) => updateTrigger({ pollMinutes: parseInt(event.target.value, 10) || 1 })}
+                            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-colors focus:border-sky-400 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100"
+                          />
+                        </label>
+
+                        <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-200 md:col-span-2">
+                          <input
+                            type="checkbox"
+                            checked={draft.trigger.recursive}
+                            onChange={(event) => updateTrigger({ recursive: event.target.checked })}
+                            className="h-4 w-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                          />
+                          Watch subdirectories too
+                        </label>
+                      </>
+                    )}
+                  </div>
+                </section>
               </div>
+            </form>
 
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="text-sm text-gray-500 dark:text-gray-400">
-                  The planner always uses the local LLM configured in RAGnarok.
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="px-4 py-3 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-                  >
-                    Close
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleSave()}
-                    disabled={isBusy}
-                    className="px-5 py-3 rounded-2xl bg-black text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-60"
-                  >
-                    {editingPlanId ? "Save changes" : "Save planning job"}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-6">
-              <div className="rounded-[1.75rem] border border-gray-200/80 dark:border-gray-800/70 bg-white/85 dark:bg-gray-900/60 p-5 shadow-sm">
-                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Saved Plans</h3>
-                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  Edit, pause, run, or delete existing planning jobs.
-                </p>
-                <div className="mt-4 space-y-3 max-h-[430px] overflow-y-auto pr-1">
-                  {planningState.plans.length === 0 && (
-                    <div className="rounded-2xl border border-dashed border-gray-200 dark:border-gray-700 px-4 py-6 text-sm text-gray-500 dark:text-gray-400">
-                      No saved plan yet.
+            <aside className="min-h-0 overflow-y-auto bg-[linear-gradient(180deg,rgba(255,255,255,0.62),rgba(246,248,250,0.90))] px-6 py-6 dark:bg-[linear-gradient(180deg,rgba(18,20,26,0.85),rgba(10,12,17,0.92))]">
+              <div className="space-y-6">
+                <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                    Current summary
+                  </h3>
+                  <div className="mt-4 space-y-3 text-sm">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Selected agents</div>
+                      <div className="mt-1 text-gray-900 dark:text-gray-100">
+                        {draft.agents.length > 0
+                          ? draft.agents.join(", ")
+                          : "No agent selected yet"}
+                      </div>
                     </div>
-                  )}
+                    <div>
+                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Trigger</div>
+                      <div className="mt-1 text-gray-900 dark:text-gray-100">
+                        {triggerSummary(draft.trigger)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Status</div>
+                      <div className="mt-1 text-gray-900 dark:text-gray-100">{draft.status}</div>
+                    </div>
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-900/20 dark:text-emerald-100">
+                      The planner uses the local LLM configured in RAGnarok. This form now relies on standard browser inputs and direct handlers only.
+                    </div>
+                  </div>
+                </section>
 
-                  {planningState.plans.map((plan) => (
-                    <div key={plan.id} className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                            {plan.name || "Untitled plan"}
+                <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                        Saved plans
+                      </h3>
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        Edit, pause, run, or delete an existing plan.
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+                      {planningState.plans.length}
+                    </span>
+                  </div>
+
+                  <div className="mt-4 space-y-3">
+                    {planningState.plans.length === 0 && (
+                      <div className="rounded-2xl border border-dashed border-gray-200 px-4 py-5 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                        No saved plan yet.
+                      </div>
+                    )}
+
+                    {planningState.plans.map((plan) => (
+                      <div
+                        key={plan.id}
+                        className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                              {plan.name || "Untitled plan"}
+                            </div>
+                            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                              {plan.agents.join(", ") || "No agents"} · {plan.trigger.kind}
+                            </div>
                           </div>
-                          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                            {plan.agents.join(", ") || "No agents"}
-                          </div>
+                          <span className={cn("rounded-full border px-2.5 py-1 text-[11px] font-medium", statusTone(plan.status))}>
+                            {plan.status}
+                          </span>
                         </div>
-                        <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium", statusTone(plan.status))}>
-                          {plan.status}
-                        </span>
-                      </div>
 
-                      <div className="mt-3 space-y-1 text-xs text-gray-500 dark:text-gray-400">
-                        <div>Trigger: {(plan.trigger || {}).kind}</div>
-                        <div>Next run: {formatDateLabel(plan.nextRunAt)}</div>
-                        <div>Last run: {formatDateLabel(plan.lastRunAt)}</div>
-                      </div>
-
-                      {plan.lastSummary && (
-                        <p className="mt-3 text-xs leading-relaxed text-gray-600 dark:text-gray-300 line-clamp-4">
-                          {plan.lastSummary.replace(/^##\s+/gm, "").slice(0, 240)}
-                        </p>
-                      )}
-
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => loadPlanIntoForm(plan)}
-                          className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onTogglePlanStatus(plan)}
-                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors"
-                        >
-                          {plan.status === "active" ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                          {plan.status === "active" ? "Pause" : "Resume"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onRunPlan(plan.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors"
-                        >
-                          <Play className="w-3.5 h-3.5" />
-                          Run now
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onDeletePlan(plan.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-red-200 text-xs font-medium text-red-700 hover:bg-red-50 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="rounded-[1.75rem] border border-gray-200/80 dark:border-gray-800/70 bg-white/85 dark:bg-gray-900/60 p-5 shadow-sm">
-                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Recent Runs</h3>
-                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  Review the last executions performed by the planner.
-                </p>
-                <div className="mt-4 space-y-3 max-h-[360px] overflow-y-auto pr-1">
-                  {planningState.runs.length === 0 && (
-                    <div className="rounded-2xl border border-dashed border-gray-200 dark:border-gray-700 px-4 py-6 text-sm text-gray-500 dark:text-gray-400">
-                      No execution yet.
-                    </div>
-                  )}
-                  {planningState.runs.map((run) => (
-                    <div key={run.id} className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{run.planName}</div>
-                          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                            {run.triggerLabel || run.triggerKind}
-                          </div>
+                        <div className="mt-3 space-y-1 text-xs text-gray-500 dark:text-gray-400">
+                          <div>Next run: {formatDateLabel(plan.nextRunAt)}</div>
+                          <div>Last run: {formatDateLabel(plan.lastRunAt)}</div>
                         </div>
-                        <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium", statusTone(run.status))}>
-                          {run.status}
-                        </span>
+
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onEditPlan(plan)}
+                            className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onTogglePlanStatus(plan)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+                          >
+                            {plan.status === "active" ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                            {plan.status === "active" ? "Pause" : "Resume"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onRunPlan(plan.id)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+                          >
+                            <Play className="h-3.5 w-3.5" />
+                            Run now
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onDeletePlan(plan.id)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700 transition-colors hover:bg-red-100"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Delete
+                          </button>
+                        </div>
                       </div>
-                      <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                        Started: {formatDateLabel(run.startedAt)}
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                    Recent runs
+                  </h3>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Latest execution snapshots.
+                  </p>
+
+                  <div className="mt-4 space-y-3">
+                    {planningState.runs.length === 0 && (
+                      <div className="rounded-2xl border border-dashed border-gray-200 px-4 py-5 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                        No execution yet.
                       </div>
-                      {run.summary && (
-                        <p className="mt-3 text-xs leading-relaxed text-gray-600 dark:text-gray-300 line-clamp-5">
-                          {run.summary.replace(/^##\s+/gm, "").slice(0, 320)}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                    )}
+
+                    {planningState.runs.slice(0, 8).map((run) => (
+                      <div
+                        key={run.id}
+                        className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                              {run.planName}
+                            </div>
+                            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                              {run.triggerLabel || run.triggerKind}
+                            </div>
+                          </div>
+                          <span className={cn("rounded-full border px-2.5 py-1 text-[11px] font-medium", statusTone(run.status))}>
+                            {run.status}
+                          </span>
+                        </div>
+                        <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                          Started: {formatDateLabel(run.startedAt)}
+                        </div>
+                        {run.summary && (
+                          <p className="mt-3 line-clamp-4 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+                            {run.summary.replace(/^##\s+/gm, "").slice(0, 260)}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
               </div>
-            </div>
+            </aside>
           </div>
+
+          <div className="flex items-center justify-between gap-3 border-t border-gray-200/80 bg-white/75 px-6 py-5 backdrop-blur-xl dark:border-gray-800/80 dark:bg-black/20">
+            <div className="text-sm text-gray-500 dark:text-gray-400">
+              Native inputs only: text fields, radios, checkboxes, selects, and a direct save action.
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-2xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSave()}
+                disabled={isBusy}
+                className="rounded-2xl bg-black px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-60"
+              >
+                {editingPlanId ? "Save changes" : "Save planning job"}
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </div>
-    </>,
-    document.body
   );
 }

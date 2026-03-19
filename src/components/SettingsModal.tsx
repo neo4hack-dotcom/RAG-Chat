@@ -22,6 +22,7 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     apiKey: config.apiKey || '',
     model: config.model || '',
     systemPrompt: config.systemPrompt || '',
+    disableSslVerification: config.disableSslVerification ?? false,
     elasticsearchUrl: config.elasticsearchUrl || 'http://localhost:9200',
     elasticsearchIndex: config.elasticsearchIndex || 'rag_documents',
     elasticsearchUsername: config.elasticsearchUsername || '',
@@ -173,7 +174,10 @@ export function SettingsModal({
       const response = await fetch('/api/mcp/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: tool.url }),
+        body: JSON.stringify({
+          url: tool.url,
+          disable_ssl_verification: localConfig.disableSslVerification ?? false,
+        }),
       });
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
@@ -235,7 +239,7 @@ export function SettingsModal({
             username: localConfig.clickhouseUsername,
             password: localConfig.clickhousePassword,
             secure: localConfig.clickhouseSecure,
-            verify_ssl: localConfig.clickhouseVerifySsl,
+            verify_ssl: localConfig.disableSslVerification ? false : localConfig.clickhouseVerifySsl,
             http_path: localConfig.clickhouseHttpPath,
             query_limit: localConfig.clickhouseQueryLimit,
           },
@@ -444,7 +448,7 @@ export function SettingsModal({
           embedding_base_url: localConfig.embeddingBaseUrl,
           embedding_api_key: localConfig.embeddingApiKey || undefined,
           embedding_model: localConfig.embeddingModel,
-          embedding_verify_ssl: localConfig.embeddingVerifySsl,
+          embedding_verify_ssl: localConfig.disableSslVerification ? false : localConfig.embeddingVerifySsl,
           chunk_size: localConfig.chunkSize,
           chunk_overlap: localConfig.chunkOverlap,
         }),
@@ -476,7 +480,7 @@ export function SettingsModal({
           embedding_base_url: localConfig.embeddingBaseUrl,
           embedding_model: localConfig.embeddingModel,
           embedding_api_key: localConfig.embeddingApiKey || undefined,
-          embedding_verify_ssl: localConfig.embeddingVerifySsl,
+          embedding_verify_ssl: localConfig.disableSslVerification ? false : localConfig.embeddingVerifySsl,
           opensearch: localConfig.elasticsearchUrl ? {
             url: localConfig.elasticsearchUrl,
             index: localConfig.elasticsearchIndex,
@@ -514,15 +518,21 @@ export function SettingsModal({
   const fetchEmbeddingModels = async () => {
     setIsRefreshingEmbed(true);
     try {
-      const baseUrl = localConfig.embeddingBaseUrl.replace(/\/$/, '');
-      const headers: Record<string, string> = {};
-      if (localConfig.embeddingApiKey) {
-        headers['Authorization'] = `Bearer ${localConfig.embeddingApiKey}`;
+      const response = await fetch('/api/embedding/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_url: localConfig.embeddingBaseUrl,
+          api_key: localConfig.embeddingApiKey || undefined,
+          disable_ssl_verification: localConfig.disableSslVerification ?? false,
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error((err as any).detail || `HTTP Error: ${response.status}`);
       }
-      const response = await fetch(`${baseUrl}/models`, { headers });
-      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
       const data = await response.json();
-      const fetched: string[] = data.data?.map((m: any) => m.id) || data.models?.map((m: any) => m.name) || [];
+      const fetched: string[] = Array.isArray(data.models) ? data.models : [];
       setEmbeddingModels(fetched);
       if (fetched.length > 0 && !fetched.includes(localConfig.embeddingModel)) {
         setLocalConfig(prev => ({ ...prev, embeddingModel: fetched[0] }));
@@ -544,34 +554,23 @@ export function SettingsModal({
     }
 
     try {
-      const baseUrl = localConfig.baseUrl.replace(/\/$/, '');
-      let url = '';
-      
-      if (localConfig.provider === 'ollama') {
-        url = `${baseUrl}/api/tags`;
-      } else {
-        url = `${baseUrl}/models`;
-      }
-
-      const headers: Record<string, string> = {};
-      if (localConfig.apiKey) {
-        headers['Authorization'] = `Bearer ${localConfig.apiKey}`;
-      }
-
-      const response = await fetch(url, { headers });
-      
+      const response = await fetch('/api/llm/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: localConfig.provider,
+          base_url: localConfig.baseUrl,
+          api_key: localConfig.apiKey || undefined,
+          disable_ssl_verification: localConfig.disableSslVerification ?? false,
+        }),
+      });
       if (!response.ok) {
-        throw new Error(`HTTP Error: ${response.status}`);
+        const err = await response.json().catch(() => ({}));
+        throw new Error((err as any).detail || `HTTP Error: ${response.status}`);
       }
 
       const data = await response.json();
-      let fetchedModels: string[] = [];
-
-      if (localConfig.provider === 'ollama') {
-        fetchedModels = data.models?.map((m: any) => m.name) || [];
-      } else {
-        fetchedModels = data.data?.map((m: any) => m.id) || [];
-      }
+      const fetchedModels: string[] = Array.isArray(data.models) ? data.models : [];
 
       setModels(fetchedModels);
       
@@ -1340,6 +1339,23 @@ export function SettingsModal({
             </div>
           ) : activeTab === 'llm' ? (
             <div className="space-y-5">
+                <div className="rounded-2xl border border-amber-200/80 bg-amber-50/70 px-4 py-3">
+                  <label className="flex items-start gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={localConfig.disableSslVerification}
+                      onChange={(e) => setLocalConfig({ ...localConfig, disableSslVerification: e.target.checked })}
+                      className="mt-0.5 w-4 h-4 rounded text-amber-500 focus:ring-amber-500"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-amber-900">Disable SSL verification for backend calls</span>
+                      <span className="block text-xs text-amber-800/80 mt-1">
+                        Applies to LLM, embeddings, ClickHouse, MCP, and backend model discovery. Use this only for self-signed or internal certificates.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
                 <div>
                   <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     <Zap className="w-4 h-4" /> Provider
@@ -1654,7 +1670,9 @@ export function SettingsModal({
                         onChange={(e) => setLocalConfig({ ...localConfig, clickhouseVerifySsl: e.target.checked })}
                         className="w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500"
                       />
-                      <span className="text-xs text-gray-600 dark:text-gray-400">Verify SSL certificate</span>
+                      <span className="text-xs text-gray-600 dark:text-gray-400">
+                        Verify SSL certificate{localConfig.disableSslVerification ? ' (overridden globally)' : ''}
+                      </span>
                     </label>
                   </div>
 
@@ -1737,7 +1755,9 @@ export function SettingsModal({
                         onChange={(e) => setLocalConfig({ ...localConfig, embeddingVerifySsl: e.target.checked })}
                         className="w-4 h-4 rounded text-blue-500 focus:ring-blue-500"
                       />
-                      <span className="text-xs text-gray-600 dark:text-gray-400">Verify SSL certificate</span>
+                      <span className="text-xs text-gray-600 dark:text-gray-400">
+                        Verify SSL certificate{localConfig.disableSslVerification ? ' (overridden globally)' : ''}
+                      </span>
                     </label>
                     {embedTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/> {embedTestMessage}</p>}
                     {embedTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3"/> {embedTestMessage}</p>}
