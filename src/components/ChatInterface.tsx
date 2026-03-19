@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3 } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn } from "lucide-react";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { FileManagerConfigModal } from "./FileManagerConfigModal";
+import { DataQualityModal } from "./DataQualityModal";
 
 interface ChatInterfaceProps {
   config: AppConfig;
@@ -21,6 +22,139 @@ interface ChatInterfaceProps {
   isDark: boolean;
   onToggleDark: () => void;
   onGoHome?: () => void;
+}
+
+const AGENT_INTRO_MARKERS = {
+  manager: "<!-- agent-intro:manager -->",
+  clickhouse_query: "<!-- agent-intro:clickhouse_query -->",
+  file_management: "<!-- agent-intro:file_management -->",
+  data_quality_tables: "<!-- agent-intro:data_quality_tables -->",
+} as const;
+
+function getAgentIntroContent(agentRole: AgentRole): string | null {
+  if (agentRole === 'manager') {
+    return `${AGENT_INTRO_MARKERS.manager}
+## Agent Manager
+
+This manager works in English and can orchestrate the available specialist agents.
+
+- It routes requests to ClickHouse Query, File management, or Data quality - Tables when needed.
+- It keeps the conversation context while delegated agents ask follow-up questions.
+- It answers directly when no specialist tool is required.`;
+  }
+
+  if (agentRole === 'clickhouse_query') {
+    return `${AGENT_INTRO_MARKERS.clickhouse_query}
+## ClickHouse Query Agent
+
+This agent works in English and guides the analysis safely before running SQL.
+
+- It tries to infer the best table automatically from your question whenever the intent is clear.
+- It only asks you to choose a table, field, or date column when the request stays ambiguous.
+- It can generate charts on demand and also suggests a visualization when the result deserves one.
+- It returns a short final answer, the executed SQL, and a concise reasoning summary.`;
+  }
+
+  if (agentRole === 'file_management') {
+    return `${AGENT_INTRO_MARKERS.file_management}
+## File Management Agent
+
+This agent works in English and uses backend Python tools to inspect and manage files safely.
+
+- Use it to browse folders, read files, summarize CSV or Excel data, and create or edit supported files.
+- Overwrite, move, and delete operations always require an explicit confirmation step before execution.
+- Use the Configure button, or double-click the agent chip below, to configure the sandbox base path, iteration limit, or custom system prompt.`;
+  }
+
+  if (agentRole === 'data_quality_tables') {
+    return `${AGENT_INTRO_MARKERS.data_quality_tables}
+## Data Quality - Tables Agent
+
+This agent works in English and runs structured profiling through a dedicated form.
+
+- Use the form to select the table, columns, sample size, row filter, and optional time column.
+- It computes SQL statistics first, then asks the local LLM to score quality issues and recommend fixes.
+- The final report includes an executive summary, per-column findings, and optional volumetric analysis.`;
+  }
+
+  return null;
+}
+
+function hasAgentIntroMessage(messages: Message[], agentRole: AgentRole): boolean {
+  const marker =
+    agentRole === 'manager'
+      ? AGENT_INTRO_MARKERS.manager
+      : agentRole === 'clickhouse_query'
+        ? AGENT_INTRO_MARKERS.clickhouse_query
+        : agentRole === 'file_management'
+          ? AGENT_INTRO_MARKERS.file_management
+          : agentRole === 'data_quality_tables'
+            ? AGENT_INTRO_MARKERS.data_quality_tables
+          : null;
+  if (!marker) return false;
+  return messages.some((message) => message.role === 'assistant' && message.content.includes(marker));
+}
+
+function createAgentIntroMessage(agentRole: AgentRole): Message | null {
+  const content = getAgentIntroContent(agentRole);
+  if (!content) return null;
+  return {
+    id: `agent-intro-${agentRole}-${Date.now()}`,
+    role: "assistant",
+    content,
+    timestamp: Date.now(),
+  };
+}
+
+type DataQualityFormState = {
+  table: string;
+  columns: string[];
+  sampleSize: number;
+  rowFilter: string;
+  timeColumn: string | null;
+};
+
+const CHAT_ZOOM_MIN = 0.85;
+const CHAT_ZOOM_MAX = 1.4;
+const CHAT_ZOOM_STEP = 0.05;
+const CHAT_ZOOM_DEFAULT = 1;
+
+function clampChatZoom(value: number): number {
+  return Math.min(CHAT_ZOOM_MAX, Math.max(CHAT_ZOOM_MIN, Number(value) || CHAT_ZOOM_DEFAULT));
+}
+
+function buildDataQualityFormState(state?: Partial<DataQualityState> | null): DataQualityFormState {
+  return {
+    table: state?.table ?? "",
+    columns: Array.isArray(state?.columns) ? state.columns.filter(Boolean) : [],
+    sampleSize: state?.sampleSize === 0 ? 0 : (state?.sampleSize ?? 50_000),
+    rowFilter: state?.rowFilter ?? "",
+    timeColumn: state?.timeColumn ?? null,
+  };
+}
+
+function keepColumnsInSchema(columns: string[], schema: DataQualitySchemaColumn[]): string[] {
+  const available = new Set(schema.map((column) => column.name));
+  return columns.filter((column) => available.has(column));
+}
+
+function summarizeDataQualityRun(form: DataQualityFormState): string {
+  const lines = [
+    `Run data quality analysis on table \`${form.table}\`.`,
+    `Columns selected: ${form.columns.length}.`,
+  ];
+  if (form.rowFilter.trim()) {
+    lines.push(`Row filter: \`${form.rowFilter.trim()}\`.`);
+  }
+  if (form.timeColumn) {
+    lines.push(`Volumetric analysis on \`${form.timeColumn}\`.`);
+  }
+  lines.push(
+    form.sampleSize === 0
+      ? "Sample size: full scan capped at 2,000,000 rows."
+      : `Sample size: ${form.sampleSize.toLocaleString()} rows.`
+  );
+  return lines.join("\n");
 }
 
 export function ChatInterface({
@@ -48,12 +182,17 @@ export function ChatInterface({
   const [isConnected, setIsConnected] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [chatZoom, setChatZoom] = useState(CHAT_ZOOM_DEFAULT);
+  const [isZoomControlOpen, setIsZoomControlOpen] = useState(false);
   
   // Refs for DOM elements
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const dataQualityBootstrapRef = useRef<string | null>(null);
+  const zoomControlRef = useRef<HTMLDivElement>(null);
+  const agentIntroBootstrapRef = useRef<string | null>(null);
+  const dataQualityAutoOpenRef = useRef(false);
+  const dataQualityMetadataRequestRef = useRef(0);
   const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   const currentConversation = conversations.find(c => c.id === currentId);
@@ -62,7 +201,7 @@ export function ChatInterface({
   const planningAgentState = normalizePlanningAgentState((currentConversation?.agentState as any)?.planning, browserTimeZone);
   const fileManagerAgentState = normalizeFileManagerAgentState((currentConversation?.agentState as any)?.fileManager);
   const dataQualityAgentState = normalizeDataQualityState((currentConversation?.agentState as any)?.dataQuality);
-  const messages = currentConversation?.messages || [
+  const fallbackMessages = currentConversation?.messages || [
     {
       id: "1",
       role: "assistant",
@@ -74,6 +213,13 @@ export function ChatInterface({
       ]
     },
   ];
+  const pendingAgentIntro =
+    !currentConversation && workflow === 'AGENT'
+      ? createAgentIntroMessage(agentRole)
+      : null;
+  const messages = pendingAgentIntro && !hasAgentIntroMessage(fallbackMessages, agentRole)
+    ? [...fallbackMessages, pendingAgentIntro]
+    : fallbackMessages;
   const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
   const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
   const [plannerDraft, setPlannerDraft] = useState<CrewPlanDraft>(() => normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
@@ -82,6 +228,12 @@ export function ChatInterface({
   const [planningError, setPlanningError] = useState<string | null>(null);
   const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'data_quality_tables');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
+  const [isDataQualityModalOpen, setIsDataQualityModalOpen] = useState(false);
+  const [isDataQualityMetadataLoading, setIsDataQualityMetadataLoading] = useState(false);
+  const [dataQualityFormError, setDataQualityFormError] = useState<string | null>(null);
+  const [dataQualityForm, setDataQualityForm] = useState<DataQualityFormState>(() => buildDataQualityFormState(dataQualityAgentState));
+  const [dataQualityTables, setDataQualityTables] = useState<string[]>(dataQualityAgentState.availableTables);
+  const [dataQualitySchema, setDataQualitySchema] = useState<DataQualitySchemaColumn[]>(dataQualityAgentState.schemaInfo);
 
   // --- ACTIONS ---
   
@@ -133,6 +285,29 @@ export function ChatInterface({
   useEffect(() => {
     scrollToBottom();
   }, [messages, isLoading]);
+
+  useEffect(() => {
+    if (!isZoomControlOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!zoomControlRef.current?.contains(event.target as Node)) {
+        setIsZoomControlOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsZoomControlOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [isZoomControlOpen]);
 
   useEffect(() => {
     if ((config.mcpTools ?? []).length === 0) {
@@ -199,130 +374,285 @@ export function ChatInterface({
   }, [workflow, agentRole]);
 
   useEffect(() => {
-    if (workflow !== 'AGENT' || agentRole !== 'data_quality_tables' || isLoading) return;
+    if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
+    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'file_management' && agentRole !== 'data_quality_tables') return;
+    if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
 
-    const hasStartedSetup =
-      dataQualityAgentState.stage !== 'idle' ||
-      Boolean(dataQualityAgentState.table) ||
-      Boolean(dataQualityAgentState.finalAnswer);
-    const hasGuidanceMessage = messages.some(
-      (message) =>
-        message.role === 'assistant' &&
-        (
-          message.content.includes('## Data quality - Tables') ||
-          message.content.includes('## Data Quality Review') ||
-          message.content.includes('## Table Selection')
-        )
+    const bootstrapKey = `${currentConversation.id}:${agentRole}:${currentConversation.updatedAt}`;
+    if (agentIntroBootstrapRef.current === bootstrapKey) return;
+    agentIntroBootstrapRef.current = bootstrapKey;
+
+    const introMessage = createAgentIntroMessage(agentRole);
+    if (!introMessage) return;
+
+    onConversationsChange((prev) =>
+      prev.map((conversation) =>
+        conversation.id === currentConversation.id
+          ? {
+              ...conversation,
+              messages: [...conversation.messages, introMessage],
+              memory: buildConversationMemory([...conversation.messages, introMessage]),
+              updatedAt: Date.now(),
+            }
+          : conversation
+      )
     );
-    const bootstrapKey = `${currentId ?? 'new'}:${currentConversation?.updatedAt ?? 0}`;
-    if (hasStartedSetup || hasGuidanceMessage || dataQualityBootstrapRef.current === bootstrapKey) {
+  }, [workflow, agentRole, currentConversation, isLoading, onConversationsChange]);
+
+  useEffect(() => {
+    if (isDataQualityModalOpen) {
+      return;
+    }
+    setDataQualityForm(buildDataQualityFormState(dataQualityAgentState));
+    setDataQualityTables(dataQualityAgentState.availableTables);
+    setDataQualitySchema(dataQualityAgentState.schemaInfo);
+  }, [dataQualityAgentState, isDataQualityModalOpen]);
+
+  const loadDataQualityMetadata = async (nextTable?: string, preferredColumns?: string[]) => {
+    const requestId = ++dataQualityMetadataRequestRef.current;
+    const normalizedTable = String(nextTable ?? '').trim();
+    setIsDataQualityMetadataLoading(true);
+    setDataQualityFormError(null);
+    try {
+      const response = await fetch('/api/data-quality/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          table: normalizedTable || undefined,
+          clickhouse: {
+            host: config.clickhouseHost,
+            port: config.clickhousePort,
+            database: config.clickhouseDatabase,
+            username: config.clickhouseUsername,
+            password: config.clickhousePassword,
+            secure: config.clickhouseSecure,
+            verify_ssl: config.clickhouseVerifySsl,
+            http_path: config.clickhouseHttpPath,
+            query_limit: config.clickhouseQueryLimit,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Data quality metadata error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (requestId !== dataQualityMetadataRequestRef.current) return;
+
+      const normalizedState = normalizeDataQualityState({
+        table: normalizedTable || null,
+        schemaInfo: data.schema_info,
+        availableTables: data.available_tables,
+        availableColumns: data.available_columns,
+        dateColumns: data.date_columns,
+      });
+
+      setDataQualityTables(normalizedState.availableTables);
+      setDataQualitySchema(normalizedState.schemaInfo);
+      setDataQualityForm((prev) => {
+        const explicitColumnsProvided = Array.isArray(preferredColumns);
+        const preservedColumns = keepColumnsInSchema(preferredColumns ?? prev.columns, normalizedState.schemaInfo);
+        const nextColumns = normalizedTable
+          ? (
+              preservedColumns.length > 0
+                ? preservedColumns
+                : explicitColumnsProvided
+                  ? []
+                  : normalizedState.schemaInfo.map((column) => column.name)
+            )
+          : [];
+        const nextTimeColumn =
+          prev.timeColumn && normalizedState.dateColumns.includes(prev.timeColumn)
+            ? prev.timeColumn
+            : null;
+
+        return {
+          ...prev,
+          table: normalizedTable,
+          columns: nextColumns,
+          timeColumn: nextTimeColumn,
+        };
+      });
+    } catch (error) {
+      if (requestId !== dataQualityMetadataRequestRef.current) return;
+      setDataQualityTables([]);
+      setDataQualitySchema([]);
+      setDataQualityForm((prev) => ({
+        ...prev,
+        table: normalizedTable,
+        columns: [],
+        timeColumn: null,
+      }));
+      setDataQualityFormError(error instanceof Error ? error.message : 'Unable to load data-quality metadata.');
+    } finally {
+      if (requestId === dataQualityMetadataRequestRef.current) {
+        setIsDataQualityMetadataLoading(false);
+      }
+    }
+  };
+
+  const openDataQualityModal = async () => {
+    setIsDataQualityModalOpen(true);
+    setDataQualityFormError(null);
+    await loadDataQualityMetadata(dataQualityForm.table, dataQualityForm.columns);
+  };
+
+  useEffect(() => {
+    if (workflow === 'AGENT' && agentRole === 'data_quality_tables') {
+      if (isLoading) {
+        return;
+      }
+      if (!dataQualityAutoOpenRef.current) {
+        dataQualityAutoOpenRef.current = true;
+        void openDataQualityModal();
+      }
       return;
     }
 
-    dataQualityBootstrapRef.current = bootstrapKey;
-
-    void (async () => {
-      try {
-        const response = await fetch('/api/chat/data-quality-agent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: '',
-            history: currentConversation?.memory?.steps ?? [],
-            agent_state: dataQualityAgentState ?? undefined,
-            clickhouse: {
-              host: config.clickhouseHost,
-              port: config.clickhousePort,
-              database: config.clickhouseDatabase,
-              username: config.clickhouseUsername,
-              password: config.clickhousePassword,
-              secure: config.clickhouseSecure,
-              verify_ssl: config.clickhouseVerifySsl,
-              http_path: config.clickhouseHttpPath,
-              query_limit: config.clickhouseQueryLimit,
-            },
-            llm_base_url: config.baseUrl,
-            llm_model: config.model,
-            llm_api_key: config.apiKey || undefined,
-            llm_provider: config.provider,
-          }),
-        });
-
-        if (!response.ok) {
-          return;
-        }
-
-        const data = await response.json();
-        const assistantMsg: Message = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: data.answer,
-          timestamp: Date.now(),
-          steps: data.steps,
-        };
-        const nextState = normalizeDataQualityState(data.agent_state);
-
-        if (!currentId) {
-          const conversationId = Date.now().toString();
-          const newConversation: Conversation = {
-            id: conversationId,
-            title: 'Data quality - Tables',
-            messages: [assistantMsg],
-            memory: buildConversationMemory([assistantMsg]),
-            updatedAt: Date.now(),
-            agentState: {
-              dataQuality: nextState,
-            },
-          };
-          onConversationsChange((prev) => [newConversation, ...prev]);
-          onCurrentIdChange(conversationId);
-          return;
-        }
-
-        onConversationsChange((prev) =>
-          prev.map((conversation) =>
-            conversation.id === currentId
-              ? {
-                  ...conversation,
-                  messages: [...conversation.messages, assistantMsg],
-                  memory: buildConversationMemory([...conversation.messages, assistantMsg]),
-                  updatedAt: Date.now(),
-                  agentState: {
-                    ...(conversation.agentState ?? {}),
-                    dataQuality: nextState,
-                  },
-                }
-              : conversation
-          )
-        );
-      } catch {
-        // Keep the UI responsive even if the backend onboarding call fails.
-      }
-    })();
+    dataQualityAutoOpenRef.current = false;
+    setIsDataQualityModalOpen(false);
+    setDataQualityFormError(null);
   }, [
     workflow,
     agentRole,
     isLoading,
-    currentId,
-    currentConversation,
-    messages,
-    dataQualityAgentState,
-    config.clickhouseHost,
-    config.clickhousePort,
-    config.clickhouseDatabase,
-    config.clickhouseUsername,
-    config.clickhousePassword,
-    config.clickhouseSecure,
-    config.clickhouseVerifySsl,
-    config.clickhouseHttpPath,
-    config.clickhouseQueryLimit,
-    config.baseUrl,
-    config.model,
-    config.apiKey,
-    config.provider,
-    onConversationsChange,
-    onCurrentIdChange,
   ]);
+
+  const handleDataQualityRun = async () => {
+    const table = dataQualityForm.table.trim();
+    const columns = keepColumnsInSchema(dataQualityForm.columns, dataQualitySchema);
+    if (!table) {
+      setDataQualityFormError('Choose a table before running the analysis.');
+      return;
+    }
+    if (columns.length === 0) {
+      setDataQualityFormError('Select at least one column to profile.');
+      return;
+    }
+
+    const selectedTimeColumn =
+      dataQualityForm.timeColumn && dataQualitySchema.some((column) => column.name === dataQualityForm.timeColumn && column.category === 'date')
+        ? dataQualityForm.timeColumn
+        : null;
+    const payload = {
+      __dq__: true,
+      table,
+      columns,
+      sample_size: dataQualityForm.sampleSize,
+      ...(dataQualityForm.rowFilter.trim() ? { row_filter: dataQualityForm.rowFilter.trim() } : {}),
+      ...(selectedTimeColumn ? { time_column: selectedTimeColumn } : {}),
+    };
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: "user",
+      content: summarizeDataQualityRun({
+        ...dataQualityForm,
+        table,
+        columns,
+        timeColumn: selectedTimeColumn,
+      }),
+      timestamp: Date.now(),
+    };
+    const baseMessages = currentConversation?.messages ?? messages;
+    const nextMessages = [...baseMessages, userMsg];
+
+    setDataQualityFormError(null);
+    setIsLoading(true);
+
+    try {
+      const response = await fetch('/api/chat/data-quality-agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: JSON.stringify(payload, null, 2),
+          history: buildConversationMemory(nextMessages).steps.map((step) => ({
+            role: step.role,
+            content: step.content,
+          })),
+          agent_state: dataQualityAgentState ?? undefined,
+          clickhouse: {
+            host: config.clickhouseHost,
+            port: config.clickhousePort,
+            database: config.clickhouseDatabase,
+            username: config.clickhouseUsername,
+            password: config.clickhousePassword,
+            secure: config.clickhouseSecure,
+            verify_ssl: config.clickhouseVerifySsl,
+            http_path: config.clickhouseHttpPath,
+            query_limit: config.clickhouseQueryLimit,
+          },
+          llm_base_url: config.baseUrl,
+          llm_model: config.model,
+          llm_api_key: config.apiKey || undefined,
+          llm_provider: config.provider,
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Data Quality Agent error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const nextState = normalizeDataQualityState(data.agent_state);
+      const assistantDataQualityMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: data.answer,
+        timestamp: Date.now(),
+        steps: data.steps,
+      };
+      const conversationMessages = [...nextMessages, assistantDataQualityMsg];
+
+      if (!currentId) {
+        const conversationId = Date.now().toString();
+        const newConversation: Conversation = {
+          id: conversationId,
+          title: `Data quality · ${table}`,
+          messages: conversationMessages,
+          memory: buildConversationMemory(conversationMessages),
+          updatedAt: Date.now(),
+          agentState: {
+            dataQuality: nextState,
+          },
+        };
+        onConversationsChange((prev) => [newConversation, ...prev]);
+        onCurrentIdChange(conversationId);
+      } else {
+        onConversationsChange((prev) => {
+          const idx = prev.findIndex((conversation) => conversation.id === currentId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            messages: conversationMessages,
+            memory: buildConversationMemory(conversationMessages),
+            updatedAt: Date.now(),
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              dataQuality: nextState,
+            },
+          };
+          const [conversation] = updated.splice(idx, 1);
+          updated.unshift(conversation);
+          return updated;
+        });
+      }
+
+      setIsConnected(true);
+      setDataQualityForm(buildDataQualityFormState(nextState));
+      setDataQualityTables(nextState.availableTables);
+      setDataQualitySchema(nextState.schemaInfo);
+      setIsDataQualityModalOpen(false);
+    } catch (error) {
+      setIsConnected(false);
+      setDataQualityFormError(error instanceof Error ? error.message : 'Unable to run the data-quality analysis.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const openPlanningModal = (nextDraft?: Partial<CrewPlanDraft> | null) => {
     if (nextDraft) {
@@ -521,6 +851,10 @@ export function ChatInterface({
 
   // Main function to handle sending a message
   const handleSend = async (text: string = input) => {
+    if (workflow === 'AGENT' && agentRole === 'data_quality_tables') {
+      void openDataQualityModal();
+      return;
+    }
     if ((!text.trim() && attachments.length === 0) || isLoading) return;
 
     // Construct the user message object
@@ -925,68 +1259,6 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'AGENT' && agentRole === 'data_quality_tables') {
-        const response = await fetch('/api/chat/data-quality-agent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: text,
-            history: memoryHistory,
-            agent_state: dataQualityAgentState ?? undefined,
-            clickhouse: {
-              host: config.clickhouseHost,
-              port: config.clickhousePort,
-              database: config.clickhouseDatabase,
-              username: config.clickhouseUsername,
-              password: config.clickhousePassword,
-              secure: config.clickhouseSecure,
-              verify_ssl: config.clickhouseVerifySsl,
-              http_path: config.clickhouseHttpPath,
-              query_limit: config.clickhouseQueryLimit,
-            },
-            llm_base_url: config.baseUrl,
-            llm_model: config.model,
-            llm_api_key: config.apiKey || undefined,
-            llm_provider: config.provider,
-          }),
-        });
-
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}));
-          throw new Error(err.detail || `Data Quality Agent error: ${response.status}`);
-        }
-
-        const data = await response.json();
-        reply = data.answer;
-        nextDataQualityAgentState = normalizeDataQualityState(data.agent_state);
-        setIsConnected(true);
-
-        const assistantDataQualityMsg: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: reply,
-          timestamp: Date.now(),
-          steps: data.steps,
-        };
-
-        onConversationsChange(prev => {
-          const idx = prev.findIndex(c => c.id === activeConvId);
-          if (idx === -1) return prev;
-          const updated = [...prev];
-          updated[idx] = {
-            ...updated[idx],
-            agentState: {
-              ...(updated[idx].agentState ?? {}),
-              dataQuality: nextDataQualityAgentState,
-            },
-            messages: [...updated[idx].messages, assistantDataQualityMsg],
-            memory: buildConversationMemory([...updated[idx].messages, assistantDataQualityMsg]),
-            updatedAt: Date.now(),
-          };
-          return updated;
-        });
-        setIsLoading(false);
-        return;
       } else {
         // Standard LLM / Agent flow (calls external API directly from frontend)
         let dynamicSystemPrompt = config.systemPrompt;
@@ -1132,10 +1404,9 @@ export function ChatInterface({
   };
 
   const handleCheckboxToggle = (messageId: string, text: string, checked: boolean) => {
-    // When a user clicks a checkbox proposed by the LLM, we can automatically send a message
-    // or just update local state. Let's send a contextual message if checked.
+    // Clarification tiles should act like direct quick replies.
     if (checked) {
-      handleSend(`I choose: ${text}`);
+      handleSend(text);
     }
   };
 
@@ -1147,12 +1418,13 @@ export function ChatInterface({
         : workflow === 'AGENT' && agentRole === 'file_management'
           ? "Ask to list, read, create, move, edit, or delete files..."
         : workflow === 'AGENT' && agentRole === 'data_quality_tables'
-          ? "Start the guided setup or paste a structured data-quality JSON payload..."
+          ? "Open the Data Quality form to configure a profiling run..."
         : workflow === 'AGENT' && agentRole === 'manager'
           ? "Describe the outcome you want, and the Manager will route it if needed..."
         : workflow === 'MCP'
           ? "Message your MCP tool..."
           : "Message your AI agent...";
+  const chatZoomPercent = Math.round(chatZoom * 100);
 
   return (
     <div className="flex h-screen relative overflow-hidden bg-[#f5f5f5] dark:bg-[#0f0f13] transition-colors duration-300">
@@ -1268,6 +1540,10 @@ export function ChatInterface({
         </div>
       </header>
 
+      <div
+        className="flex-1 flex flex-col min-h-0"
+        style={{ zoom: chatZoom }}
+      >
       {/* Chat Area */}
       <main className="flex-1 overflow-y-auto p-4 md:p-8 z-10 scroll-smooth">
         <div className="max-w-[67rem] mx-auto pb-20">
@@ -1289,100 +1565,6 @@ export function ChatInterface({
               <div className="glass-panel px-6 py-4 rounded-[2rem] rounded-tl-sm flex items-center gap-2">
                 <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
                 <span className="text-sm text-gray-500 dark:text-gray-400 font-medium">Thinking...</span>
-              </div>
-            </div>
-          )}
-
-          {workflow === 'AGENT' && agentRole === 'manager' && (
-            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-900/20 dark:to-orange-900/20 border border-amber-200/50 dark:border-amber-700/40 shadow-sm animate-fade-in-up">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
-                <h3 className="font-semibold text-amber-900 dark:text-amber-200 text-[13px]">Agent Manager Brief</h3>
-              </div>
-              <div className="text-[11px] text-amber-800/90 dark:text-amber-300/90 leading-relaxed space-y-1">
-                <p>Welcome to the <strong>Agent Manager</strong> mode. Here is what you can do:</p>
-                <ul className="list-disc pl-4 space-y-0.5">
-                  <li>Route a request to the best specialist when ClickHouse querying, table quality analysis, or file operations are needed.</li>
-                  <li>Keep the conversation context while following clarifications from delegated agents.</li>
-                  <li>Answer directly when no specialist tool is necessary.</li>
-                </ul>
-                <p className="italic mt-1 text-amber-700/70">Tip: Ask for the business outcome you want, and the Manager will decide whether to answer directly or orchestrate a specialist.</p>
-              </div>
-            </div>
-          )}
-
-          {workflow === 'AGENT' && agentRole === 'clickhouse_query' && (
-            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-cyan-50 to-sky-50 dark:from-cyan-900/20 dark:to-sky-900/20 border border-cyan-200/60 dark:border-cyan-700/40 shadow-sm animate-fade-in-up">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Database className="w-4 h-4 text-cyan-600 dark:text-cyan-300" />
-                <h3 className="font-semibold text-cyan-900 dark:text-cyan-200 text-[13px]">ClickHouse Query Agent</h3>
-              </div>
-              <div className="text-[11px] text-cyan-900/85 dark:text-cyan-300/90 leading-relaxed space-y-1">
-                <p>This agent works in English and guides the analysis safely before running SQL.</p>
-                <ul className="list-disc pl-4 space-y-0.5">
-                  <li>It tries to infer the best table automatically from your question whenever the intent is clear.</li>
-                  <li>It only asks you to choose a table, field, or date column when the request stays ambiguous.</li>
-                  <li>It can generate charts on demand and also suggests a visualization when the result deserves one.</li>
-                  <li>It returns a short final answer, the executed SQL, and a concise reasoning summary.</li>
-                </ul>
-              </div>
-            </div>
-          )}
-
-          {workflow === 'AGENT' && agentRole === 'file_management' && (
-            <div className="max-w-[67rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-emerald-50 to-lime-50 dark:from-emerald-900/20 dark:to-lime-900/20 border border-emerald-200/60 dark:border-emerald-700/40 shadow-sm animate-fade-in-up">
-              <div className="flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <FolderOpen className="w-4 h-4 text-emerald-600 dark:text-emerald-300" />
-                    <h3 className="font-semibold text-emerald-900 dark:text-emerald-200 text-[13px]">File Management Agent</h3>
-                  </div>
-                  <div className="text-[11px] text-emerald-900/85 dark:text-emerald-300/90 leading-relaxed space-y-1">
-                    <p>This agent works in English and uses backend Python tools to inspect and manage files safely.</p>
-                    <ul className="list-disc pl-4 space-y-0.5">
-                      <li>Use it to browse folders, read files, summarize CSV or Excel data, and create or edit supported files.</li>
-                      <li>Overwrite, move, and delete operations always require an explicit confirmation step before execution.</li>
-                      <li>Double-click the agent chip below to configure the sandbox base path, iteration limit, or custom system prompt.</li>
-                    </ul>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsFileManagerConfigOpen(true)}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors flex-shrink-0"
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                  Configure
-                </button>
-              </div>
-            </div>
-          )}
-
-          {workflow === 'AGENT' && agentRole === 'data_quality_tables' && (
-            <div className="max-w-[67rem] mx-auto mb-4 p-4 rounded-xl bg-gradient-to-br from-fuchsia-50 to-rose-50 dark:from-fuchsia-900/20 dark:to-rose-900/20 border border-fuchsia-200/60 dark:border-fuchsia-700/40 shadow-sm animate-fade-in-up">
-              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <BarChart3 className="w-4 h-4 text-fuchsia-600 dark:text-fuchsia-300" />
-                    <h3 className="font-semibold text-fuchsia-900 dark:text-fuchsia-200 text-[13px]">Data quality - Tables</h3>
-                  </div>
-                  <div className="text-[11px] text-fuchsia-900/85 dark:text-fuchsia-300/90 leading-relaxed space-y-1">
-                    <p>This agent profiles table columns statistically, then uses the local LLM to score data quality and recommend fixes.</p>
-                    <ul className="list-disc pl-4 space-y-0.5">
-                      <li>It guides you through table, columns, sample size, optional row filter, and optional time column.</li>
-                      <li>It accepts a structured JSON payload with <code>__dq__</code> if you want to launch directly.</li>
-                      <li>It currently runs on the configured ClickHouse connection and returns the full report in English.</li>
-                    </ul>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void handleSend('start guided setup')}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors flex-shrink-0"
-                >
-                  <BarChart3 className="w-3.5 h-3.5" />
-                  Start guided setup
-                </button>
               </div>
             </div>
           )}
@@ -1599,6 +1781,30 @@ export function ChatInterface({
                   </button>
                 </div>
               </div>
+              {agentRole === 'file_management' && (
+                <div className="flex items-center gap-2 pl-3 ml-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsFileManagerConfigOpen(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    Configure
+                  </button>
+                </div>
+              )}
+              {agentRole === 'data_quality_tables' && (
+                <div className="flex items-center gap-2 pl-3 ml-1">
+                  <button
+                    type="button"
+                    onClick={() => void openDataQualityModal()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" />
+                    Open form
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1607,6 +1813,88 @@ export function ChatInterface({
           AI can make mistakes. Consider verifying important information.
         </div>
       </div>
+      </div>
+      </div>
+
+      <div
+        ref={zoomControlRef}
+        className="absolute right-5 top-1/2 z-30 flex -translate-y-1/2 flex-col items-end gap-3"
+      >
+        {isZoomControlOpen && (
+          <div className="glass-panel w-56 rounded-[1.75rem] p-3 shadow-[0_18px_45px_rgba(15,23,42,0.18)] animate-scale-in">
+            <div className="flex items-center justify-between px-1 pb-2">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                  Chat Zoom
+                </div>
+                <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
+                  {chatZoomPercent}%
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChatZoom(CHAT_ZOOM_DEFAULT)}
+                className="inline-flex items-center gap-1 rounded-full bg-black/5 px-2.5 py-1.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reset
+              </button>
+            </div>
+
+            <div className="rounded-[1.5rem] bg-white/60 p-1.5 dark:bg-white/5">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setChatZoom((current) => clampChatZoom(current - CHAT_ZOOM_STEP))}
+                  disabled={chatZoom <= CHAT_ZOOM_MIN}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-[1.15rem] text-gray-700 transition-colors hover:bg-black/5 disabled:opacity-40 dark:text-gray-200 dark:hover:bg-white/10"
+                  title="Zoom out"
+                >
+                  <Minus className="h-4 w-4" />
+                </button>
+                <div className="min-w-0 flex-1">
+                  <input
+                    type="range"
+                    min={CHAT_ZOOM_MIN}
+                    max={CHAT_ZOOM_MAX}
+                    step={CHAT_ZOOM_STEP}
+                    value={chatZoom}
+                    onChange={(event) => setChatZoom(clampChatZoom(Number(event.target.value)))}
+                    className="h-2 w-full cursor-pointer appearance-none rounded-full bg-black/10 accent-black dark:bg-white/10 dark:accent-white"
+                    aria-label="Chat zoom"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setChatZoom((current) => clampChatZoom(current + CHAT_ZOOM_STEP))}
+                  disabled={chatZoom >= CHAT_ZOOM_MAX}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-[1.15rem] text-gray-700 transition-colors hover:bg-black/5 disabled:opacity-40 dark:text-gray-200 dark:hover:bg-white/10"
+                  title="Zoom in"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-2 px-1 text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
+              Adjust the message area and composer without changing the rest of the interface.
+            </div>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setIsZoomControlOpen((open) => !open)}
+          className="group flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-white/65 text-gray-800 shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02] hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55"
+          title="Chat zoom"
+        >
+          <div className="flex flex-col items-center gap-0.5">
+            <ZoomIn className="h-4.5 w-4.5" />
+            <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+              {chatZoomPercent}
+            </span>
+          </div>
+        </button>
       </div>
 
       <PlanningModal
@@ -1637,6 +1925,47 @@ export function ChatInterface({
           }));
           setIsFileManagerConfigOpen(false);
         }}
+      />
+      <DataQualityModal
+        isOpen={isDataQualityModalOpen}
+        isBusy={isLoading}
+        isLoadingMetadata={isDataQualityMetadataLoading}
+        error={dataQualityFormError}
+        tables={dataQualityTables}
+        schema={dataQualitySchema}
+        selectedTable={dataQualityForm.table}
+        selectedColumns={dataQualityForm.columns}
+        sampleSize={dataQualityForm.sampleSize}
+        rowFilter={dataQualityForm.rowFilter}
+        timeColumn={dataQualityForm.timeColumn}
+        onClose={() => setIsDataQualityModalOpen(false)}
+        onRefreshMetadata={() => loadDataQualityMetadata(dataQualityForm.table, dataQualityForm.columns)}
+        onTableChange={(table) => {
+          setDataQualityForm((prev) => ({
+            ...prev,
+            table,
+            columns: [],
+            timeColumn: null,
+          }));
+          void loadDataQualityMetadata(table);
+        }}
+        onColumnsChange={(columns) => {
+          const uniqueColumns = Array.from(new Set(columns));
+          setDataQualityForm((prev) => ({
+            ...prev,
+            columns: uniqueColumns,
+          }));
+        }}
+        onSampleSizeChange={(sampleSize) => {
+          setDataQualityForm((prev) => ({ ...prev, sampleSize }));
+        }}
+        onRowFilterChange={(rowFilter) => {
+          setDataQualityForm((prev) => ({ ...prev, rowFilter }));
+        }}
+        onTimeColumnChange={(timeColumn) => {
+          setDataQualityForm((prev) => ({ ...prev, timeColumn }));
+        }}
+        onSubmit={handleDataQualityRun}
       />
     </div>
   );
