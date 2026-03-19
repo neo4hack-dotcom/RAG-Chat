@@ -428,6 +428,7 @@ export function ChatInterface({
   const agentIntroBootstrapRef = useRef<string | null>(null);
   const dataQualityAutoOpenRef = useRef(false);
   const dataQualityMetadataRequestRef = useRef(0);
+  const toolsIslandRef = useRef<HTMLDivElement>(null);
   const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   const currentConversation = conversations.find(c => c.id === currentId);
@@ -476,6 +477,7 @@ export function ChatInterface({
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
   const [planningBusy, setPlanningBusy] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
+  const [isToolsIslandOpen, setIsToolsIslandOpen] = useState(false);
   const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
   const [isMcpMenuExpanded, setIsMcpMenuExpanded] = useState(workflow === 'MCP');
   const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables');
@@ -489,6 +491,13 @@ export function ChatInterface({
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
 
   // --- ACTIONS ---
+
+  const collapseToolsIsland = () => {
+    setIsToolsIslandOpen(false);
+    setIsAgentMenuExpanded(false);
+    setIsMcpMenuExpanded(false);
+    setIsOtherAgentsOpen(false);
+  };
 
   const resetChatShell = () => {
     agentIntroBootstrapRef.current = null;
@@ -513,43 +522,59 @@ export function ChatInterface({
   const handleWorkflowSelection = (nextWorkflow: WorkflowMode) => {
     if (workflow === nextWorkflow) {
       if (nextWorkflow === 'AGENT') {
-        setIsAgentMenuExpanded((open) => !open);
-        if (isAgentMenuExpanded) {
+        setIsToolsIslandOpen(true);
+        const nextExpanded = !isAgentMenuExpanded;
+        setIsAgentMenuExpanded(nextExpanded);
+        setIsMcpMenuExpanded(false);
+        if (!nextExpanded) {
           setIsOtherAgentsOpen(false);
+        } else if (agentRole !== 'manager') {
+          setIsOtherAgentsOpen(true);
         }
       } else if (nextWorkflow === 'MCP') {
+        setIsToolsIslandOpen(true);
         setIsMcpMenuExpanded((open) => !open);
+        setIsAgentMenuExpanded(false);
+        setIsOtherAgentsOpen(false);
+      } else {
+        collapseToolsIsland();
       }
       return;
     }
     resetChatShell();
-    setIsAgentMenuExpanded(nextWorkflow === 'AGENT');
-    setIsMcpMenuExpanded(nextWorkflow === 'MCP');
-    if (nextWorkflow !== 'AGENT') {
+    if (nextWorkflow === 'AGENT') {
+      setIsToolsIslandOpen(true);
+      setIsAgentMenuExpanded(true);
+      setIsMcpMenuExpanded(false);
+      setIsOtherAgentsOpen(agentRole !== 'manager');
+    } else if (nextWorkflow === 'MCP') {
+      setIsToolsIslandOpen(true);
+      setIsAgentMenuExpanded(false);
+      setIsMcpMenuExpanded(true);
       setIsOtherAgentsOpen(false);
+    } else {
+      collapseToolsIsland();
     }
     onWorkflowChange(nextWorkflow);
   };
 
   const handleAgentRoleSelection = (nextRole: AgentRole) => {
     if (workflow === 'AGENT' && agentRole === nextRole) {
-      setIsAgentMenuExpanded(false);
-      setIsOtherAgentsOpen(false);
+      collapseToolsIsland();
       return;
     }
     resetChatShell();
-    setIsAgentMenuExpanded(false);
-    setIsOtherAgentsOpen(false);
+    collapseToolsIsland();
     onAgentRoleChange(nextRole);
   };
 
   const handleMcpToolSelection = (nextToolId: string) => {
     if (mcpToolId === nextToolId) {
-      setIsMcpMenuExpanded(false);
+      collapseToolsIsland();
       return;
     }
     resetChatShell();
-    setIsMcpMenuExpanded(false);
+    collapseToolsIsland();
     onMcpToolIdChange(nextToolId);
   };
 
@@ -630,6 +655,29 @@ export function ChatInterface({
   }, [isZoomControlOpen]);
 
   useEffect(() => {
+    if (!isToolsIslandOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!toolsIslandRef.current?.contains(event.target as Node)) {
+        collapseToolsIsland();
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        collapseToolsIsland();
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [isToolsIslandOpen]);
+
+  useEffect(() => {
     if ((config.mcpTools ?? []).length === 0) {
       if (mcpToolId) onMcpToolIdChange('');
       return;
@@ -700,6 +748,9 @@ export function ChatInterface({
     }
     if (workflow !== 'MCP') {
       setIsMcpMenuExpanded(false);
+    }
+    if (workflow !== 'AGENT' && workflow !== 'MCP' && workflow !== 'LLM' && workflow !== 'RAG' && workflow !== 'CREWAI') {
+      setIsToolsIslandOpen(false);
     }
   }, [workflow]);
 
@@ -2040,11 +2091,53 @@ export function ChatInterface({
           ? "Message your MCP tool..."
           : "Message your AI agent...";
   const chatZoomPercent = Math.round(chatZoom * 100);
-  const workflowRailButtonBase = "w-full flex items-center justify-start gap-2 px-3 py-2.5 rounded-2xl text-[11px] font-medium leading-tight transition-all text-left whitespace-nowrap";
-  const workflowRailSubButtonBase = "w-full flex items-center justify-start gap-1.5 px-2.5 py-2.5 rounded-2xl text-[11px] font-medium leading-tight transition-all text-left whitespace-nowrap";
-  const workflowRailNestedPanelBase = "rounded-[1.5rem] border bg-white/78 dark:bg-black/18 backdrop-blur-xl p-2.5 flex flex-col gap-2.5 shadow-[0_18px_40px_rgba(15,23,42,0.08)]";
-  const isSecondLevelMenuExpanded = (workflow === 'AGENT' && isAgentMenuExpanded) || (workflow === 'MCP' && isMcpMenuExpanded);
-  const workflowRailWidthClass = isSecondLevelMenuExpanded ? 'xl:w-[276px]' : 'xl:w-[208px]';
+  const toolsPrimaryButtonBase = "inline-flex min-h-[2.65rem] items-center justify-center gap-2 rounded-full px-4 py-2 text-[11px] font-medium leading-tight transition-all whitespace-nowrap";
+  const toolsSecondaryButtonBase = "inline-flex min-h-[2.55rem] items-center justify-center gap-1.5 rounded-full px-3.5 py-2 text-[11px] font-medium leading-tight transition-all whitespace-nowrap";
+  const toolsNestedPanelBase = "rounded-[1.7rem] border bg-white/72 dark:bg-black/22 backdrop-blur-2xl p-3 flex flex-col gap-2.5 shadow-[0_20px_45px_rgba(15,23,42,0.10)]";
+  const toolsIslandLevel = (workflow === 'AGENT' && isAgentMenuExpanded) || (workflow === 'MCP' && isMcpMenuExpanded)
+    ? 2
+    : isToolsIslandOpen
+      ? 1
+      : 0;
+  const toolsIslandHeightClass =
+    toolsIslandLevel === 2
+      ? workflow === 'AGENT'
+        ? isOtherAgentsOpen
+          ? 'h-[24.5rem] md:h-[20rem]'
+          : 'h-[14.75rem] md:h-[11.5rem]'
+        : 'h-[10.75rem] md:h-[8.5rem]'
+      : toolsIslandLevel === 1
+        ? 'h-[6.4rem] md:h-[5rem]'
+        : 'h-[2.8rem]';
+  const toolsIslandWidthClass =
+    toolsIslandLevel === 2
+      ? 'max-w-[42rem]'
+      : toolsIslandLevel === 1
+        ? 'max-w-[34rem]'
+        : 'max-w-[12rem]';
+  const activeMcpToolLabel = (config.mcpTools ?? []).find((tool: McpTool) => tool.id === mcpToolId)?.label ?? 'MCP';
+  const activeToolsSummary =
+    workflow === 'AGENT'
+      ? agentRole === 'manager'
+        ? 'Agent Manager'
+        : agentRole === 'clickhouse_query'
+          ? 'Clickhouse SQL'
+          : agentRole === 'data_analyst'
+            ? 'Data Analyst'
+            : agentRole === 'file_management'
+              ? 'File management'
+              : agentRole === 'pdf_creator'
+                ? 'PDF creator'
+                : agentRole === 'oracle_analyst'
+                  ? 'Oracle SQL'
+                  : 'Data quality'
+      : workflow === 'MCP'
+        ? activeMcpToolLabel
+        : workflow === 'RAG'
+          ? 'RAG Knowledge'
+          : workflow === 'CREWAI'
+            ? 'CrewAI - Planning'
+            : 'Pure LLM';
   const floatingUtilityButtonClass = "group flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-white/65 text-gray-800 shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02] hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55";
   const formattedSystemPrompt = withBeautifulResponsePrompt(config.systemPrompt);
   const formattedOracleSystemPrompt = withBeautifulResponsePrompt(config.oracleAnalystConfig.systemPrompt);
@@ -2169,180 +2262,7 @@ export function ChatInterface({
         style={{ zoom: chatZoom }}
       >
         <div className="flex-1 min-h-0 px-4 md:px-8 pb-4">
-          <div className="h-full max-w-[98rem] mx-auto flex flex-col xl:flex-row gap-4 xl:gap-6">
-            <aside className={`${workflowRailWidthClass} xl:flex-shrink-0 xl:flex xl:items-center xl:justify-center transition-[width] duration-300 ease-out`}>
-              <div className="glass-panel w-full rounded-[2rem] p-3 xl:p-3.5 flex flex-col gap-3">
-                <div className="px-1">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
-                    Modes
-                  </p>
-                </div>
-
-                <div className="flex flex-col gap-2">
-                  <button
-                    onClick={() => handleWorkflowSelection('LLM')}
-                    className={`${workflowRailButtonBase} ${workflow === 'LLM' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <Cpu className="w-4 h-4" /> Pure LLM
-                  </button>
-                  <button
-                    onClick={() => handleWorkflowSelection('RAG')}
-                    className={`${workflowRailButtonBase} ${workflow === 'RAG' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <Database className="w-4 h-4" /> RAG Knowledge
-                  </button>
-                  <button
-                    onClick={() => handleWorkflowSelection('AGENT')}
-                    className={`${workflowRailButtonBase} ${workflow === 'AGENT' ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <Network className="w-4 h-4" /> Agents
-                  </button>
-                  <button
-                    onClick={() => handleWorkflowSelection('MCP')}
-                    className={`${workflowRailButtonBase} ${workflow === 'MCP' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-200 border border-teal-200 dark:border-teal-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <Cpu className="w-4 h-4" /> MCP
-                  </button>
-                  <button
-                    onClick={() => handleWorkflowSelection('CREWAI')}
-                    className={`${workflowRailButtonBase} ${workflow === 'CREWAI' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <CalendarDays className="w-4 h-4" /> CrewAI - Planning
-                  </button>
-                </div>
-
-                {workflow === 'MCP' && isMcpMenuExpanded && (
-                  <div className="relative ml-3 pl-3">
-                    <div className="absolute left-0 top-3 bottom-3 w-px rounded-full bg-gradient-to-b from-teal-300/80 via-teal-200/50 to-transparent dark:from-teal-700/80 dark:via-teal-900/40 dark:to-transparent" />
-                    <div className="absolute -left-[4px] top-4 h-2.5 w-2.5 rounded-full border border-teal-300 bg-white shadow-sm dark:border-teal-700 dark:bg-teal-950/70" />
-                    <div className={`${workflowRailNestedPanelBase} border-teal-200/80 dark:border-teal-800/60`}>
-                      <div className="flex items-center justify-between px-1">
-                        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-teal-700 dark:text-teal-300">
-                          MCP Tools
-                        </div>
-                        <span className="rounded-full border border-teal-200/80 bg-teal-50/80 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-teal-600 dark:border-teal-800/70 dark:bg-teal-950/35 dark:text-teal-300">
-                          Level 2
-                        </span>
-                      </div>
-                      {(config.mcpTools ?? []).length === 0 ? (
-                        <span className="px-1 text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
-                      ) : (
-                        (config.mcpTools ?? []).map((tool: McpTool) => (
-                          <button
-                            key={tool.id}
-                            onClick={() => handleMcpToolSelection(tool.id)}
-                            className={`${workflowRailSubButtonBase} ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20 border border-teal-500' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-teal-200/70 dark:border-teal-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                          >
-                            <Network className="w-3.5 h-3.5" /> {tool.label}
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {workflow === 'AGENT' && isAgentMenuExpanded && (
-                  <div className="relative ml-3 pl-3">
-                    <div className="absolute left-0 top-3 bottom-3 w-px rounded-full bg-gradient-to-b from-purple-300/80 via-purple-200/50 to-transparent dark:from-purple-700/80 dark:via-purple-900/40 dark:to-transparent" />
-                    <div className="absolute -left-[4px] top-4 h-2.5 w-2.5 rounded-full border border-purple-300 bg-white shadow-sm dark:border-purple-700 dark:bg-purple-950/70" />
-                    <div className={`${workflowRailNestedPanelBase} border-purple-200/80 dark:border-purple-800/60`}>
-                      <div className="flex items-center justify-between px-1">
-                        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-purple-700 dark:text-purple-300">
-                          Agent Selection
-                        </div>
-                        <span className="rounded-full border border-purple-200/80 bg-purple-50/80 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-purple-600 dark:border-purple-800/70 dark:bg-purple-950/35 dark:text-purple-300">
-                          Level 2
-                        </span>
-                      </div>
-
-                      <button
-                        onClick={() => handleAgentRoleSelection('manager')}
-                        className={`${workflowRailSubButtonBase} ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-purple-200/70 dark:border-purple-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                      >
-                        <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
-                      </button>
-
-                      <button
-                        onClick={() => setIsOtherAgentsOpen((open) => !open)}
-                        className={`${workflowRailSubButtonBase} ${isOtherAgentsOpen ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-purple-200/70 dark:border-purple-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                      >
-                        {isOtherAgentsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                        Other agents
-                      </button>
-
-                      <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-[32rem] opacity-100' : 'max-h-0 opacity-0'}`}>
-                        <div className="mt-1 ml-2 rounded-[1.25rem] border border-cyan-200/70 bg-cyan-50/65 p-2 dark:border-cyan-800/60 dark:bg-cyan-950/20">
-                          <div className="pl-2 border-l-2 border-cyan-200 dark:border-cyan-800 flex flex-col gap-2">
-                            <button
-                              onClick={() => handleAgentRoleSelection('clickhouse_query')}
-                              className={`${workflowRailSubButtonBase} ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20 border border-cyan-500' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-cyan-200/70 dark:border-cyan-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                            >
-                              <Database className="w-3.5 h-3.5" /> Clickhouse SQL
-                            </button>
-                            <button
-                              onClick={() => handleAgentRoleSelection('data_analyst')}
-                              className={`${workflowRailSubButtonBase} ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20 border border-violet-500' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-violet-200/70 dark:border-violet-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                            >
-                              <Cpu className="w-3.5 h-3.5" /> Data Analyst
-                            </button>
-                            <button
-                              onClick={() => handleAgentRoleSelection('file_management')}
-                              onDoubleClick={() => setIsFileManagerConfigOpen(true)}
-                              title="Double-click to configure"
-                              className={`${workflowRailSubButtonBase} ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20 border border-emerald-500' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-emerald-200/70 dark:border-emerald-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                            >
-                              <FolderOpen className="w-3.5 h-3.5" /> File management
-                            </button>
-                            <button
-                              onClick={() => handleAgentRoleSelection('pdf_creator')}
-                              className={`${workflowRailSubButtonBase} ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20 border border-slate-700' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-slate-200/70 dark:border-slate-700 hover:bg-white dark:hover:bg-white/10'}`}
-                            >
-                              <File className="w-3.5 h-3.5" /> PDF creator
-                            </button>
-                            <button
-                              onClick={() => handleAgentRoleSelection('oracle_analyst')}
-                              className={`${workflowRailSubButtonBase} ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20 border border-orange-500' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-orange-200/70 dark:border-orange-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                            >
-                              <Database className="w-3.5 h-3.5" /> Oracle SQL
-                            </button>
-                            <button
-                              onClick={() => handleAgentRoleSelection('data_quality_tables')}
-                              className={`${workflowRailSubButtonBase} ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20 border border-fuchsia-500' : 'bg-white/85 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-fuchsia-200/70 dark:border-fuchsia-800/70 hover:bg-white dark:hover:bg-white/10'}`}
-                            >
-                              <BarChart3 className="w-3.5 h-3.5" /> Data quality - Tables
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-
-                      {agentRole === 'file_management' && (
-                        <button
-                          type="button"
-                          onClick={() => setIsFileManagerConfigOpen(true)}
-                          className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
-                        >
-                          <Settings className="w-3.5 h-3.5" />
-                          Configure
-                        </button>
-                      )}
-
-                      {agentRole === 'data_quality_tables' && (
-                        <button
-                          type="button"
-                          onClick={() => void openDataQualityModal()}
-                          className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
-                        >
-                          <BarChart3 className="w-3.5 h-3.5" />
-                          Open form
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-              </div>
-            </aside>
-
+          <div className="h-full max-w-[82rem] mx-auto flex flex-col">
             <div className="flex-1 min-w-0 flex flex-col min-h-0">
               {/* Chat Area */}
               <main ref={chatScrollContainerRef} className="flex-1 overflow-y-auto z-10 scroll-smooth">
@@ -2503,6 +2423,217 @@ export function ChatInterface({
                     >
                       <Send className="w-4.5 h-4.5 ml-0.5" />
                     </button>
+                  </div>
+                </div>
+
+                <div className={`relative mt-2 flex justify-center overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${toolsIslandHeightClass}`}>
+                  <div
+                    ref={toolsIslandRef}
+                    className={`w-full ${toolsIslandWidthClass} translate-y-1 rounded-[2.35rem] border border-white/65 bg-white/72 p-3 shadow-[0_28px_70px_rgba(15,23,42,0.16)] backdrop-blur-3xl transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] dark:border-white/10 dark:bg-black/48`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isToolsIslandOpen) {
+                          collapseToolsIsland();
+                        } else {
+                          setIsToolsIslandOpen(true);
+                        }
+                      }}
+                      className="flex w-full items-center justify-between rounded-[1.55rem] bg-gradient-to-r from-black/[0.04] via-white/70 to-black/[0.04] px-3 py-2.5 text-left transition-colors hover:bg-black/[0.06] dark:from-white/[0.04] dark:via-white/[0.08] dark:to-white/[0.04] dark:hover:bg-white/[0.08]"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-black text-white shadow-sm dark:bg-white dark:text-black">
+                          <Hammer className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
+                            Tools
+                          </div>
+                          <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            {activeToolsSummary}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white/80 text-gray-500 shadow-sm dark:bg-white/10 dark:text-gray-300">
+                        <ChevronDown className={`h-4 w-4 transition-transform duration-300 ${isToolsIslandOpen ? 'rotate-180' : 'rotate-0'}`} />
+                      </div>
+                    </button>
+
+                    <div className={`overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${isToolsIslandOpen ? 'mt-3 max-h-[32rem] opacity-100' : 'mt-0 max-h-0 opacity-0'}`}>
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        <button
+                          onClick={() => handleWorkflowSelection('LLM')}
+                          className={`${toolsPrimaryButtonBase} ${workflow === 'LLM' ? 'bg-blue-500 text-white shadow-md shadow-blue-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                        >
+                          <Cpu className="h-4 w-4" /> Pure LLM
+                        </button>
+                        <button
+                          onClick={() => handleWorkflowSelection('RAG')}
+                          className={`${toolsPrimaryButtonBase} ${workflow === 'RAG' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                        >
+                          <Database className="h-4 w-4" /> RAG Knowledge
+                        </button>
+                        <button
+                          onClick={() => handleWorkflowSelection('AGENT')}
+                          className={`${toolsPrimaryButtonBase} ${workflow === 'AGENT' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                        >
+                          <Network className="h-4 w-4" /> Agents
+                        </button>
+                        <button
+                          onClick={() => handleWorkflowSelection('MCP')}
+                          className={`${toolsPrimaryButtonBase} ${workflow === 'MCP' ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                        >
+                          <Cpu className="h-4 w-4" /> MCP
+                        </button>
+                        <button
+                          onClick={() => handleWorkflowSelection('CREWAI')}
+                          className={`${toolsPrimaryButtonBase} ${workflow === 'CREWAI' ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                        >
+                          <CalendarDays className="h-4 w-4" /> CrewAI - Planning
+                        </button>
+                      </div>
+
+                      {workflow === 'MCP' && isMcpMenuExpanded && (
+                        <div className={`mt-3 ${toolsNestedPanelBase} border-teal-200/80 dark:border-teal-800/60`}>
+                          <div className="flex items-center justify-between gap-3 px-1">
+                            <div>
+                              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-teal-700 dark:text-teal-300">
+                                MCP Tools
+                              </div>
+                              <div className="mt-1 text-xs text-teal-900/70 dark:text-teal-200/75">
+                                Pick the MCP connector you want to message.
+                              </div>
+                            </div>
+                            <span className="rounded-full border border-teal-200/80 bg-teal-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-teal-600 dark:border-teal-800/70 dark:bg-teal-950/35 dark:text-teal-300">
+                              Level 2
+                            </span>
+                          </div>
+
+                          {(config.mcpTools ?? []).length === 0 ? (
+                            <span className="px-1 text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
+                          ) : (
+                            <div className="flex flex-wrap gap-2">
+                              {(config.mcpTools ?? []).map((tool: McpTool) => (
+                                <button
+                                  key={tool.id}
+                                  onClick={() => handleMcpToolSelection(tool.id)}
+                                  className={`${toolsSecondaryButtonBase} ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/85 text-gray-700 border border-teal-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-teal-800/70 dark:hover:bg-white/10'}`}
+                                >
+                                  <Network className="h-3.5 w-3.5" /> {tool.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {workflow === 'AGENT' && isAgentMenuExpanded && (
+                        <div className={`mt-3 ${toolsNestedPanelBase} border-purple-200/80 dark:border-purple-800/60`}>
+                          <div className="flex items-center justify-between gap-3 px-1">
+                            <div>
+                              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-purple-700 dark:text-purple-300">
+                                Agent Selection
+                              </div>
+                              <div className="mt-1 text-xs text-purple-900/70 dark:text-purple-200/75">
+                                Choose a specialist, then the island retracts back into its compact mode.
+                              </div>
+                            </div>
+                            <span className="rounded-full border border-purple-200/80 bg-purple-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-purple-600 dark:border-purple-800/70 dark:bg-purple-950/35 dark:text-purple-300">
+                              Level 2
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => handleAgentRoleSelection('manager')}
+                              className={`${toolsSecondaryButtonBase} ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/25' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
+                            >
+                              <Star className={`h-3.5 w-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'fill-amber-500 text-amber-500'}`} />
+                              Agent Manager
+                            </button>
+
+                            <button
+                              onClick={() => setIsOtherAgentsOpen((open) => !open)}
+                              className={`${toolsSecondaryButtonBase} ${isOtherAgentsOpen ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
+                            >
+                              {isOtherAgentsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                              Other agents
+                            </button>
+                          </div>
+
+                          <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-[24rem] opacity-100' : 'max-h-0 opacity-0'}`}>
+                            <div className="rounded-[1.4rem] border border-cyan-200/70 bg-cyan-50/70 p-2.5 dark:border-cyan-800/60 dark:bg-cyan-950/20">
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  onClick={() => handleAgentRoleSelection('clickhouse_query')}
+                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/85 text-gray-700 border border-cyan-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-cyan-800/70 dark:hover:bg-white/10'}`}
+                                >
+                                  <Database className="h-3.5 w-3.5" /> Clickhouse SQL
+                                </button>
+                                <button
+                                  onClick={() => handleAgentRoleSelection('data_analyst')}
+                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/85 text-gray-700 border border-violet-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-violet-800/70 dark:hover:bg-white/10'}`}
+                                >
+                                  <Cpu className="h-3.5 w-3.5" /> Data Analyst
+                                </button>
+                                <button
+                                  onClick={() => handleAgentRoleSelection('file_management')}
+                                  onDoubleClick={() => setIsFileManagerConfigOpen(true)}
+                                  title="Double-click to configure"
+                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/85 text-gray-700 border border-emerald-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-emerald-800/70 dark:hover:bg-white/10'}`}
+                                >
+                                  <FolderOpen className="h-3.5 w-3.5" /> File management
+                                </button>
+                                <button
+                                  onClick={() => handleAgentRoleSelection('pdf_creator')}
+                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/85 text-gray-700 border border-slate-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-slate-700 dark:hover:bg-white/10'}`}
+                                >
+                                  <File className="h-3.5 w-3.5" /> PDF creator
+                                </button>
+                                <button
+                                  onClick={() => handleAgentRoleSelection('oracle_analyst')}
+                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/85 text-gray-700 border border-orange-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-orange-800/70 dark:hover:bg-white/10'}`}
+                                >
+                                  <Database className="h-3.5 w-3.5" /> Oracle SQL
+                                </button>
+                                <button
+                                  onClick={() => handleAgentRoleSelection('data_quality_tables')}
+                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20' : 'bg-white/85 text-gray-700 border border-fuchsia-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-fuchsia-800/70 dark:hover:bg-white/10'}`}
+                                >
+                                  <BarChart3 className="h-3.5 w-3.5" /> Data quality - Tables
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          {(agentRole === 'file_management' || agentRole === 'data_quality_tables') && (
+                            <div className="flex flex-wrap gap-2">
+                              {agentRole === 'file_management' && (
+                                <button
+                                  type="button"
+                                  onClick={() => setIsFileManagerConfigOpen(true)}
+                                  className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
+                                >
+                                  <Settings className="h-3.5 w-3.5" />
+                                  Configure
+                                </button>
+                              )}
+                              {agentRole === 'data_quality_tables' && (
+                                <button
+                                  type="button"
+                                  onClick={() => void openDataQualityModal()}
+                                  className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
+                                >
+                                  <BarChart3 className="h-3.5 w-3.5" />
+                                  Open form
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
