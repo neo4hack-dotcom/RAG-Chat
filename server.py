@@ -20,6 +20,7 @@ import os
 import asyncio
 import fnmatch
 import hashlib
+import io
 import csv
 import shutil
 import math
@@ -77,8 +78,8 @@ DEFAULT_APP_CONFIG = {
     "model": "llama3",
     "systemPrompt": (
         "You are a helpful, smart, and concise AI assistant. Format your responses "
-        "beautifully using markdown. When offering choices, use markdown task lists "
-        "(- [ ] Option)."
+        "beautifully using markdown. When offering choices or clarification options, "
+        "always use markdown task lists (- [ ] Option) so the UI can present clickable replies."
     ),
     "elasticsearchUrl": "http://localhost:9200",
     "elasticsearchIndex": "rag_documents",
@@ -96,6 +97,7 @@ DEFAULT_APP_CONFIG = {
         {"id": "mcp_2", "label": "MCP Tool 2", "url": ""},
     ],
     "documentationUrl": "",
+    "portalApps": [],
     "settingsAccessPassword": "MM@2026",
     "clickhouseHost": "localhost",
     "clickhousePort": 8123,
@@ -106,6 +108,30 @@ DEFAULT_APP_CONFIG = {
     "clickhouseVerifySsl": True,
     "clickhouseHttpPath": "",
     "clickhouseQueryLimit": 200,
+    "oracleConnections": [
+        {
+            "id": "oracle_default",
+            "label": "Default Oracle",
+            "host": "localhost",
+            "port": 1521,
+            "serviceName": "",
+            "sid": "",
+            "dsn": "",
+            "username": "",
+            "password": "",
+        }
+    ],
+    "oracleAnalystConfig": {
+        "connectionId": "oracle_default",
+        "rowLimit": 1000,
+        "maxRetries": 3,
+        "maxIterations": 8,
+        "toolkitId": "",
+        "systemPrompt": (
+            "You are the Oracle Analyst agent. Reply in English. Use Oracle tools before making assumptions, "
+            "generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise."
+        ),
+    },
     "fileManagerConfig": {
         "basePath": "",
         "maxIterations": 10,
@@ -126,7 +152,7 @@ DEFAULT_PREFERENCES = {
     "page": "landing",
 }
 
-AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "data_quality_tables"}
+AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_quality_tables"}
 PLANNER_AGENT_ROLES = {"manager", "clickhouse_query", "file_management"}
 PLANNER_TRIGGER_KINDS = {
     "once",
@@ -358,6 +384,34 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
                 **DEFAULT_APP_CONFIG["fileManagerConfig"],
                 **incoming_file_manager,
             }
+        incoming_portal_apps = incoming_config.get("portalApps")
+        if isinstance(incoming_portal_apps, list):
+            state["config"]["portalApps"] = [
+                {
+                    "id": str(item.get("id") or f"portal_app_{index + 1}").strip() or f"portal_app_{index + 1}",
+                    "name": str(item.get("name") or "").strip(),
+                    "url": str(item.get("url") or "").strip(),
+                    "description": str(item.get("description") or "").strip(),
+                }
+                for index, item in enumerate(incoming_portal_apps)
+                if isinstance(item, dict)
+            ]
+        incoming_oracle_agent = incoming_config.get("oracleAnalystConfig")
+        if isinstance(incoming_oracle_agent, dict):
+            state["config"]["oracleAnalystConfig"] = {
+                **DEFAULT_APP_CONFIG["oracleAnalystConfig"],
+                **incoming_oracle_agent,
+            }
+        incoming_oracle_connections = incoming_config.get("oracleConnections")
+        if isinstance(incoming_oracle_connections, list) and incoming_oracle_connections:
+            state["config"]["oracleConnections"] = [
+                {
+                    **DEFAULT_APP_CONFIG["oracleConnections"][0],
+                    **connection,
+                }
+                for connection in incoming_oracle_connections
+                if isinstance(connection, dict)
+            ] or json.loads(json.dumps(DEFAULT_APP_CONFIG["oracleConnections"]))
 
     incoming_conversations = payload.get("conversations")
     if isinstance(incoming_conversations, list):
@@ -714,6 +768,309 @@ def classify_clickhouse_column_type(type_name: str) -> str:
     if any(token in lowered for token in ["string", "fixedstring", "uuid", "enum"]):
         return "string"
     return "other"
+
+
+# ── Oracle helpers ────────────────────────────────────────────────────────────
+
+ORACLE_REACT_MAX_ITERATIONS = 8
+ORACLE_MAX_ROW_LIMIT = 50_000
+ORACLE_DEFAULT_ROW_LIMIT = 1_000
+ORACLE_TABLE_PREVIEW_LIMIT = 40
+ORACLE_RESULT_PREVIEW_ROWS = 12
+ORACLE_SYSTEM_OWNERS = {
+    "ANONYMOUS", "APPQOSSYS", "AUDSYS", "CTXSYS", "DBSNMP", "DIP", "DMSYS",
+    "GGSYS", "GSMADMIN_INTERNAL", "GSMCATUSER", "LBACSYS", "MDSYS", "OJVMSYS",
+    "OLAPSYS", "ORDDATA", "ORDPLUGINS", "ORDSYS", "OUTLN", "REMOTE_SCHEDULER_AGENT",
+    "SI_INFORMTN_SCHEMA", "SYS", "SYSTEM", "WMSYS", "XDB",
+}
+ORACLE_FORBIDDEN_FILTER_KEYWORDS = [
+    "drop", "delete", "insert", "update", "create", "alter", "exec", "execute",
+    "merge", "grant", "revoke", "commit", "rollback", "union", "sleep", "dbms_lock",
+]
+ORACLE_REACT_TOOL_NAMES = {"list_tables", "get_schema", "check_query", "execute_query"}
+
+
+def _import_oracledb():
+    try:
+        import oracledb
+        return oracledb
+    except ImportError as exc:
+        raise ValueError("The optional dependency `oracledb` is required for Oracle features.") from exc
+
+
+def quote_oracle_literal(value: str) -> str:
+    escaped = str(value or "").replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _normalize_oracle_identifier_part(value: str) -> str:
+    text = str(value or "").strip().strip('"')
+    return text.upper()
+
+
+def parse_oracle_table_reference(table_ref: str) -> tuple[Optional[str], str]:
+    text = str(table_ref or "").strip()
+    if not text:
+        raise ValueError("An Oracle table name is required.")
+    if "." in text:
+        owner, table_name = text.split(".", 1)
+        return _normalize_oracle_identifier_part(owner), _normalize_oracle_identifier_part(table_name)
+    return None, _normalize_oracle_identifier_part(text)
+
+
+def quote_oracle_identifier(name: str) -> str:
+    normalized = _normalize_oracle_identifier_part(name)
+    if re.fullmatch(r"[A-Z][A-Z0-9_$#]*", normalized):
+        return normalized
+    escaped = str(name or "").replace('"', '""')
+    return f'"{escaped}"'
+
+
+def quote_oracle_table_reference(table_ref: str) -> str:
+    owner, table_name = parse_oracle_table_reference(table_ref)
+    if owner:
+        return f"{quote_oracle_identifier(owner)}.{quote_oracle_identifier(table_name)}"
+    return quote_oracle_identifier(table_name)
+
+
+def is_safe_read_only_oracle_sql(sql: str) -> bool:
+    cleaned = clean_sql_text(sql).lower()
+    if not cleaned or ";" in cleaned:
+        return False
+    if not (cleaned.startswith("select") or cleaned.startswith("with")):
+        return False
+    forbidden = [
+        "insert", "update", "delete", "merge", "alter", "drop", "truncate", "create",
+        "grant", "revoke", "comment", "call", "execute immediate",
+    ]
+    return not any(re.search(rf"\b{keyword}\b", cleaned) for keyword in forbidden)
+
+
+def enforce_oracle_row_limit(sql: str, row_limit: int) -> str:
+    cleaned = clean_sql_text(sql)
+    safe_limit = max(1, min(int(row_limit or ORACLE_DEFAULT_ROW_LIMIT), ORACLE_MAX_ROW_LIMIT))
+    lowered = cleaned.lower()
+    if re.search(r"\bfetch\s+first\s+\d+\s+rows\s+only\b", lowered):
+        return cleaned
+    if re.search(r"\brownum\s*<=\s*\d+\b", lowered):
+        return cleaned
+    return f"{cleaned}\nFETCH FIRST {safe_limit} ROWS ONLY"
+
+
+def _serialize_oracle_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if isinstance(value, bytes):
+        return value.hex()
+    return str(value)
+
+
+def _oracle_make_dsn(connection: OracleConnectionConfig) -> str:
+    if connection.dsn.strip():
+        return connection.dsn.strip()
+    if not connection.host.strip():
+        raise ValueError("Oracle host is required unless a custom DSN is provided.")
+    if connection.service_name.strip():
+        oracledb = _import_oracledb()
+        return oracledb.makedsn(connection.host.strip(), int(connection.port or 1521), service_name=connection.service_name.strip())
+    if connection.sid.strip():
+        oracledb = _import_oracledb()
+        return oracledb.makedsn(connection.host.strip(), int(connection.port or 1521), sid=connection.sid.strip())
+    raise ValueError("Oracle connection requires either a service name, a SID, or a custom DSN.")
+
+
+def _oracle_connect_sync(connection: OracleConnectionConfig):
+    oracledb = _import_oracledb()
+    return oracledb.connect(
+        user=connection.username.strip(),
+        password=connection.password,
+        dsn=_oracle_make_dsn(connection),
+    )
+
+
+def _oracle_list_tables_sync(connection: OracleConnectionConfig) -> list[str]:
+    sql = """
+        SELECT owner || '.' || table_name AS table_name
+        FROM all_tables
+        WHERE owner NOT IN ({owners})
+        ORDER BY owner, table_name
+        FETCH FIRST 2000 ROWS ONLY
+    """.strip().format(
+        owners=", ".join(quote_oracle_literal(owner) for owner in sorted(ORACLE_SYSTEM_OWNERS))
+    )
+    with _oracle_connect_sync(connection) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            return [str(row[0]) for row in cursor.fetchall() if row and row[0]]
+
+
+def _oracle_get_schema_sync(
+    connection: OracleConnectionConfig,
+    table_name: str,
+    columns_filter: str = "",
+) -> list[dict[str, Any]]:
+    owner, parsed_table = parse_oracle_table_reference(table_name)
+    filters = [
+        "table_name = :table_name",
+    ]
+    params: dict[str, Any] = {"table_name": parsed_table}
+    if owner:
+        filters.append("owner = :owner")
+        params["owner"] = owner
+
+    filtered_columns = [
+        _normalize_oracle_identifier_part(column)
+        for column in re.split(r"[\s,]+", columns_filter or "")
+        if str(column).strip()
+    ]
+    if filtered_columns:
+        binds = []
+        for index, column_name in enumerate(filtered_columns):
+            key = f"col_{index}"
+            binds.append(f":{key}")
+            params[key] = column_name
+        filters.append(f"column_name IN ({', '.join(binds)})")
+
+    sql = f"""
+        SELECT column_name,
+               data_type ||
+               CASE
+                 WHEN data_precision IS NOT NULL AND data_scale IS NOT NULL THEN '(' || data_precision || ',' || data_scale || ')'
+                 WHEN data_precision IS NOT NULL THEN '(' || data_precision || ')'
+                 WHEN char_col_decl_length IS NOT NULL THEN '(' || char_col_decl_length || ')'
+                 ELSE ''
+               END AS column_type,
+               nullable
+        FROM all_tab_columns
+        WHERE {' AND '.join(filters)}
+        ORDER BY column_id
+    """.strip()
+
+    with _oracle_connect_sync(connection) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+    return [
+        {
+            "name": str(row[0]),
+            "type": str(row[1] or ""),
+            "nullable": str(row[2] or "").upper() == "Y",
+        }
+        for row in rows
+    ]
+
+
+def _oracle_check_query_sync(connection: OracleConnectionConfig, sql: str) -> dict[str, Any]:
+    query = clean_sql_text(sql)
+    if not is_safe_read_only_oracle_sql(query):
+        raise ValueError("Only read-only Oracle SELECT queries are allowed.")
+
+    with _oracle_connect_sync(connection) as conn:
+        with conn.cursor() as cursor:
+            try:
+                cursor.execute(f"EXPLAIN PLAN FOR {query}")
+                return {"valid": True, "mode": "explain"}
+            except Exception as explain_exc:
+                try:
+                    wrapped = f"SELECT * FROM ({query}) WHERE 1 = 0"
+                    cursor.execute(wrapped)
+                    return {"valid": True, "mode": "parse_only", "warning": str(explain_exc)}
+                except Exception as parse_exc:
+                    raise ValueError(str(parse_exc)) from parse_exc
+
+
+def _oracle_execute_query_sync(
+    connection: OracleConnectionConfig,
+    sql: str,
+    row_limit: int,
+) -> dict[str, Any]:
+    query = clean_sql_text(sql)
+    if not is_safe_read_only_oracle_sql(query):
+        raise ValueError("Only read-only Oracle SELECT queries are allowed.")
+    final_query = enforce_oracle_row_limit(query, row_limit)
+
+    with _oracle_connect_sync(connection) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(final_query)
+            description = cursor.description or []
+            rows = cursor.fetchmany(max(1, min(int(row_limit or ORACLE_DEFAULT_ROW_LIMIT), ORACLE_MAX_ROW_LIMIT)))
+
+    columns = [
+        {
+            "name": str(column[0]),
+            "type": str(getattr(column[1], "__name__", column[1]) if len(column) > 1 else ""),
+        }
+        for column in description
+    ]
+    headers = [column["name"] for column in columns]
+    data = [
+        {
+            header: _serialize_oracle_value(value)
+            for header, value in zip(headers, row)
+        }
+        for row in rows
+    ]
+    return {"sql": final_query, "columns": columns, "rows": data, "row_count": len(data)}
+
+
+async def list_oracle_tables(connection: OracleConnectionConfig) -> list[str]:
+    return await asyncio.to_thread(_oracle_list_tables_sync, connection)
+
+
+async def get_oracle_schema(
+    connection: OracleConnectionConfig,
+    table_name: str,
+    columns_filter: str = "",
+) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_oracle_get_schema_sync, connection, table_name, columns_filter)
+
+
+async def check_oracle_query(connection: OracleConnectionConfig, sql: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_oracle_check_query_sync, connection, sql)
+
+
+async def execute_oracle_query(
+    connection: OracleConnectionConfig,
+    sql: str,
+    row_limit: int,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(_oracle_execute_query_sync, connection, sql, row_limit)
+
+
+def _oracle_test_connection_sync(connection: OracleConnectionConfig) -> dict[str, Any]:
+    with _oracle_connect_sync(connection) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema,
+                    SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user
+                FROM dual
+                """
+            )
+            row = cursor.fetchone() or ("", "")
+    tables = _oracle_list_tables_sync(connection)
+    return {
+        "connection_id": connection.id,
+        "label": connection.label or connection.id,
+        "current_schema": str(row[0] or "").strip(),
+        "session_user": str(row[1] or "").strip(),
+        "table_count": len(tables),
+        "tables": tables[:ORACLE_TABLE_PREVIEW_LIMIT],
+    }
+
+
+async def test_oracle_connection(connection: OracleConnectionConfig) -> dict[str, Any]:
+    return await asyncio.to_thread(_oracle_test_connection_sync, connection)
 
 
 def _default_data_quality_state() -> dict[str, Any]:
@@ -3077,6 +3434,543 @@ def _file_export_answer(result: dict[str, Any], payload: dict[str, Any]) -> str:
     return answer
 
 
+PDF_CREATOR_SOURCE_CHOICES = [
+    "Use the latest analysis in this chat",
+    "Paste the content in your next message",
+]
+PDF_CREATOR_MAX_TEXT_CHARS = 120_000
+PDF_CREATOR_ACCENT_RGB = (0.215, 0.490, 0.870)
+PDF_CREATOR_SLATE_RGB = (0.098, 0.145, 0.219)
+PDF_CREATOR_TEXT_RGB = (0.180, 0.219, 0.294)
+PDF_CREATOR_MUTED_RGB = (0.463, 0.506, 0.576)
+PDF_CREATOR_CODE_BG_RGB = (0.953, 0.965, 0.980)
+PDF_CREATOR_RULE_RGB = (0.847, 0.871, 0.902)
+
+
+def _pdf_escape_text(value: str) -> str:
+    safe = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    return (
+        safe
+        .replace("\\", "\\\\")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+    )
+
+
+def _slugify_filename(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", normalized.lower()).strip("-")
+    return cleaned or "report"
+
+
+def _markdown_inline_to_plain_text(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"_([^_]+)_", r"\1", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _wrap_text_for_pdf(text: str, max_chars: int) -> list[str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return [""]
+    words = cleaned.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+            continue
+        candidate = f"{current} {word}"
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        lines.append(current)
+        current = word
+    if current:
+        lines.append(current)
+    return lines or [cleaned[:max_chars]]
+
+
+def _parse_markdown_for_pdf(markdown: str) -> list[dict[str, Any]]:
+    text = re.sub(r"<!--[\s\S]*?-->", "", str(markdown or "")).replace("\r", "")
+    lines = text.split("\n")
+    blocks: list[dict[str, Any]] = []
+    paragraph_lines: list[str] = []
+    code_lines: list[str] = []
+    in_code = False
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        paragraph = " ".join(line.strip() for line in paragraph_lines if line.strip())
+        if paragraph:
+            blocks.append({"kind": "paragraph", "text": _markdown_inline_to_plain_text(paragraph)})
+        paragraph_lines = []
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        if code_lines:
+            blocks.append({"kind": "code", "lines": [line.rstrip() for line in code_lines]})
+        code_lines = []
+
+    for raw_line in lines:
+        stripped = raw_line.rstrip()
+        if stripped.strip().startswith("```"):
+            flush_paragraph()
+            if in_code:
+                flush_code()
+            in_code = not in_code
+            continue
+
+        if in_code:
+            code_lines.append(stripped)
+            continue
+
+        if not stripped.strip():
+            flush_paragraph()
+            blocks.append({"kind": "spacer", "height": 8})
+            continue
+
+        heading_match = re.match(r"^\s*(#{1,3})\s+(.+)$", stripped)
+        if heading_match:
+            flush_paragraph()
+            level = len(heading_match.group(1))
+            blocks.append(
+                {
+                    "kind": f"heading_{level}",
+                    "text": _markdown_inline_to_plain_text(heading_match.group(2)),
+                }
+            )
+            continue
+
+        bullet_match = re.match(r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(.+)$", stripped)
+        if bullet_match:
+            flush_paragraph()
+            blocks.append({"kind": "bullet", "text": _markdown_inline_to_plain_text(bullet_match.group(1))})
+            continue
+
+        quote_match = re.match(r"^\s*>\s?(.*)$", stripped)
+        if quote_match:
+            paragraph_lines.append(quote_match.group(1))
+            continue
+
+        paragraph_lines.append(stripped)
+
+    flush_paragraph()
+    flush_code()
+    return [block for block in blocks if block.get("text") or block.get("lines") or block.get("kind") == "spacer"]
+
+
+def _pdf_content_stream_for_document(
+    title: str,
+    subtitle: str,
+    body_markdown: str,
+    generated_label: str,
+) -> tuple[list[str], int]:
+    page_width = 595.28
+    page_height = 841.89
+    margin_x = 52.0
+    bottom_margin = 54.0
+    first_page_top = 690.0
+    other_page_top = 760.0
+    pages: list[list[str]] = []
+    page_index = -1
+    cursor_y = 0.0
+
+    def new_page() -> None:
+        nonlocal page_index, cursor_y
+        page_index += 1
+        cursor_y = first_page_top if page_index == 0 else other_page_top
+        ops: list[str] = []
+        if page_index == 0:
+            header_height = 116.0
+            header_y = page_height - header_height
+            ops.extend(
+                [
+                    f"{PDF_CREATOR_SLATE_RGB[0]:.3f} {PDF_CREATOR_SLATE_RGB[1]:.3f} {PDF_CREATOR_SLATE_RGB[2]:.3f} rg",
+                    f"0 {header_y:.2f} {page_width:.2f} {header_height:.2f} re f",
+                    f"{PDF_CREATOR_ACCENT_RGB[0]:.3f} {PDF_CREATOR_ACCENT_RGB[1]:.3f} {PDF_CREATOR_ACCENT_RGB[2]:.3f} rg",
+                    f"{margin_x:.2f} {header_y + 18:.2f} {page_width - margin_x * 2:.2f} 3 re f",
+                    "BT",
+                    "/F2 24 Tf",
+                    "1 1 1 rg",
+                    f"1 0 0 1 {margin_x:.2f} {page_height - 58:.2f} Tm",
+                    f"({_pdf_escape_text(title)}) Tj",
+                    "ET",
+                    "BT",
+                    "/F1 11 Tf",
+                    "0.89 0.92 0.97 rg",
+                    f"1 0 0 1 {margin_x:.2f} {page_height - 82:.2f} Tm",
+                    f"({_pdf_escape_text(subtitle)}) Tj",
+                    "ET",
+                ]
+            )
+        else:
+            header_height = 44.0
+            header_y = page_height - header_height
+            ops.extend(
+                [
+                    f"{PDF_CREATOR_SLATE_RGB[0]:.3f} {PDF_CREATOR_SLATE_RGB[1]:.3f} {PDF_CREATOR_SLATE_RGB[2]:.3f} rg",
+                    f"0 {header_y:.2f} {page_width:.2f} {header_height:.2f} re f",
+                    "BT",
+                    "/F2 11 Tf",
+                    "1 1 1 rg",
+                    f"1 0 0 1 {margin_x:.2f} {page_height - 28:.2f} Tm",
+                    f"({_pdf_escape_text(title)}) Tj",
+                    "ET",
+                ]
+            )
+        ops.extend(
+            [
+                "BT",
+                "/F1 9 Tf",
+                f"{PDF_CREATOR_MUTED_RGB[0]:.3f} {PDF_CREATOR_MUTED_RGB[1]:.3f} {PDF_CREATOR_MUTED_RGB[2]:.3f} rg",
+                f"1 0 0 1 {margin_x:.2f} 24.00 Tm",
+                f"({_pdf_escape_text(f'{generated_label}  |  Page {page_index + 1}')}) Tj",
+                "ET",
+            ]
+        )
+        pages.append(ops)
+
+    def ensure_space(height: float) -> None:
+        nonlocal cursor_y
+        if page_index < 0:
+            new_page()
+        if cursor_y - height < bottom_margin:
+            new_page()
+
+    def add_text_lines(lines: list[str], x: float, font: str, size: float, leading: float, color: tuple[float, float, float]) -> None:
+        nonlocal cursor_y
+        for line in lines:
+            pages[page_index].extend(
+                [
+                    "BT",
+                    f"/{font} {size:.2f} Tf",
+                    f"{color[0]:.3f} {color[1]:.3f} {color[2]:.3f} rg",
+                    f"1 0 0 1 {x:.2f} {cursor_y:.2f} Tm",
+                    f"({_pdf_escape_text(line)}) Tj",
+                    "ET",
+                ]
+            )
+            cursor_y -= leading
+
+    for block in _parse_markdown_for_pdf(body_markdown):
+        kind = block.get("kind")
+        if kind == "spacer":
+            ensure_space(float(block.get("height") or 8))
+            cursor_y -= float(block.get("height") or 8)
+            continue
+        if kind == "heading_1":
+            lines = _wrap_text_for_pdf(str(block.get("text") or ""), 54)
+            required = 14 + len(lines) * 24
+            ensure_space(required)
+            cursor_y -= 4
+            add_text_lines(lines, margin_x, "F2", 18, 22, PDF_CREATOR_SLATE_RGB)
+            pages[page_index].append(
+                f"{PDF_CREATOR_ACCENT_RGB[0]:.3f} {PDF_CREATOR_ACCENT_RGB[1]:.3f} {PDF_CREATOR_ACCENT_RGB[2]:.3f} rg\n"
+                f"{margin_x:.2f} {cursor_y + 8:.2f} 26 2 re f"
+            )
+            cursor_y -= 10
+            continue
+        if kind == "heading_2" or kind == "heading_3":
+            lines = _wrap_text_for_pdf(str(block.get("text") or ""), 68)
+            required = 10 + len(lines) * 19
+            ensure_space(required)
+            cursor_y -= 2
+            add_text_lines(lines, margin_x, "F2", 13 if kind == "heading_2" else 12, 17, PDF_CREATOR_SLATE_RGB)
+            cursor_y -= 6
+            continue
+        if kind == "bullet":
+            bullet_lines = _wrap_text_for_pdf(str(block.get("text") or ""), 74)
+            required = len(bullet_lines) * 15 + 4
+            ensure_space(required)
+            if bullet_lines:
+                add_text_lines([f"- {bullet_lines[0]}"], margin_x + 4, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
+                if len(bullet_lines) > 1:
+                    add_text_lines(bullet_lines[1:], margin_x + 18, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
+            cursor_y -= 2
+            continue
+        if kind == "code":
+            code_lines = [str(line)[:110] for line in (block.get("lines") or [])] or [""]
+            leading = 12.0
+            padding = 10.0
+            required = padding * 2 + len(code_lines) * leading + 8
+            ensure_space(required)
+            rect_height = padding * 2 + len(code_lines) * leading
+            rect_bottom = cursor_y - rect_height + 4
+            pages[page_index].append(
+                f"{PDF_CREATOR_CODE_BG_RGB[0]:.3f} {PDF_CREATOR_CODE_BG_RGB[1]:.3f} {PDF_CREATOR_CODE_BG_RGB[2]:.3f} rg\n"
+                f"{margin_x:.2f} {rect_bottom:.2f} {page_width - margin_x * 2:.2f} {rect_height:.2f} re f"
+            )
+            pages[page_index].append(
+                f"{PDF_CREATOR_RULE_RGB[0]:.3f} {PDF_CREATOR_RULE_RGB[1]:.3f} {PDF_CREATOR_RULE_RGB[2]:.3f} RG\n"
+                f"{margin_x:.2f} {rect_bottom:.2f} {page_width - margin_x * 2:.2f} {rect_height:.2f} re S"
+            )
+            cursor_y -= padding
+            add_text_lines(code_lines, margin_x + 10, "F3", 9, leading, PDF_CREATOR_TEXT_RGB)
+            cursor_y -= padding + 4
+            continue
+
+        paragraph_lines = _wrap_text_for_pdf(str(block.get("text") or ""), 84)
+        required = len(paragraph_lines) * 15 + 6
+        ensure_space(required)
+        add_text_lines(paragraph_lines, margin_x, "F1", 11, 15, PDF_CREATOR_TEXT_RGB)
+        cursor_y -= 6
+
+    if not pages:
+        new_page()
+
+    return ["\n".join(page_ops) for page_ops in pages], len(pages)
+
+
+def build_professional_pdf_bytes(title: str, subtitle: str, body_markdown: str) -> tuple[bytes, int]:
+    clean_title = _markdown_inline_to_plain_text(title) or "RAGnarok Report"
+    clean_subtitle = _markdown_inline_to_plain_text(subtitle) or "Professional export generated from RAGnarok"
+    generated_label = datetime.now().strftime("Generated on %Y-%m-%d %H:%M UTC")
+    page_streams, page_count = _pdf_content_stream_for_document(clean_title, clean_subtitle, body_markdown, generated_label)
+    page_width = 595.28
+    page_height = 841.89
+    objects: list[str] = []
+
+    def add_object(content: str) -> int:
+        objects.append(content)
+        return len(objects)
+
+    font_regular_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    font_bold_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+    font_code_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+    pages_id = add_object("<< /Type /Pages /Count 0 /Kids [] >>")
+    page_ids: list[int] = []
+
+    for stream in page_streams:
+        content_id = add_object(
+            f"<< /Length {len(stream.encode('latin-1', errors='ignore'))} >>\nstream\n{stream}\nendstream"
+        )
+        page_id = add_object(
+            "<< /Type /Page "
+            f"/Parent {pages_id} 0 R "
+            f"/MediaBox [0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 {font_regular_id} 0 R /F2 {font_bold_id} 0 R /F3 {font_code_id} 0 R >> >> "
+            f"/Contents {content_id} 0 R >>"
+        )
+        page_ids.append(page_id)
+
+    objects[pages_id - 1] = f"<< /Type /Pages /Count {len(page_ids)} /Kids [{' '.join(f'{page_id} 0 R' for page_id in page_ids)}] >>"
+    catalog_id = add_object(f"<< /Type /Catalog /Pages {pages_id} 0 R >>")
+
+    pdf = "%PDF-1.4\n"
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf += f"{index} 0 obj\n{obj}\nendobj\n"
+
+    xref_offset = len(pdf)
+    pdf += f"xref\n0 {len(objects) + 1}\n"
+    pdf += "0000000000 65535 f \n"
+    for offset in offsets[1:]:
+        pdf += f"{str(offset).rjust(10, '0')} 00000 n \n"
+    pdf += f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_offset}\n%%EOF"
+    return pdf.encode("latin-1", errors="ignore"), page_count
+
+
+def _extract_pdf_path(user_message: str) -> str:
+    lowered = str(user_message or "").strip()
+    quoted_match = re.search(r'["\']([^"\']+\.pdf)["\']', lowered, flags=re.IGNORECASE)
+    if quoted_match:
+        return quoted_match.group(1).strip()
+    patterns = [
+        r'(?:named|called|as|to|into|in|vers|dans|nomme|nommé|appele|appelé)\s+([A-Za-z0-9_./\\\\-]+\.pdf)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    matches = re.findall(r'([A-Za-z0-9_./\\\\-]+\.pdf)', lowered, flags=re.IGNORECASE)
+    return matches[-1].strip() if matches else ""
+
+
+def _extract_pdf_title(user_message: str, target_path: str = "") -> str:
+    text = str(user_message or "").strip()
+    title_match = re.search(r'(?:title|titled|intitule|intitulé)\s*[:=]?\s*["\']([^"\']+)["\']', text, flags=re.IGNORECASE)
+    if title_match:
+        return _markdown_inline_to_plain_text(title_match.group(1))[:120]
+    about_match = re.search(r'(?:pdf|report|summary)\s+(?:for|about|of)\s+(.+)$', text, flags=re.IGNORECASE)
+    if about_match:
+        candidate = _markdown_inline_to_plain_text(about_match.group(1))
+        candidate = re.sub(r'\b(?:as|named|called)\b.+$', "", candidate, flags=re.IGNORECASE).strip(" .:-")
+        if candidate:
+            return candidate[:120].title()
+    if target_path:
+        stem = Path(target_path).stem.replace("-", " ").replace("_", " ").strip()
+        if stem:
+            return stem.title()
+    normalized = normalize_intent_text(text)
+    if "data quality" in normalized:
+        return "Data Quality Report"
+    if any(token in normalized for token in ["clickhouse", "sql", "query", "analysis"]):
+        return "Analysis Report"
+    return "RAGnarok Report"
+
+
+def _default_pdf_target_path(title: str) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"exports/{_slugify_filename(title)}-{timestamp}.pdf"
+
+
+def _latest_exportable_assistant_message(history: list[dict[str, Any]]) -> str:
+    for item in reversed(history):
+        if str(item.get("role") or "") != "assistant":
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        if "<!-- agent-intro:" in content:
+            continue
+        if content.startswith("# Welcome to RAGnarok"):
+            continue
+        return content
+    return ""
+
+
+def _try_extract_pdf_export_payload(user_message: str) -> Optional[dict[str, Any]]:
+    text = str(user_message or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = extract_json_object(text)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("__pdf_export__"):
+        return None
+
+    title = _markdown_inline_to_plain_text(parsed.get("title") or "RAGnarok Report")[:120] or "RAGnarok Report"
+    subtitle = _markdown_inline_to_plain_text(parsed.get("subtitle") or "Professional export generated from RAGnarok")[:180]
+    target_path = str(parsed.get("path") or "").strip()
+    source_markdown = str(parsed.get("source_markdown") or parsed.get("sourceMarkdown") or parsed.get("body_markdown") or parsed.get("bodyMarkdown") or "").strip()
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "path": target_path,
+        "source_markdown": source_markdown[:PDF_CREATOR_MAX_TEXT_CHARS],
+        "source_request": str(parsed.get("source_request") or parsed.get("sourceRequest") or "").strip(),
+    }
+
+
+def _build_pdf_creator_body_markdown(source_markdown: str, title: str, source_request: str = "") -> str:
+    cleaned = str(source_markdown or "").strip()
+    if not cleaned:
+        return (
+            "## Executive Summary\n"
+            "No source analysis was available, so this PDF contains only the export metadata."
+        )
+
+    sections = [
+        "## Executive Summary",
+        f"This PDF captures the latest analysis prepared in RAGnarok for **{_markdown_inline_to_plain_text(title)}**.",
+    ]
+    if source_request:
+        sections.append(f"Original request: `{_markdown_inline_to_plain_text(source_request)}`")
+    sections.extend(
+        [
+            "",
+            "## Detailed Result",
+            cleaned[:PDF_CREATOR_MAX_TEXT_CHARS],
+        ]
+    )
+    return "\n".join(sections)
+
+
+def create_pdf_report_tool(
+    path: str,
+    title: str,
+    subtitle: str,
+    body_markdown: str,
+    confirmed: bool = False,
+    base_path: str = "",
+) -> dict[str, Any]:
+    target = _resolve_agent_path(path, base_path)
+    preview = (
+        f"- **Title:** {_markdown_inline_to_plain_text(title)}\n"
+        f"- **Target:** `{target}`\n"
+        f"- **Mode:** {'Overwrite existing PDF' if target.exists() else 'Create new PDF'}"
+    )
+    if target.exists() and not confirmed:
+        return _file_tool_result(
+            f"The PDF `{target.name}` already exists and needs confirmation before overwrite.",
+            preview=preview,
+            visited_path=str(target.parent),
+            requires_confirmation=True,
+            pending_action={
+                "tool_name": "create_pdf_report",
+                "tool_input": {
+                    "path": path,
+                    "title": title,
+                    "subtitle": subtitle,
+                    "body_markdown": body_markdown,
+                },
+            },
+        )
+
+    _ensure_parent_directory(target)
+    pdf_bytes, page_count = build_professional_pdf_bytes(title, subtitle, body_markdown)
+    target.write_bytes(pdf_bytes)
+    file_size = target.stat().st_size if target.exists() else len(pdf_bytes)
+    return _file_tool_result(
+        f"Created PDF `{target.name}` with {page_count} page(s).",
+        preview=(
+            f"- **Title:** {_markdown_inline_to_plain_text(title)}\n"
+            f"- **Saved to:** `{target}`\n"
+            f"- **Pages:** {page_count}\n"
+            f"- **Size:** {file_size} bytes"
+        ),
+        data={"path": str(target), "pageCount": page_count, "size": file_size},
+        visited_path=str(target.parent),
+    )
+
+
+def _pdf_creator_confirmation_answer(state: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    pending = state.get("pending_confirmation") or {}
+    preview = str(pending.get("preview") or "").strip()
+    summary = str(pending.get("summary") or "This PDF export requires confirmation.").strip()
+    return (
+        "## Confirmation Needed\n"
+        f"{summary}\n\n"
+        f"{preview}\n\n"
+        "Please confirm if you want me to overwrite the existing PDF."
+    ), [
+        {
+            "id": "confirm-file-action",
+            "label": "Confirm",
+            "actionType": "confirm_file_action",
+            "variant": "primary",
+        },
+        {
+            "id": "cancel-file-action",
+            "label": "Cancel",
+            "actionType": "cancel_file_action",
+            "variant": "secondary",
+        },
+    ]
+
+
+def _pdf_creator_success_answer(result: dict[str, Any], title: str, target_path: str) -> str:
+    preview = str(result.get("preview") or "").strip()
+    answer = (
+        "## PDF Created\n"
+        f"{result.get('summary') or 'The PDF export is complete.'}\n\n"
+        f"- **Title:** {_markdown_inline_to_plain_text(title)}\n"
+        f"- **Saved to:** `{target_path}`\n"
+        "- **Style:** Clean slate header, compact sections, and professional PDF layout."
+    )
+    if preview:
+        answer += f"\n\n## Export Details\n{preview}"
+    return answer
+
 async def plan_file_manager_step(
     user_message: str,
     history: list[dict[str, Any]],
@@ -3220,9 +4114,48 @@ def _file_manager_confirmation_answer(state: dict[str, Any]) -> tuple[str, list[
     return answer, actions
 
 
+def _default_pdf_creator_state() -> dict[str, Any]:
+    return {
+        "stage": "idle",
+        "pending_document": None,
+        "pending_confirmation": None,
+        "last_output_path": "",
+        "last_title": "",
+    }
+
+
+def _normalize_pdf_creator_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_pdf_creator_state()
+    if not isinstance(payload, dict):
+        return state
+
+    stage = str(payload.get("stage") or "").strip()
+    if stage in {"awaiting_source_choice", "awaiting_content"}:
+        state["stage"] = stage
+
+    pending_document = payload.get("pending_document") or payload.get("pendingDocument")
+    if isinstance(pending_document, dict):
+        state["pending_document"] = dict(pending_document)
+
+    pending_confirmation = payload.get("pending_confirmation") or payload.get("pendingConfirmation")
+    if isinstance(pending_confirmation, dict):
+        state["pending_confirmation"] = {
+            "preview": str(pending_confirmation.get("preview") or "").strip(),
+            "summary": str(pending_confirmation.get("summary") or "").strip(),
+            "requested_at": str(pending_confirmation.get("requested_at") or pending_confirmation.get("requestedAt") or "").strip(),
+            "pending_action": dict(pending_confirmation.get("pending_action") or pending_confirmation.get("pendingAction") or {}),
+        }
+
+    state["last_output_path"] = str(payload.get("last_output_path") or payload.get("lastOutputPath") or "").strip()
+    state["last_title"] = str(payload.get("last_title") or payload.get("lastTitle") or "").strip()
+    return state
+
+
 MANAGER_SPECIALIST_LABELS = {
     "clickhouse_query": "ClickHouse Query",
     "file_management": "File management",
+    "pdf_creator": "PDF creator",
+    "oracle_analyst": "Oracle Analyst",
     "data_quality_tables": "Data quality - Tables",
 }
 MANAGER_CLICKHOUSE_FOLLOWUP_STAGES = {
@@ -3264,6 +4197,16 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
         "file_management": "file_management",
         "filesystem": "file_management",
         "files": "file_management",
+        "pdf creator": "pdf_creator",
+        "pdf_creator": "pdf_creator",
+        "pdf": "pdf_creator",
+        "pdf export": "pdf_creator",
+        "report pdf": "pdf_creator",
+        "oracle analyst": "oracle_analyst",
+        "oracle_analyst": "oracle_analyst",
+        "oracle": "oracle_analyst",
+        "oracle sql": "oracle_analyst",
+        "pl/sql": "oracle_analyst",
         "data quality": "data_quality_tables",
         "data quality tables": "data_quality_tables",
         "data_quality_tables": "data_quality_tables",
@@ -3287,21 +4230,34 @@ def _normalize_manager_pending_pipeline(payload: Any) -> Optional[dict[str, Any]
         allow_manager=False,
     )
     export_format = str(payload.get("export_format") or payload.get("exportFormat") or "").strip().lower() or None
-    if kind != "clickhouse_to_file" or next_delegate != "file_management":
-        return None
-    if stage not in {"awaiting_clickhouse", "awaiting_export_details"}:
-        stage = "awaiting_clickhouse"
-    if export_format not in {"csv", "tsv", "xlsx", None}:
-        export_format = None
-    return {
-        "kind": "clickhouse_to_file",
-        "stage": stage,
-        "next_delegate": "file_management",
-        "export_format": export_format,
-        "target_path": str(payload.get("target_path") or payload.get("targetPath") or "").strip(),
-        "source_request": str(payload.get("source_request") or payload.get("sourceRequest") or "").strip(),
-        "reason": str(payload.get("reason") or "").strip(),
-    }
+    target_path = str(payload.get("target_path") or payload.get("targetPath") or "").strip()
+    source_request = str(payload.get("source_request") or payload.get("sourceRequest") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+    if kind == "clickhouse_to_file" and next_delegate == "file_management":
+        if stage not in {"awaiting_clickhouse", "awaiting_export_details"}:
+            stage = "awaiting_clickhouse"
+        if export_format not in {"csv", "tsv", "xlsx", None}:
+            export_format = None
+        return {
+            "kind": "clickhouse_to_file",
+            "stage": stage,
+            "next_delegate": "file_management",
+            "export_format": export_format,
+            "target_path": target_path,
+            "source_request": source_request,
+            "reason": reason,
+        }
+    if kind == "clickhouse_to_pdf" and next_delegate == "pdf_creator":
+        return {
+            "kind": "clickhouse_to_pdf",
+            "stage": "awaiting_clickhouse",
+            "next_delegate": "pdf_creator",
+            "target_path": target_path,
+            "source_request": source_request,
+            "reason": reason,
+            "title": str(payload.get("title") or "").strip(),
+        }
+    return None
 
 
 def _normalize_manager_agent_state(payload: Optional[dict]) -> dict[str, Any]:
@@ -3332,6 +4288,13 @@ def _file_manager_state_needs_followup(state: dict[str, Any]) -> bool:
     return isinstance(state.get("pending_confirmation"), dict)
 
 
+def _pdf_creator_state_needs_followup(state: dict[str, Any]) -> bool:
+    return (
+        str(state.get("stage") or "").strip() in {"awaiting_source_choice", "awaiting_content"}
+        or isinstance(state.get("pending_confirmation"), dict)
+    )
+
+
 def _manager_specialist_label(role: Optional[str]) -> str:
     if not role:
         return "Manager"
@@ -3345,6 +4308,8 @@ def _manager_trimmed_history(history: list[dict[str, Any]], limit: int = 10) -> 
 def _manager_specialist_state_summary(
     clickhouse_state: dict[str, Any],
     file_manager_state: dict[str, Any],
+    pdf_creator_state: dict[str, Any],
+    oracle_state: dict[str, Any],
     data_quality_state: dict[str, Any],
     manager_state: Optional[dict[str, Any]] = None,
 ) -> str:
@@ -3361,6 +4326,19 @@ def _manager_specialist_state_summary(
             str(file_manager_state.get("last_tool_result") or ""), 240
         ),
     }
+    pdf_summary = {
+        "stage": pdf_creator_state.get("stage") or "idle",
+        "pending_confirmation": bool(pdf_creator_state.get("pending_confirmation")),
+        "last_output_path": pdf_creator_state.get("last_output_path") or "",
+        "last_title": pdf_creator_state.get("last_title") or "",
+    }
+    oracle_summary = {
+        "stage": oracle_state.get("stage") or "idle",
+        "selected_table": oracle_state.get("selected_table"),
+        "has_last_sql": bool(oracle_state.get("last_sql")),
+        "has_last_rows": bool(oracle_state.get("last_result_rows")),
+        "awaiting_options": len(oracle_state.get("clarification_options") or []),
+    }
     data_quality_summary = {
         "stage": data_quality_state.get("stage") or "idle",
         "table": data_quality_state.get("table"),
@@ -3375,6 +4353,8 @@ def _manager_specialist_state_summary(
             },
             "clickhouse": clickhouse_summary,
             "file_management": file_summary,
+            "pdf_creator": pdf_summary,
+            "oracle_analyst": oracle_summary,
             "data_quality_tables": data_quality_summary,
         },
         ensure_ascii=False,
@@ -3400,6 +4380,24 @@ MANAGER_EXPORT_KEYWORDS = [
     "creer un excel",
     "genere un csv",
     "genere un excel",
+]
+MANAGER_PDF_KEYWORDS = [
+    "pdf",
+    "report",
+    "one pager",
+    "one-pager",
+    "brief pdf",
+    "document pdf",
+    "export pdf",
+    "save as pdf",
+    "create pdf",
+    "generate pdf",
+    "make a pdf",
+    "exporter en pdf",
+    "creer un pdf",
+    "créer un pdf",
+    "generer un pdf",
+    "générer un pdf",
 ]
 
 
@@ -3452,6 +4450,8 @@ def _extract_manager_export_path(user_message: str, export_format: Optional[str]
 
 def _extract_clickhouse_file_export_pipeline(user_message: str) -> Optional[dict[str, Any]]:
     normalized = normalize_intent_text(user_message)
+    if any(token in normalized for token in MANAGER_PDF_KEYWORDS):
+        return None
     has_export_signal = any(token in normalized for token in MANAGER_EXPORT_KEYWORDS) or any(
         token in normalized for token in ["csv", "tsv", "excel", "xlsx", "xls"]
     )
@@ -3471,8 +4471,29 @@ def _extract_clickhouse_file_export_pipeline(user_message: str) -> Optional[dict
     }
 
 
+def _extract_clickhouse_pdf_export_pipeline(user_message: str) -> Optional[dict[str, Any]]:
+    normalized = normalize_intent_text(user_message)
+    has_pdf_signal = any(token in normalized for token in MANAGER_PDF_KEYWORDS)
+    if not has_pdf_signal:
+        return None
+
+    target_path = _extract_pdf_path(user_message)
+    title = _extract_pdf_title(user_message, target_path)
+    return {
+        "kind": "clickhouse_to_pdf",
+        "stage": "awaiting_clickhouse",
+        "next_delegate": "pdf_creator",
+        "target_path": target_path or _default_pdf_target_path(title),
+        "source_request": user_message.strip(),
+        "reason": "The user wants the ClickHouse result to be exported as a professional PDF after the query runs.",
+        "title": title,
+    }
+
+
 def _manager_pending_pipeline_requires_details(pipeline: Optional[dict[str, Any]]) -> bool:
     if not isinstance(pipeline, dict):
+        return False
+    if pipeline.get("kind") != "clickhouse_to_file":
         return False
     return not pipeline.get("export_format") or not pipeline.get("target_path")
 
@@ -3577,6 +4598,25 @@ def _build_file_export_payload_from_clickhouse(
     }
 
 
+def _build_pdf_export_payload_from_clickhouse(
+    pipeline: dict[str, Any],
+    clickhouse_answer: str,
+) -> dict[str, Any]:
+    title = str(pipeline.get("title") or "").strip() or _extract_pdf_title(
+        str(pipeline.get("source_request") or ""),
+        str(pipeline.get("target_path") or ""),
+    )
+    target_path = str(pipeline.get("target_path") or "").strip() or _default_pdf_target_path(title)
+    return {
+        "__pdf_export__": True,
+        "title": title,
+        "subtitle": "Analysis export generated by RAGnarok",
+        "path": target_path,
+        "source_markdown": str(clickhouse_answer or "").strip(),
+        "source_request": str(pipeline.get("source_request") or "").strip(),
+    }
+
+
 def _manager_compose_chained_answer(
     primary_answer: str,
     secondary_answer: str,
@@ -3601,6 +4641,8 @@ def _heuristic_manager_delegate(
     manager_state: dict[str, Any],
     clickhouse_state: dict[str, Any],
     file_manager_state: dict[str, Any],
+    pdf_creator_state: dict[str, Any],
+    oracle_state: dict[str, Any],
     data_quality_state: dict[str, Any],
 ) -> Optional[tuple[str, str]]:
     normalized = normalize_intent_text(user_message)
@@ -3611,6 +4653,10 @@ def _heuristic_manager_delegate(
         return "file_management", "Continuing the active file-management confirmation flow."
     if active_delegate == "clickhouse_query" and _clickhouse_state_needs_followup(clickhouse_state):
         return "clickhouse_query", "Continuing the active ClickHouse clarification flow."
+    if active_delegate == "pdf_creator" and _pdf_creator_state_needs_followup(pdf_creator_state):
+        return "pdf_creator", "Continuing the active PDF-creation flow."
+    if active_delegate == "oracle_analyst" and _oracle_state_needs_followup(oracle_state):
+        return "oracle_analyst", "Continuing the active Oracle table-selection flow."
     if active_delegate == "data_quality_tables" and _data_quality_state_needs_followup(data_quality_state):
         return "data_quality_tables", "Continuing the active data-quality setup flow."
 
@@ -3623,6 +4669,10 @@ def _heuristic_manager_delegate(
 
     if _clickhouse_state_needs_followup(clickhouse_state):
         return "clickhouse_query", "The user is continuing a ClickHouse clarification step."
+    if _pdf_creator_state_needs_followup(pdf_creator_state):
+        return "pdf_creator", "The user is continuing a PDF export clarification or confirmation."
+    if _oracle_state_needs_followup(oracle_state):
+        return "oracle_analyst", "The user is continuing an Oracle table-selection step."
     if _data_quality_state_needs_followup(data_quality_state):
         return "data_quality_tables", "The user is continuing a data-quality guided step."
 
@@ -3721,6 +4771,20 @@ def _heuristic_manager_delegate(
         "tendance",
         "schema",
     ]
+    oracle_tokens = [
+        "oracle",
+        "oracle db",
+        "oracle database",
+        "oracle sql",
+        "pl/sql",
+        "ora-",
+        "tns",
+        "service name",
+        "sid",
+        "dual",
+        "fetch first",
+        "row_number() over",
+    ]
     data_quality_tokens = [
         "data quality",
         "quality score",
@@ -3809,14 +4873,23 @@ def _heuristic_manager_delegate(
 
     file_hit = file_creation_or_edit_hit or any(token in normalized for token in file_tokens)
     clickhouse_hit = any(token in normalized for token in clickhouse_tokens)
+    oracle_hit = any(token in normalized for token in oracle_tokens)
+    pdf_hit = any(token in normalized for token in MANAGER_PDF_KEYWORDS)
     data_quality_hit = any(token in normalized for token in data_quality_tokens)
     export_pipeline = _extract_clickhouse_file_export_pipeline(user_message)
+    pdf_pipeline = _extract_clickhouse_pdf_export_pipeline(user_message)
 
     if export_pipeline and clickhouse_hit:
         return "clickhouse_query", "The request needs a ClickHouse query first and then a file export from the query result."
+    if pdf_pipeline and clickhouse_hit:
+        return "clickhouse_query", "The request needs a ClickHouse query first and then a PDF export from the query result."
 
     if data_quality_hit and not file_hit:
         return "data_quality_tables", "The request is explicitly about table profiling or data-quality analysis."
+    if oracle_hit and not data_quality_hit:
+        return "oracle_analyst", "The request explicitly targets Oracle analysis or Oracle SQL work."
+    if pdf_hit and not clickhouse_hit and not data_quality_hit:
+        return "pdf_creator", "The request is explicitly about turning content or the latest analysis into a PDF."
     if file_creation_or_edit_hit and not data_quality_hit:
         return "file_management", "The request explicitly asks to create or modify a file, so File management should handle it."
     if file_hit and not clickhouse_hit and not data_quality_hit:
@@ -3832,6 +4905,8 @@ async def analyze_manager_routing(
     manager_state: dict[str, Any],
     clickhouse_state: dict[str, Any],
     file_manager_state: dict[str, Any],
+    pdf_creator_state: dict[str, Any],
+    oracle_state: dict[str, Any],
     data_quality_state: dict[str, Any],
     llm_base_url: str,
     llm_model: str,
@@ -3843,6 +4918,8 @@ async def analyze_manager_routing(
         manager_state,
         clickhouse_state,
         file_manager_state,
+        pdf_creator_state,
+        oracle_state,
         data_quality_state,
     )
     if heuristic:
@@ -3861,20 +4938,23 @@ Available delegates:
 - manager: use this when no specialist tool is needed and the manager can answer directly.
 - clickhouse_query: use this for SQL, schemas, tables, analytics, metrics, database exploration, and charts from ClickHouse data.
 - file_management: use this for filesystem actions, directories, files, CSV/Excel/Word/Parquet handling, create/edit/move/delete operations.
+- pdf_creator: use this to create a clean, professional PDF export from an analysis, a report, or the latest relevant result in the chat.
+- oracle_analyst: use this for Oracle database discovery, Oracle SQL generation, schema inspection, query validation, and narrative business answers from Oracle data.
 - data_quality_tables: use this for table profiling, null/outlier/sentinel analysis, column health scoring, and volumetric data-quality checks.
 
 If more than one specialist could be relevant, choose the one that should act first.
 Return JSON only with this exact shape:
 {{
-  "delegate": "manager" | "clickhouse_query" | "file_management" | "data_quality_tables",
+  "delegate": "manager" | "clickhouse_query" | "file_management" | "pdf_creator" | "oracle_analyst" | "data_quality_tables",
   "reasoning": "short English explanation",
   "handoff_message": "short English specialist instruction preserving the user's intent"
 }}
 
 Rules:
 - Keep the answer in English.
-- Prefer a specialist when the request depends on real filesystem state or ClickHouse data.
+- Prefer a specialist when the request depends on real filesystem state, ClickHouse data, or Oracle data.
 - If the user asks to create, write, save, edit, move, rename, or delete a file or folder, delegate to `file_management`.
+- If the user asks for a PDF export, a report PDF, or a professional PDF document, delegate to `pdf_creator` unless a ClickHouse query must happen first.
 - Keep `handoff_message` concise and actionable.
 - If the manager can answer directly, set `delegate` to `manager`.
 
@@ -3882,7 +4962,7 @@ Current manager state:
 {json.dumps(manager_state, ensure_ascii=False, indent=2)}
 
 Current specialist state summary:
-{_manager_specialist_state_summary(clickhouse_state, file_manager_state, data_quality_state)}
+{_manager_specialist_state_summary(clickhouse_state, file_manager_state, pdf_creator_state, oracle_state, data_quality_state, manager_state)}
 
 Recent conversation:
 {json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
@@ -4257,6 +5337,420 @@ def build_clickhouse_response_markdown(
 
     return "\n\n".join(sections)
 
+
+def _default_oracle_analyst_state() -> dict[str, Any]:
+    return {
+        "stage": "idle",
+        "pending_request": "",
+        "available_tables": [],
+        "selected_table": None,
+        "schema_info": [],
+        "clarification_prompt": "",
+        "clarification_options": [],
+        "last_sql": "",
+        "last_result_meta": [],
+        "last_result_rows": [],
+        "final_answer": "",
+        "action_log": [],
+        "last_error": "",
+    }
+
+
+def _normalize_oracle_analyst_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_oracle_analyst_state()
+    if not isinstance(payload, dict):
+        return state
+
+    stage = str(payload.get("stage") or "").strip()
+    state["stage"] = stage if stage in {"idle", "awaiting_table", "ready"} else "idle"
+    state["pending_request"] = str(payload.get("pending_request") or payload.get("pendingRequest") or "").strip()
+    state["available_tables"] = [
+        str(item).strip()
+        for item in (payload.get("available_tables") or payload.get("availableTables") or [])
+        if str(item).strip()
+    ]
+    state["selected_table"] = str(payload.get("selected_table") or payload.get("selectedTable") or "").strip() or None
+    schema_info = payload.get("schema_info") if isinstance(payload.get("schema_info"), list) else payload.get("schemaInfo")
+    if isinstance(schema_info, list):
+        state["schema_info"] = [
+            {
+                "name": str(column.get("name") or "").strip(),
+                "type": str(column.get("type") or "").strip(),
+                "nullable": bool(column.get("nullable")),
+            }
+            for column in schema_info
+            if isinstance(column, dict) and str(column.get("name") or "").strip()
+        ]
+    state["clarification_prompt"] = str(payload.get("clarification_prompt") or payload.get("clarificationPrompt") or "").strip()
+    state["clarification_options"] = [
+        str(item).strip()
+        for item in (payload.get("clarification_options") or payload.get("clarificationOptions") or [])
+        if str(item).strip()
+    ]
+    state["last_sql"] = str(payload.get("last_sql") or payload.get("lastSql") or "").strip()
+    last_result_meta = payload.get("last_result_meta") if isinstance(payload.get("last_result_meta"), list) else payload.get("lastResultMeta")
+    if isinstance(last_result_meta, list):
+        state["last_result_meta"] = [
+            {
+                "name": str(column.get("name") or "").strip(),
+                "type": str(column.get("type") or "").strip(),
+            }
+            for column in last_result_meta
+            if isinstance(column, dict) and str(column.get("name") or "").strip()
+        ]
+    last_result_rows = payload.get("last_result_rows") if isinstance(payload.get("last_result_rows"), list) else payload.get("lastResultRows")
+    if isinstance(last_result_rows, list):
+        state["last_result_rows"] = [row for row in last_result_rows if isinstance(row, dict)]
+    state["final_answer"] = str(payload.get("final_answer") or payload.get("finalAnswer") or "").strip()
+    state["action_log"] = [
+        str(item).strip()
+        for item in (payload.get("action_log") or payload.get("actionLog") or [])
+        if str(item).strip()
+    ]
+    state["last_error"] = str(payload.get("last_error") or payload.get("lastError") or "").strip()
+    return state
+
+
+def _normalize_oracle_connection_payload(payload: Any, index: int = 0) -> dict[str, Any]:
+    default = DEFAULT_APP_CONFIG["oracleConnections"][0]
+    if not isinstance(payload, dict):
+        return {**default, "id": f"oracle_{index + 1}", "label": f"Oracle {index + 1}"}
+    return {
+        "id": str(payload.get("id") or f"oracle_{index + 1}").strip() or f"oracle_{index + 1}",
+        "label": str(payload.get("label") or f"Oracle {index + 1}").strip() or f"Oracle {index + 1}",
+        "host": str(payload.get("host") or default["host"]).strip(),
+        "port": max(1, int(payload.get("port") or default["port"])),
+        "serviceName": str(payload.get("serviceName") or payload.get("service_name") or "").strip(),
+        "sid": str(payload.get("sid") or "").strip(),
+        "dsn": str(payload.get("dsn") or "").strip(),
+        "username": str(payload.get("username") or "").strip(),
+        "password": str(payload.get("password") or ""),
+    }
+
+
+def _normalize_oracle_connections_payload(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return json.loads(json.dumps(DEFAULT_APP_CONFIG["oracleConnections"]))
+    normalized = [
+        _normalize_oracle_connection_payload(item, index)
+        for index, item in enumerate(payload)
+        if isinstance(item, dict)
+    ]
+    return normalized or json.loads(json.dumps(DEFAULT_APP_CONFIG["oracleConnections"]))
+
+
+def _normalize_oracle_analyst_config(payload: Optional[dict]) -> dict[str, Any]:
+    defaults = DEFAULT_APP_CONFIG["oracleAnalystConfig"]
+    if not isinstance(payload, dict):
+        return dict(defaults)
+    return {
+        "connectionId": str(payload.get("connectionId") or payload.get("connection_id") or defaults["connectionId"]).strip() or defaults["connectionId"],
+        "rowLimit": max(1, min(ORACLE_MAX_ROW_LIMIT, int(payload.get("rowLimit") or payload.get("row_limit") or defaults["rowLimit"]))),
+        "maxRetries": max(1, min(10, int(payload.get("maxRetries") or payload.get("max_retries") or defaults["maxRetries"]))),
+        "maxIterations": max(1, min(20, int(payload.get("maxIterations") or payload.get("max_iterations") or defaults["maxIterations"]))),
+        "toolkitId": str(payload.get("toolkitId") or payload.get("toolkit_id") or defaults["toolkitId"]).strip(),
+        "systemPrompt": str(payload.get("systemPrompt") or payload.get("system_prompt") or defaults["systemPrompt"]).strip() or defaults["systemPrompt"],
+    }
+
+
+def _resolve_oracle_connection(
+    connections: list[OracleConnectionConfig],
+    config: OracleAnalystConfigModel | dict[str, Any],
+) -> OracleConnectionConfig:
+    normalized_connections = [
+        OracleConnectionConfig(
+            id=str(connection.id).strip(),
+            label=str(connection.label).strip(),
+            host=str(connection.host).strip(),
+            port=int(connection.port),
+            service_name=str(connection.service_name).strip(),
+            sid=str(connection.sid).strip(),
+            dsn=str(connection.dsn).strip(),
+            username=str(connection.username).strip(),
+            password=str(connection.password),
+        )
+        if isinstance(connection, OracleConnectionConfig)
+        else OracleConnectionConfig(
+            id=str(connection.get("id") or "").strip(),
+            label=str(connection.get("label") or "").strip(),
+            host=str(connection.get("host") or "").strip(),
+            port=int(connection.get("port") or 1521),
+            service_name=str(connection.get("service_name") or connection.get("serviceName") or "").strip(),
+            sid=str(connection.get("sid") or "").strip(),
+            dsn=str(connection.get("dsn") or "").strip(),
+            username=str(connection.get("username") or "").strip(),
+            password=str(connection.get("password") or ""),
+        )
+        for connection in connections
+    ]
+    if not normalized_connections:
+        raise HTTPException(status_code=400, detail="No Oracle connection is configured.")
+    connection_id = (
+        getattr(config, "connection_id", None)
+        if isinstance(config, OracleAnalystConfigModel)
+        else str((config or {}).get("connectionId") or (config or {}).get("connection_id") or "")
+    )
+    for connection in normalized_connections:
+        if connection.id == connection_id:
+            return connection
+    return normalized_connections[0]
+
+
+def _oracle_markdown_table(rows: list[dict[str, Any]], limit: int = ORACLE_RESULT_PREVIEW_ROWS) -> str:
+    preview_rows = rows[:limit]
+    if not preview_rows:
+        return "No rows returned."
+    headers = list(preview_rows[0].keys())
+    header_line = "| " + " | ".join(headers) + " |"
+    divider = "| " + " | ".join(["---"] * len(headers)) + " |"
+    body = []
+    for row in preview_rows:
+        body.append("| " + " | ".join(str(row.get(header, "")) for header in headers) + " |")
+    return "\n".join([header_line, divider, *body])
+
+
+def _oracle_actions_markdown(actions: list[str]) -> str:
+    if not actions:
+        return "- No tool call was needed."
+    return "\n".join(f"- {action}" for action in actions)
+
+
+async def plan_oracle_react_step(
+    user_message: str,
+    history: list[dict[str, Any]],
+    scratchpad: list[dict[str, Any]],
+    state: dict[str, Any],
+    oracle_config: dict[str, Any],
+    connection_label: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    prompt = f"""
+You are the Oracle Analyst agent in RAGnarok.
+Your job is to answer the user's question by reasoning step by step and deciding whether to use one Oracle tool.
+
+Return JSON only with this exact shape:
+{{
+  "reasoning": "short English explanation",
+  "action": "tool" | "clarify_table" | "final",
+  "tool_name": "list_tables" | "get_schema" | "check_query" | "execute_query",
+  "tool_input": {{}},
+  "clarification_prompt": "short English question",
+  "clarification_options": ["SCHEMA.TABLE_A", "SCHEMA.TABLE_B"],
+  "final_answer": "Markdown final answer if action=final"
+}}
+
+Oracle SQL rules:
+- NEVER use SELECT *
+- Prefer indexed columns in WHERE clauses when possible
+- Use TRUNC(), TO_DATE(..., 'YYYY-MM-DD'), and SYSDATE for date logic
+- Use ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) for ranking when needed
+- Use FETCH FIRST n ROWS ONLY for pagination
+- Use SUBSTR(), NVL(), TO_CHAR(), and DECODE() when helpful
+- Use only read-only SELECT or WITH queries
+
+Working rules:
+- At most one tool call per iteration
+- Start with list_tables when you do not know the right table
+- Use get_schema after the table is known
+- Use get_schema with columns_filter when you only need a focused type lookup
+- Prefer check_query before execute_query when SQL was just created or repaired
+- If a tool result contains an Oracle error, repair the SQL and continue
+- Ask for table clarification only when multiple tables remain plausible
+- Keep everything in English
+
+Connection label: {connection_label}
+Configured row limit: {oracle_config.get("rowLimit", ORACLE_DEFAULT_ROW_LIMIT)}
+Toolkit id: {oracle_config.get("toolkitId") or "default"}
+Custom system prompt:
+{oracle_config.get("systemPrompt") or ""}
+
+Current agent state:
+{json.dumps(state, ensure_ascii=False, indent=2)}
+
+Recent conversation memory:
+{_conversation_memory_markdown(history, current_message=user_message)}
+
+Scratchpad:
+{json.dumps(scratchpad[-10:], ensure_ascii=False, indent=2)}
+
+User request:
+{user_message}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    action = str(parsed.get("action") or "").strip().lower()
+    return {
+        "reasoning": str(parsed.get("reasoning") or "").strip(),
+        "action": action,
+        "tool_name": str(parsed.get("tool_name") or "").strip(),
+        "tool_input": parsed.get("tool_input") if isinstance(parsed.get("tool_input"), dict) else {},
+        "clarification_prompt": str(parsed.get("clarification_prompt") or "").strip(),
+        "clarification_options": [
+            str(item).strip()
+            for item in (parsed.get("clarification_options") or [])
+            if str(item).strip()
+        ],
+        "final_answer": str(parsed.get("final_answer") or "").strip(),
+    }
+
+
+async def summarize_oracle_result(
+    user_request: str,
+    executed_sql: str,
+    result_rows: list[dict[str, Any]],
+    action_log: list[str],
+    conversation_memory: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    preview = json.dumps(result_rows[:ORACLE_RESULT_PREVIEW_ROWS], ensure_ascii=False, indent=2)
+    prompt = f"""
+You are summarizing an Oracle SQL analysis result for an end user.
+Return JSON only with this exact shape:
+{{
+  "executive_summary": "2 to 5 sentence narrative in English",
+  "key_metrics": [
+    {{"label": "Total revenue", "value": "123456"}},
+    {{"label": "Top region", "value": "EMEA"}}
+  ],
+  "insights": ["short insight", "short recommendation"],
+  "confidence_score": 0,
+  "confidence_reason": "short explanation"
+}}
+
+Rules:
+- Keep the tone business-facing and precise
+- Use the actual result values when possible
+- Keep confidence between 0 and 100
+- If there are no rows, explain that clearly
+
+User request:
+{user_request}
+
+Executed SQL:
+{executed_sql}
+
+Recent conversation memory:
+{conversation_memory}
+
+Action log:
+{json.dumps(action_log, ensure_ascii=False)}
+
+Result preview:
+{preview}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    key_metrics = []
+    for item in parsed.get("key_metrics", []) if isinstance(parsed.get("key_metrics"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if label and value:
+            key_metrics.append({"label": label, "value": value})
+
+    insights = [
+        str(item).strip()
+        for item in (parsed.get("insights") or [])
+        if str(item).strip()
+    ] if isinstance(parsed.get("insights"), list) else []
+
+    score = parsed.get("confidence_score")
+    try:
+        confidence_score = max(0, min(100, int(score)))
+    except Exception:
+        confidence_score = 78 if result_rows else 62
+
+    return {
+        "executive_summary": str(parsed.get("executive_summary") or "").strip() or "The Oracle query completed successfully.",
+        "key_metrics": key_metrics,
+        "insights": insights,
+        "confidence_score": confidence_score,
+        "confidence_reason": str(parsed.get("confidence_reason") or "").strip() or "Confidence is based on schema grounding and successful query execution.",
+    }
+
+
+def build_oracle_response_markdown(
+    summary: dict[str, Any],
+    sql: str,
+    rows: list[dict[str, Any]],
+    action_log: list[str],
+) -> str:
+    executive_summary = str(summary.get("executive_summary") or "The Oracle query completed successfully.").strip()
+    key_metrics = summary.get("key_metrics") or []
+    insights = summary.get("insights") or []
+    confidence_score = int(summary.get("confidence_score") or 0)
+    confidence_reason = str(summary.get("confidence_reason") or "").strip()
+
+    sections = [
+        "## Executive Summary",
+        executive_summary,
+        "",
+        "## Key Metrics",
+    ]
+
+    if key_metrics:
+        sections.extend(
+            f"- **{metric['label']}**: {metric['value']}"
+            for metric in key_metrics
+            if metric.get("label") and metric.get("value")
+        )
+    else:
+        sections.append(f"- **Rows returned**: {len(rows)}")
+
+    sections.extend(
+        [
+            "",
+            "## SQL Used",
+            "```sql",
+            clean_sql_text(sql),
+            "```",
+            "",
+            "## Data Table",
+            _oracle_markdown_table(rows),
+            "",
+            "## Insights & Recommendations",
+        ]
+    )
+
+    if insights:
+        sections.extend(f"- {insight}" for insight in insights)
+    else:
+        sections.append("- No additional recommendation was required beyond the query result.")
+
+    sections.extend(
+        [
+            "",
+            "## Actions Performed",
+            _oracle_actions_markdown(action_log),
+            "",
+            "## Confidence Score",
+            f"Score: **{confidence_score}/100** — {confidence_reason or 'Confidence is based on successful Oracle tool execution.'}",
+        ]
+    )
+    return "\n".join(sections)
 
 # ── CrewAI planning helpers ───────────────────────────────────────────────────
 
@@ -5313,6 +6807,59 @@ class ClickHouseConfig(BaseModel):
     query_limit: int = 200
 
 
+class OracleConnectionConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = "oracle_default"
+    label: str = "Default Oracle"
+    host: str = "localhost"
+    port: int = 1521
+    service_name: str = Field(
+        default="",
+        validation_alias=AliasChoices("service_name", "serviceName"),
+        serialization_alias="serviceName",
+    )
+    sid: str = ""
+    dsn: str = ""
+    username: str = ""
+    password: str = ""
+
+
+class OracleAnalystConfigModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    connection_id: str = Field(
+        default="oracle_default",
+        validation_alias=AliasChoices("connection_id", "connectionId"),
+        serialization_alias="connectionId",
+    )
+    row_limit: int = Field(
+        default=1000,
+        validation_alias=AliasChoices("row_limit", "rowLimit"),
+        serialization_alias="rowLimit",
+    )
+    max_retries: int = Field(
+        default=3,
+        validation_alias=AliasChoices("max_retries", "maxRetries"),
+        serialization_alias="maxRetries",
+    )
+    max_iterations: int = Field(
+        default=8,
+        validation_alias=AliasChoices("max_iterations", "maxIterations"),
+        serialization_alias="maxIterations",
+    )
+    toolkit_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("toolkit_id", "toolkitId"),
+        serialization_alias="toolkitId",
+    )
+    system_prompt: str = Field(
+        default=DEFAULT_APP_CONFIG["oracleAnalystConfig"]["systemPrompt"],
+        validation_alias=AliasChoices("system_prompt", "systemPrompt"),
+        serialization_alias="systemPrompt",
+    )
+
+
 class TestConnectionRequest(BaseModel):
     url: str
     username: Optional[str] = None
@@ -5354,6 +6901,10 @@ class ChatRequest(BaseModel):
 
 class ClickHouseTestRequest(BaseModel):
     clickhouse: ClickHouseConfig
+
+
+class OracleTestRequest(BaseModel):
+    connection: OracleConnectionConfig
 
 
 class ClickHouseAgentState(BaseModel):
@@ -5429,6 +6980,53 @@ class FileManagerAgentRequest(BaseModel):
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
 
 
+class PdfCreatorAgentStateModel(BaseModel):
+    stage: str = "idle"
+    pending_document: Optional[dict] = None
+    pending_confirmation: Optional[dict] = None
+    last_output_path: str = ""
+    last_title: str = ""
+
+
+class PdfCreatorAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    agent_state: PdfCreatorAgentStateModel = Field(default_factory=PdfCreatorAgentStateModel)
+    file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
+
+
+class OracleAnalystAgentStateModel(BaseModel):
+    stage: str = "idle"
+    pending_request: str = ""
+    available_tables: list[str] = Field(default_factory=list)
+    selected_table: Optional[str] = None
+    schema_info: list[dict] = Field(default_factory=list)
+    clarification_prompt: str = ""
+    clarification_options: list[str] = Field(default_factory=list)
+    last_sql: str = ""
+    last_result_meta: list[dict] = Field(default_factory=list)
+    last_result_rows: list[dict] = Field(default_factory=list)
+    final_answer: str = ""
+    action_log: list[str] = Field(default_factory=list)
+    last_error: str = ""
+
+
+class OracleAnalystAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    oracle_connections: list[OracleConnectionConfig] = Field(default_factory=list)
+    oracle_analyst_config: OracleAnalystConfigModel = Field(default_factory=OracleAnalystConfigModel)
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    agent_state: OracleAnalystAgentStateModel = Field(default_factory=OracleAnalystAgentStateModel)
+
+
 class DataQualityAgentStateModel(BaseModel):
     stage: str = "idle"
     table: Optional[str] = None
@@ -5478,7 +7076,11 @@ class ManagerAgentRequest(BaseModel):
     manager_state: ManagerAgentStateModel = Field(default_factory=ManagerAgentStateModel)
     clickhouse_state: ClickHouseAgentState = Field(default_factory=ClickHouseAgentState)
     file_manager_state: FileManagerAgentStateModel = Field(default_factory=FileManagerAgentStateModel)
+    pdf_creator_state: PdfCreatorAgentStateModel = Field(default_factory=PdfCreatorAgentStateModel)
+    oracle_analyst_state: OracleAnalystAgentStateModel = Field(default_factory=OracleAnalystAgentStateModel)
     data_quality_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
+    oracle_connections: list[OracleConnectionConfig] = Field(default_factory=list)
+    oracle_analyst_config: OracleAnalystConfigModel = Field(default_factory=OracleAnalystConfigModel)
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
 
 
@@ -6166,6 +7768,605 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
                 "title": "Reached iteration limit",
                 "status": "error",
                 "details": "The agent stopped to avoid an infinite loop.",
+            }
+        ],
+    }
+
+
+@app.post("/api/chat/pdf-creator-agent")
+async def chat_pdf_creator_agent(req: PdfCreatorAgentRequest):
+    user_message = (req.message or "").strip()
+    state = _normalize_pdf_creator_state(req.agent_state.model_dump())
+    config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+    normalized_choice = normalize_choice(user_message).lower()
+    payload = _try_extract_pdf_export_payload(user_message)
+
+    def _choice_prompt(current_state: dict[str, Any], reason: str) -> dict[str, Any]:
+        current_state["stage"] = "awaiting_source_choice"
+        answer = build_choice_markdown(
+            "PDF Creator",
+            (
+                "I can create a polished PDF for you, but I still need the content source.\n\n"
+                f"{reason}"
+            ),
+            PDF_CREATOR_SOURCE_CHOICES,
+        )
+        return {
+            "answer": answer,
+            "agent_state": current_state,
+            "steps": [
+                {
+                    "id": "pdf-source-choice",
+                    "title": "Waiting for content source",
+                    "status": "running",
+                    "details": "The PDF creator needs to know whether it should use the latest chat analysis or new content pasted by the user.",
+                }
+            ],
+        }
+
+    if not user_message:
+        return {
+            "answer": (
+                "## PDF Creator Agent\n"
+                "Ask me to turn the latest analysis or any pasted content into a clean, professional PDF.\n\n"
+                f"- **Sandbox base path:** `{config['basePath'] or 'not restricted'}`\n"
+                "- **Style:** Slate header, compact sections, and export-ready formatting aligned with the UI."
+            ),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "pdf-ready",
+                    "title": "Ready for PDF export",
+                    "status": "success",
+                    "details": "The agent can build a PDF from the latest analysis or from text the user provides.",
+                }
+            ],
+        }
+
+    if state.get("pending_confirmation"):
+        if is_negative_response(user_message) or normalized_choice in {"cancel", "cancel file action"}:
+            state["pending_confirmation"] = None
+            state["stage"] = "idle"
+            return {
+                "answer": "## PDF Creator\nThe pending PDF overwrite was cancelled.",
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "pdf-cancel",
+                        "title": "Cancelled overwrite",
+                        "status": "success",
+                        "details": "The existing PDF file was left unchanged.",
+                    }
+                ],
+            }
+
+        if is_affirmative_response(user_message) or normalized_choice in {"confirm", "confirm file action"}:
+            pending = state.get("pending_confirmation") or {}
+            pending_action = dict(pending.get("pending_action") or {})
+            try:
+                result = create_pdf_report_tool(
+                    path=str(pending_action.get("path") or "").strip(),
+                    title=str(pending_action.get("title") or "RAGnarok Report").strip(),
+                    subtitle=str(pending_action.get("subtitle") or "Professional export generated from RAGnarok").strip(),
+                    body_markdown=str(pending_action.get("body_markdown") or "").strip(),
+                    confirmed=True,
+                    base_path=config["basePath"],
+                )
+            except Exception as exc:
+                state["pending_confirmation"] = None
+                state["stage"] = "idle"
+                return {
+                    "answer": f"## PDF Creator\nI could not complete the confirmed PDF export.\n\n```text\n{exc}\n```",
+                    "agent_state": state,
+                    "steps": [
+                        {
+                            "id": "pdf-confirm-error",
+                            "title": "Confirmed PDF export failed",
+                            "status": "error",
+                            "details": str(exc),
+                        }
+                    ],
+                }
+
+            state["pending_confirmation"] = None
+            state["pending_document"] = None
+            state["stage"] = "idle"
+            state["last_output_path"] = str((result.get("data") or {}).get("path") or "")
+            state["last_title"] = str(pending_action.get("title") or "").strip()
+            return {
+                "answer": _pdf_creator_success_answer(result, state["last_title"], state["last_output_path"]),
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "pdf-overwrite-complete",
+                        "title": "Overwrote PDF",
+                        "status": "success",
+                        "details": result.get("summary") or "The PDF export completed successfully.",
+                    }
+                ],
+            }
+
+        answer, actions = _pdf_creator_confirmation_answer(state)
+        return {
+            "answer": answer,
+            "actions": actions,
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "pdf-await-confirmation",
+                    "title": "Waiting for confirmation",
+                    "status": "running",
+                    "details": "The requested PDF target already exists, so overwrite confirmation is required.",
+                }
+            ],
+        }
+
+    if state.get("stage") == "awaiting_source_choice":
+        pending_document = dict(state.get("pending_document") or {})
+        selected_choice = resolve_user_choice(user_message, PDF_CREATOR_SOURCE_CHOICES)
+        if selected_choice == PDF_CREATOR_SOURCE_CHOICES[0]:
+            latest_analysis = _latest_exportable_assistant_message(req.history)
+            if not latest_analysis:
+                state["stage"] = "awaiting_content"
+                return {
+                    "answer": (
+                        "## PDF Creator\n"
+                        "I could not find a usable analysis in the recent chat history.\n\n"
+                        "Please paste the content you want me to turn into a PDF in your next message."
+                    ),
+                    "agent_state": state,
+                    "steps": [
+                        {
+                            "id": "pdf-await-content",
+                            "title": "Waiting for pasted content",
+                            "status": "running",
+                            "details": "No recent exportable analysis was found, so the agent is asking the user to paste the content manually.",
+                        }
+                    ],
+                }
+            payload = {
+                "title": str(pending_document.get("title") or "RAGnarok Report").strip(),
+                "subtitle": str(pending_document.get("subtitle") or "Professional export generated from RAGnarok").strip(),
+                "path": str(pending_document.get("path") or "").strip(),
+                "source_markdown": latest_analysis,
+                "source_request": str(pending_document.get("source_request") or "").strip(),
+            }
+            state["stage"] = "idle"
+            state["pending_document"] = None
+        elif selected_choice == PDF_CREATOR_SOURCE_CHOICES[1]:
+            state["stage"] = "awaiting_content"
+            return {
+                "answer": (
+                    "## PDF Creator\n"
+                    "Please paste the content you want me to export.\n\n"
+                    "I will turn your next message into a professional PDF."
+                ),
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "pdf-await-content",
+                        "title": "Waiting for pasted content",
+                        "status": "running",
+                        "details": "The agent is waiting for the user to paste the content to export as PDF.",
+                    }
+                ],
+            }
+        else:
+            return _choice_prompt(state, "Choose how I should gather the content for the PDF.")
+
+    if state.get("stage") == "awaiting_content" and not payload:
+        pending_document = dict(state.get("pending_document") or {})
+        payload = {
+            "title": str(pending_document.get("title") or "RAGnarok Report").strip(),
+            "subtitle": str(pending_document.get("subtitle") or "Professional export generated from RAGnarok").strip(),
+            "path": str(pending_document.get("path") or "").strip(),
+            "source_markdown": user_message[:PDF_CREATOR_MAX_TEXT_CHARS],
+            "source_request": str(pending_document.get("source_request") or "").strip(),
+        }
+        state["stage"] = "idle"
+        state["pending_document"] = None
+
+    if not payload:
+        target_path = _extract_pdf_path(user_message)
+        title = _extract_pdf_title(user_message, target_path)
+        source_markdown = _latest_exportable_assistant_message(req.history)
+        if not source_markdown:
+            state["pending_document"] = {
+                "title": title,
+                "subtitle": "Professional export generated from RAGnarok",
+                "path": target_path or _default_pdf_target_path(title),
+                "source_request": user_message,
+            }
+            return _choice_prompt(
+                state,
+                "I did not find an explicit body in your request, and there is no recent assistant analysis I can safely export yet.",
+            )
+
+        payload = {
+            "title": title,
+            "subtitle": "Professional export generated from RAGnarok",
+            "path": target_path or _default_pdf_target_path(title),
+            "source_markdown": source_markdown,
+            "source_request": user_message,
+        }
+
+    title = str(payload.get("title") or "RAGnarok Report").strip() or "RAGnarok Report"
+    subtitle = str(payload.get("subtitle") or "Professional export generated from RAGnarok").strip()
+    target_path = str(payload.get("path") or "").strip() or _default_pdf_target_path(title)
+    source_markdown = str(payload.get("source_markdown") or "").strip()
+    body_markdown = _build_pdf_creator_body_markdown(
+        source_markdown,
+        title,
+        str(payload.get("source_request") or "").strip(),
+    )
+
+    try:
+        result = create_pdf_report_tool(
+            path=target_path,
+            title=title,
+            subtitle=subtitle,
+            body_markdown=body_markdown,
+            confirmed=False,
+            base_path=config["basePath"],
+        )
+    except Exception as exc:
+        state["stage"] = "idle"
+        state["pending_document"] = None
+        return {
+            "answer": f"## PDF Creator\nI could not prepare the PDF export.\n\n```text\n{exc}\n```",
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "pdf-error",
+                    "title": "PDF export failed",
+                    "status": "error",
+                    "details": str(exc),
+                }
+            ],
+        }
+
+    if result.get("requires_confirmation"):
+        pending_action = dict((result.get("pending_action") or {}))
+        tool_input = dict(pending_action.get("tool_input") or {})
+        state["pending_confirmation"] = {
+            "preview": str(result.get("preview") or "").strip(),
+            "summary": str(result.get("summary") or "").strip(),
+            "requested_at": _utc_now_iso(),
+            "pending_action": {
+                "path": str(tool_input.get("path") or target_path).strip(),
+                "title": str(tool_input.get("title") or title).strip(),
+                "subtitle": str(tool_input.get("subtitle") or subtitle).strip(),
+                "body_markdown": str(tool_input.get("body_markdown") or body_markdown),
+            },
+        }
+        state["last_title"] = title
+        state["last_output_path"] = target_path
+        answer, actions = _pdf_creator_confirmation_answer(state)
+        return {
+            "answer": answer,
+            "actions": actions,
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "pdf-confirm",
+                    "title": "Confirmation required",
+                    "status": "running",
+                    "details": str(result.get("summary") or "Overwrite confirmation is required."),
+                }
+            ],
+        }
+
+    state["stage"] = "idle"
+    state["pending_document"] = None
+    state["pending_confirmation"] = None
+    state["last_output_path"] = str((result.get("data") or {}).get("path") or target_path)
+    state["last_title"] = title
+    return {
+        "answer": _pdf_creator_success_answer(result, title, state["last_output_path"]),
+        "agent_state": state,
+        "steps": [
+            {
+                "id": "pdf-created",
+                "title": "Created PDF",
+                "status": "success",
+                "details": result.get("summary") or "The PDF export completed successfully.",
+            }
+        ],
+    }
+
+
+def _oracle_match_table_choice(user_message: str, options: list[str]) -> Optional[str]:
+    direct = resolve_user_choice(user_message, options)
+    if direct:
+        return direct
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return None
+    matches = []
+    for option in options:
+        lowered = option.lower()
+        short_name = lowered.split(".")[-1]
+        if lowered in normalized or re.search(rf"(?<![a-z0-9_]){re.escape(short_name)}(?![a-z0-9_])", normalized):
+            matches.append(option)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _oracle_state_needs_followup(state: dict[str, Any]) -> bool:
+    return str(state.get("stage") or "").strip() == "awaiting_table"
+
+
+def _oracle_tool_preview(value: Any, max_items: int = 20) -> str:
+    if isinstance(value, list):
+        preview_items = value[:max_items]
+        return json.dumps(preview_items, ensure_ascii=False, indent=2)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value)
+
+
+@app.post("/api/chat/oracle-analyst-agent")
+async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
+    user_message = (req.message or "").strip()
+    state = _normalize_oracle_analyst_state(req.agent_state.model_dump())
+    oracle_config = _normalize_oracle_analyst_config(req.oracle_analyst_config.model_dump())
+    connections = req.oracle_connections or [OracleConnectionConfig(**DEFAULT_APP_CONFIG["oracleConnections"][0])]
+    connection = _resolve_oracle_connection(connections, req.oracle_analyst_config)
+    if not user_message:
+        return {
+            "answer": (
+                "## Oracle Analyst Agent\n"
+                "Ask a business question in English and I will inspect the Oracle schema, generate optimized SQL, and return a narrative answer.\n\n"
+                f"- **Connection:** {connection.label or connection.id}\n"
+                f"- **Row limit:** {oracle_config['rowLimit']}\n"
+                "- **Flow:** list tables → inspect schema → validate SQL → execute query → summarize result."
+            ),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "oracle-ready",
+                    "title": "Ready for Oracle analysis",
+                    "status": "success",
+                    "details": "The Oracle Analyst agent is ready to query Oracle safely with a ReAct loop.",
+                }
+            ],
+        }
+
+    if state.get("stage") == "awaiting_table":
+        selected_table = _oracle_match_table_choice(user_message, state.get("clarification_options") or [])
+        if not selected_table:
+            return {
+                "answer": build_choice_markdown(
+                    "Oracle Table Selection",
+                    state.get("clarification_prompt") or "Choose the Oracle table that best matches your request.",
+                    state.get("clarification_options") or state.get("available_tables")[:ORACLE_TABLE_PREVIEW_LIMIT],
+                ),
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "oracle-await-table",
+                        "title": "Waiting for table selection",
+                        "status": "running",
+                        "details": "The agent is waiting for the user to choose the Oracle table.",
+                    }
+                ],
+            }
+        state["selected_table"] = selected_table
+        state["stage"] = "idle"
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        user_message = state.get("pending_request") or user_message
+
+    scratchpad: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    current_request = state.get("pending_request") or user_message
+
+    for iteration in range(ORACLE_REACT_MAX_ITERATIONS):
+        planned = await plan_oracle_react_step(
+            current_request,
+            req.history,
+            scratchpad,
+            state,
+            oracle_config,
+            connection.label or connection.id,
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+        reasoning = planned.get("reasoning") or "The local LLM selected the next Oracle step."
+        action = planned.get("action")
+
+        if action == "clarify_table":
+            options = [
+                option for option in planned.get("clarification_options", [])
+                if option in (state.get("available_tables") or [])
+            ][:6]
+            if not options:
+                if not state.get("available_tables"):
+                    try:
+                        state["available_tables"] = await list_oracle_tables(connection)
+                    except Exception as exc:
+                        raise HTTPException(status_code=400, detail=f"Oracle connection error: {exc}") from exc
+                options = (state.get("available_tables") or [])[:6]
+            state["stage"] = "awaiting_table"
+            state["pending_request"] = current_request
+            state["clarification_prompt"] = planned.get("clarification_prompt") or "Choose the Oracle table that best matches your request."
+            state["clarification_options"] = options
+            return {
+                "answer": build_choice_markdown(
+                    "Oracle Table Selection",
+                    state["clarification_prompt"],
+                    options,
+                ),
+                "agent_state": state,
+                "steps": steps + [
+                    {
+                        "id": f"oracle-clarify-{iteration}",
+                        "title": "Waiting for table selection",
+                        "status": "running",
+                        "details": reasoning,
+                    }
+                ],
+            }
+
+        if action == "final":
+            state["stage"] = "ready"
+            state["pending_request"] = ""
+            state["final_answer"] = planned.get("final_answer") or state.get("final_answer") or "## Executive Summary\nThe Oracle analysis is complete."
+            return {
+                "answer": state["final_answer"],
+                "agent_state": state,
+                "steps": steps + [
+                    {
+                        "id": f"oracle-final-{iteration}",
+                        "title": "Prepared final answer",
+                        "status": "success",
+                        "details": reasoning,
+                    }
+                ],
+            }
+
+        tool_name = str(planned.get("tool_name") or "").strip()
+        tool_input = dict(planned.get("tool_input") or {})
+        if action != "tool" or tool_name not in ORACLE_REACT_TOOL_NAMES:
+            scratchpad.append({"type": "planner_error", "error": "The Oracle planner returned an invalid action."})
+            steps.append(
+                {
+                    "id": f"oracle-invalid-{iteration}",
+                    "title": "Planner action invalid",
+                    "status": "error",
+                    "details": "The Oracle planner returned an invalid action.",
+                }
+            )
+            continue
+
+        try:
+            if tool_name == "list_tables":
+                tables = await list_oracle_tables(connection)
+                state["available_tables"] = tables
+                result_payload = {
+                    "tables": tables,
+                    "preview": tables[:ORACLE_TABLE_PREVIEW_LIMIT],
+                }
+                action_label = "list_tables → Agent"
+                step_detail = f"Loaded {len(tables)} accessible Oracle table(s)."
+            elif tool_name == "get_schema":
+                table_name = str(tool_input.get("table") or state.get("selected_table") or "").strip()
+                if not table_name:
+                    raise ValueError("get_schema requires a target table.")
+                columns_filter = str(tool_input.get("columns_filter") or tool_input.get("columnsFilter") or "").strip()
+                schema = await get_oracle_schema(connection, table_name, columns_filter)
+                if not schema:
+                    raise ValueError(f"No readable schema was found for `{table_name}`.")
+                state["selected_table"] = table_name
+                state["schema_info"] = schema
+                result_payload = {
+                    "table": table_name,
+                    "columns_filter": columns_filter,
+                    "schema": schema,
+                }
+                action_label = f"get_schema('{table_name}'{f', columns_filter=\"{columns_filter}\"' if columns_filter else ''}) → Agent"
+                step_detail = f"Loaded {len(schema)} column(s) from `{table_name}`."
+            elif tool_name == "check_query":
+                sql = str(tool_input.get("sql") or "").strip()
+                if not sql:
+                    raise ValueError("check_query requires SQL.")
+                checked = await check_oracle_query(connection, sql)
+                result_payload = checked
+                action_label = "check_query → Agent"
+                step_detail = f"Validated the Oracle query using `{checked.get('mode', 'parse_only')}` mode."
+            else:
+                sql = str(tool_input.get("sql") or "").strip()
+                if not sql:
+                    raise ValueError("execute_query requires SQL.")
+                result = await execute_oracle_query(connection, sql, oracle_config["rowLimit"])
+                state["last_sql"] = result["sql"]
+                state["last_result_meta"] = result["columns"]
+                state["last_result_rows"] = result["rows"]
+                state["action_log"].append("execute_query → Agent")
+                summary = await summarize_oracle_result(
+                    current_request,
+                    result["sql"],
+                    result["rows"],
+                    state["action_log"],
+                    _conversation_memory_markdown(req.history, current_message=current_request),
+                    req.llm_base_url,
+                    req.llm_model,
+                    req.llm_provider,
+                    req.llm_api_key,
+                )
+                state["final_answer"] = build_oracle_response_markdown(
+                    summary,
+                    result["sql"],
+                    result["rows"],
+                    state["action_log"],
+                )
+                state["stage"] = "ready"
+                state["pending_request"] = ""
+                steps.append(
+                    {
+                        "id": f"oracle-execute-{iteration}",
+                        "title": "Executed Oracle query",
+                        "status": "success",
+                        "details": f"Returned {result['row_count']} row(s).",
+                    }
+                )
+                return {
+                    "answer": state["final_answer"],
+                    "agent_state": state,
+                    "steps": steps,
+                }
+
+            if action_label and action_label not in state["action_log"]:
+                state["action_log"].append(action_label)
+            scratchpad.append(
+                {
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "input": tool_input,
+                    "result": result_payload,
+                }
+            )
+            steps.append(
+                {
+                    "id": f"oracle-tool-{iteration}",
+                    "title": f"Used `{tool_name}`",
+                    "status": "success",
+                    "details": step_detail,
+                }
+            )
+        except Exception as exc:
+            state["last_error"] = str(exc)
+            scratchpad.append(
+                {
+                    "type": "tool_error",
+                    "tool": tool_name,
+                    "input": tool_input,
+                    "error": str(exc),
+                }
+            )
+            steps.append(
+                {
+                    "id": f"oracle-tool-error-{iteration}",
+                    "title": f"Tool `{tool_name}` failed",
+                    "status": "error",
+                    "details": str(exc),
+                }
+            )
+
+    fallback_answer = state.get("final_answer") or (
+        "## Executive Summary\n"
+        "I reached the Oracle reasoning limit before I could safely finish the analysis."
+    )
+    return {
+        "answer": fallback_answer,
+        "agent_state": state,
+        "steps": steps or [
+            {
+                "id": "oracle-iteration-limit",
+                "title": "Reached iteration limit",
+                "status": "error",
+                "details": "The Oracle ReAct loop stopped after the maximum number of iterations.",
             }
         ],
     }
@@ -7038,8 +9239,12 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     manager_state = _normalize_manager_agent_state(req.manager_state.model_dump())
     clickhouse_state = dump_clickhouse_agent_state(req.clickhouse_state)
     file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
+    pdf_creator_state = _normalize_pdf_creator_state(req.pdf_creator_state.model_dump())
+    oracle_analyst_state = _normalize_oracle_analyst_state(req.oracle_analyst_state.model_dump())
     data_quality_state = _normalize_data_quality_state(req.data_quality_state.model_dump())
     file_manager_config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+    oracle_analyst_config = _normalize_oracle_analyst_config(req.oracle_analyst_config.model_dump())
+    oracle_connections = req.oracle_connections or [OracleConnectionConfig(**DEFAULT_APP_CONFIG["oracleConnections"][0])]
     pending_pipeline = manager_state.get("pending_pipeline")
 
     if not user_message:
@@ -7048,12 +9253,14 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "answer": (
                 "## Agent Manager\n"
                 "Describe the outcome you want, and I will either answer directly or route the task "
-                "to ClickHouse Query, File management, or Data quality - Tables when a specialist is needed."
+                "to ClickHouse Query, File management, PDF creator, Oracle Analyst, or Data quality - Tables when a specialist is needed."
             ),
             "agent_state": {
                 "manager": manager_state,
                 "clickhouse": clickhouse_state,
                 "fileManager": file_manager_state,
+                "pdfCreator": pdf_creator_state,
+                "oracleAnalyst": oracle_analyst_state,
                 "dataQuality": data_quality_state,
             },
             "steps": [
@@ -7084,6 +9291,46 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             )
         )
 
+    async def _delegate_pdf_creator(message: str) -> dict[str, Any]:
+        return await chat_pdf_creator_agent(
+            PdfCreatorAgentRequest(
+                message=message,
+                history=req.history,
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_api_key=req.llm_api_key,
+                llm_provider=req.llm_provider,
+                agent_state=PdfCreatorAgentStateModel(**pdf_creator_state),
+                file_manager_config=FileManagerAgentConfigModel(
+                    base_path=file_manager_config["basePath"],
+                    max_iterations=file_manager_config["maxIterations"],
+                    system_prompt=file_manager_config["systemPrompt"],
+                ),
+            )
+        )
+
+    async def _delegate_oracle_analyst(message: str) -> dict[str, Any]:
+        return await chat_oracle_analyst_agent(
+            OracleAnalystAgentRequest(
+                message=message,
+                history=req.history,
+                oracle_connections=oracle_connections,
+                oracle_analyst_config=OracleAnalystConfigModel(
+                    connection_id=oracle_analyst_config["connectionId"],
+                    row_limit=oracle_analyst_config["rowLimit"],
+                    max_retries=oracle_analyst_config["maxRetries"],
+                    max_iterations=oracle_analyst_config["maxIterations"],
+                    toolkit_id=oracle_analyst_config["toolkitId"],
+                    system_prompt=oracle_analyst_config["systemPrompt"],
+                ),
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_api_key=req.llm_api_key,
+                llm_provider=req.llm_provider,
+                agent_state=OracleAnalystAgentStateModel(**oracle_analyst_state),
+            )
+        )
+
     if (
         isinstance(pending_pipeline, dict)
         and pending_pipeline.get("kind") == "clickhouse_to_file"
@@ -7098,6 +9345,8 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "manager": manager_state,
                     "clickhouse": clickhouse_state,
                     "fileManager": file_manager_state,
+                    "pdfCreator": pdf_creator_state,
+                    "oracleAnalyst": oracle_analyst_state,
                     "dataQuality": data_quality_state,
                 },
                 "steps": [
@@ -7120,6 +9369,8 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "manager": manager_state,
                     "clickhouse": clickhouse_state,
                     "fileManager": file_manager_state,
+                    "pdfCreator": pdf_creator_state,
+                    "oracleAnalyst": oracle_analyst_state,
                     "dataQuality": data_quality_state,
                 },
                 "steps": [
@@ -7148,6 +9399,8 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             manager_state,
             clickhouse_state,
             file_manager_state,
+            pdf_creator_state,
+            oracle_analyst_state,
             data_quality_state,
             req.llm_base_url,
             req.llm_model,
@@ -7156,8 +9409,11 @@ async def chat_manager_agent(req: ManagerAgentRequest):
         )
         if routing["delegate"] == "clickhouse_query":
             export_pipeline = _extract_clickhouse_file_export_pipeline(user_message)
+            pdf_pipeline = _extract_clickhouse_pdf_export_pipeline(user_message)
             if export_pipeline and not manager_state.get("pending_pipeline"):
                 manager_state["pending_pipeline"] = export_pipeline
+            elif pdf_pipeline and not manager_state.get("pending_pipeline"):
+                manager_state["pending_pipeline"] = pdf_pipeline
         elif routing["delegate"] != "file_management":
             manager_state["pending_pipeline"] = None
 
@@ -7191,6 +9447,8 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                 "manager": manager_state,
                 "clickhouse": clickhouse_state,
                 "fileManager": file_manager_state,
+                "pdfCreator": pdf_creator_state,
+                "oracleAnalyst": oracle_analyst_state,
                 "dataQuality": data_quality_state,
             },
             "steps": base_steps + [
@@ -7234,6 +9492,20 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             file_manager_state = _normalize_file_manager_state(delegated.get("agent_state"))
             manager_state["active_delegate"] = (
                 "file_management" if _file_manager_state_needs_followup(file_manager_state) else None
+            )
+            manager_state["pending_pipeline"] = None
+        elif delegate == "pdf_creator":
+            delegated = await _delegate_pdf_creator(routing["handoff_message"])
+            pdf_creator_state = _normalize_pdf_creator_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "pdf_creator" if _pdf_creator_state_needs_followup(pdf_creator_state) else None
+            )
+            manager_state["pending_pipeline"] = None
+        elif delegate == "oracle_analyst":
+            delegated = await _delegate_oracle_analyst(routing["handoff_message"])
+            oracle_analyst_state = _normalize_oracle_analyst_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "oracle_analyst" if _oracle_state_needs_followup(oracle_analyst_state) else None
             )
             manager_state["pending_pipeline"] = None
         elif delegate == "data_quality_tables":
@@ -7284,102 +9556,183 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     if (
         delegate == "clickhouse_query"
         and isinstance(manager_state.get("pending_pipeline"), dict)
-        and manager_state["pending_pipeline"].get("kind") == "clickhouse_to_file"
         and not manager_state.get("active_delegate")
     ):
         pending_pipeline = dict(manager_state["pending_pipeline"])
-        if _manager_pending_pipeline_requires_details(pending_pipeline):
-            pending_pipeline["stage"] = "awaiting_export_details"
-            manager_state["pending_pipeline"] = pending_pipeline
-            manager_steps.append(
-                {
-                    "id": "manager-await-export-details",
-                    "title": "Waiting for export details",
-                    "status": "running",
-                    "details": "The ClickHouse query is complete, but the manager still needs the export format or target path.",
-                }
-            )
-            return {
-                "answer": _manager_compose_chained_answer(
-                    delegated.get("answer") or "",
-                    _manager_export_details_prompt(pending_pipeline),
-                    "File Export",
-                ),
-                "actions": delegated.get("actions"),
-                "chart": delegated.get("chart"),
-                "agent_state": {
-                    "manager": manager_state,
-                    "clickhouse": clickhouse_state,
-                    "fileManager": file_manager_state,
-                    "dataQuality": data_quality_state,
-                },
-                "steps": manager_steps + specialist_steps,
-            }
+        pipeline_kind = pending_pipeline.get("kind")
 
-        try:
-            chained = await _delegate_file_manager(
-                json.dumps(
-                    _build_file_export_payload_from_clickhouse(pending_pipeline, clickhouse_state),
-                    ensure_ascii=False,
+        if pipeline_kind == "clickhouse_to_file":
+            if _manager_pending_pipeline_requires_details(pending_pipeline):
+                pending_pipeline["stage"] = "awaiting_export_details"
+                manager_state["pending_pipeline"] = pending_pipeline
+                manager_steps.append(
+                    {
+                        "id": "manager-await-export-details",
+                        "title": "Waiting for export details",
+                        "status": "running",
+                        "details": "The ClickHouse query is complete, but the manager still needs the export format or target path.",
+                    }
                 )
-            )
-            file_manager_state = _normalize_file_manager_state(chained.get("agent_state"))
-            manager_state["active_delegate"] = (
-                "file_management" if _file_manager_state_needs_followup(file_manager_state) else None
-            )
-            manager_state["pending_pipeline"] = None
-            chained_steps = _prefix_agent_steps(chained.get("steps") or [], "file_management")
-            manager_steps.append(
-                {
-                    "id": "manager-chain-file-export",
-                    "title": "Continued to File management",
-                    "status": "running" if manager_state.get("active_delegate") else "success",
-                    "details": "The manager continued the same request by exporting the ClickHouse result through File management.",
+                return {
+                    "answer": _manager_compose_chained_answer(
+                        delegated.get("answer") or "",
+                        _manager_export_details_prompt(pending_pipeline),
+                        "File Export",
+                    ),
+                    "actions": delegated.get("actions"),
+                    "chart": delegated.get("chart"),
+                    "agent_state": {
+                        "manager": manager_state,
+                        "clickhouse": clickhouse_state,
+                        "fileManager": file_manager_state,
+                        "pdfCreator": pdf_creator_state,
+                        "oracleAnalyst": oracle_analyst_state,
+                        "dataQuality": data_quality_state,
+                    },
+                    "steps": manager_steps + specialist_steps,
                 }
-            )
-            return {
-                "answer": _manager_compose_chained_answer(
-                    delegated.get("answer") or "",
-                    chained.get("answer") or "",
-                    "File Export",
-                ),
-                "actions": chained.get("actions") or delegated.get("actions"),
-                "chart": delegated.get("chart") or chained.get("chart"),
-                "agent_state": {
-                    "manager": manager_state,
-                    "clickhouse": clickhouse_state,
-                    "fileManager": file_manager_state,
-                    "dataQuality": data_quality_state,
-                },
-                "steps": manager_steps + specialist_steps + chained_steps,
-            }
-        except HTTPException as exc:
-            manager_state["pending_pipeline"] = None
-            manager_state["active_delegate"] = None
-            manager_steps.append(
-                {
-                    "id": "manager-chain-file-export-failed",
-                    "title": "File export failed",
-                    "status": "error",
-                    "details": str(exc.detail),
+
+            try:
+                chained = await _delegate_file_manager(
+                    json.dumps(
+                        _build_file_export_payload_from_clickhouse(pending_pipeline, clickhouse_state),
+                        ensure_ascii=False,
+                    )
+                )
+                file_manager_state = _normalize_file_manager_state(chained.get("agent_state"))
+                manager_state["active_delegate"] = (
+                    "file_management" if _file_manager_state_needs_followup(file_manager_state) else None
+                )
+                manager_state["pending_pipeline"] = None
+                chained_steps = _prefix_agent_steps(chained.get("steps") or [], "file_management")
+                manager_steps.append(
+                    {
+                        "id": "manager-chain-file-export",
+                        "title": "Continued to File management",
+                        "status": "running" if manager_state.get("active_delegate") else "success",
+                        "details": "The manager continued the same request by exporting the ClickHouse result through File management.",
+                    }
+                )
+                return {
+                    "answer": _manager_compose_chained_answer(
+                        delegated.get("answer") or "",
+                        chained.get("answer") or "",
+                        "File Export",
+                    ),
+                    "actions": chained.get("actions") or delegated.get("actions"),
+                    "chart": delegated.get("chart") or chained.get("chart"),
+                    "agent_state": {
+                        "manager": manager_state,
+                        "clickhouse": clickhouse_state,
+                        "fileManager": file_manager_state,
+                        "pdfCreator": pdf_creator_state,
+                        "oracleAnalyst": oracle_analyst_state,
+                        "dataQuality": data_quality_state,
+                    },
+                    "steps": manager_steps + specialist_steps + chained_steps,
                 }
-            )
-            return {
-                "answer": _manager_compose_chained_answer(
-                    delegated.get("answer") or "",
-                    f"## File Export\nI could not complete the export step.\n\n```text\n{exc.detail}\n```",
-                    "File Export",
-                ),
-                "actions": delegated.get("actions"),
-                "chart": delegated.get("chart"),
-                "agent_state": {
-                    "manager": manager_state,
-                    "clickhouse": clickhouse_state,
-                    "fileManager": file_manager_state,
-                    "dataQuality": data_quality_state,
-                },
-                "steps": manager_steps + specialist_steps,
-            }
+            except HTTPException as exc:
+                manager_state["pending_pipeline"] = None
+                manager_state["active_delegate"] = None
+                manager_steps.append(
+                    {
+                        "id": "manager-chain-file-export-failed",
+                        "title": "File export failed",
+                        "status": "error",
+                        "details": str(exc.detail),
+                    }
+                )
+                return {
+                    "answer": _manager_compose_chained_answer(
+                        delegated.get("answer") or "",
+                        f"## File Export\nI could not complete the export step.\n\n```text\n{exc.detail}\n```",
+                        "File Export",
+                    ),
+                    "actions": delegated.get("actions"),
+                    "chart": delegated.get("chart"),
+                    "agent_state": {
+                        "manager": manager_state,
+                        "clickhouse": clickhouse_state,
+                        "fileManager": file_manager_state,
+                        "pdfCreator": pdf_creator_state,
+                        "oracleAnalyst": oracle_analyst_state,
+                        "dataQuality": data_quality_state,
+                    },
+                    "steps": manager_steps + specialist_steps,
+                }
+
+        if pipeline_kind == "clickhouse_to_pdf":
+            try:
+                chained = await _delegate_pdf_creator(
+                    json.dumps(
+                        _build_pdf_export_payload_from_clickhouse(
+                            pending_pipeline,
+                            delegated.get("answer") or "",
+                        ),
+                        ensure_ascii=False,
+                    )
+                )
+                pdf_creator_state = _normalize_pdf_creator_state(chained.get("agent_state"))
+                manager_state["active_delegate"] = (
+                    "pdf_creator" if _pdf_creator_state_needs_followup(pdf_creator_state) else None
+                )
+                manager_state["pending_pipeline"] = None
+                chained_steps = _prefix_agent_steps(chained.get("steps") or [], "pdf_creator")
+                manager_steps.append(
+                    {
+                        "id": "manager-chain-pdf-export",
+                        "title": "Continued to PDF creator",
+                        "status": "running" if manager_state.get("active_delegate") else "success",
+                        "details": "The manager continued the same request by exporting the ClickHouse result through PDF creator.",
+                    }
+                )
+                return {
+                    "answer": _manager_compose_chained_answer(
+                        delegated.get("answer") or "",
+                        chained.get("answer") or "",
+                        "PDF Export",
+                    ),
+                    "actions": chained.get("actions") or delegated.get("actions"),
+                    "chart": delegated.get("chart") or chained.get("chart"),
+                    "agent_state": {
+                        "manager": manager_state,
+                        "clickhouse": clickhouse_state,
+                        "fileManager": file_manager_state,
+                        "pdfCreator": pdf_creator_state,
+                        "oracleAnalyst": oracle_analyst_state,
+                        "dataQuality": data_quality_state,
+                    },
+                    "steps": manager_steps + specialist_steps + chained_steps,
+                }
+            except HTTPException as exc:
+                manager_state["pending_pipeline"] = None
+                manager_state["active_delegate"] = None
+                manager_steps.append(
+                    {
+                        "id": "manager-chain-pdf-export-failed",
+                        "title": "PDF export failed",
+                        "status": "error",
+                        "details": str(exc.detail),
+                    }
+                )
+                return {
+                    "answer": _manager_compose_chained_answer(
+                        delegated.get("answer") or "",
+                        f"## PDF Export\nI could not complete the PDF step.\n\n```text\n{exc.detail}\n```",
+                        "PDF Export",
+                    ),
+                    "actions": delegated.get("actions"),
+                    "chart": delegated.get("chart"),
+                    "agent_state": {
+                        "manager": manager_state,
+                        "clickhouse": clickhouse_state,
+                        "fileManager": file_manager_state,
+                        "pdfCreator": pdf_creator_state,
+                        "oracleAnalyst": oracle_analyst_state,
+                        "dataQuality": data_quality_state,
+                    },
+                    "steps": manager_steps + specialist_steps,
+                }
 
     return {
         "answer": delegated.get("answer") or "## Answer\nThe delegated agent completed its turn.",
@@ -7389,6 +9742,8 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "manager": manager_state,
             "clickhouse": clickhouse_state,
             "fileManager": file_manager_state,
+            "pdfCreator": pdf_creator_state,
+            "oracleAnalyst": oracle_analyst_state,
             "dataQuality": data_quality_state,
         },
         "steps": manager_steps + specialist_steps,
@@ -7415,6 +9770,14 @@ async def test_clickhouse_connection(req: ClickHouseTestRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/oracle/test")
+async def test_oracle_connection_endpoint(req: OracleTestRequest):
+    try:
+        return await test_oracle_connection(req.connection)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def build_choice_markdown(title: str, prompt: str, options: list[str]) -> str:

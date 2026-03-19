@@ -4,6 +4,7 @@ import { ChatInterface } from './components/ChatInterface';
 import { SettingsModal } from './components/SettingsModal';
 import { LandingPage } from './components/LandingPage';
 import { ComingSoon } from './components/ComingSoon';
+import { AgentsToolsPage } from './components/AgentsToolsPage';
 import {
   AppConfig,
   AppPreferences,
@@ -378,6 +379,7 @@ export default function App() {
             <LandingPage
               onNavigate={navigate}
               documentationUrl={appState.config.documentationUrl}
+              portalAppsCount={appState.config.portalApps.filter((app) => app.name.trim() && app.url.trim()).length}
               settingsAccessPassword={appState.config.settingsAccessPassword}
               onOpenSettings={() => setIsSettingsOpen(true)}
             />
@@ -414,7 +416,7 @@ export default function App() {
           </motion.div>
         )}
 
-        {(page === 'dataviz' || page === 'agents') && (
+        {page === 'dataviz' && (
           <motion.div
             key={page}
             variants={pageVariants}
@@ -425,6 +427,23 @@ export default function App() {
             style={{ position: 'fixed', inset: 0, overflow: 'auto' }}
           >
             <ComingSoon page={page} onBack={() => navigate('landing')} />
+          </motion.div>
+        )}
+
+        {page === 'agents' && (
+          <motion.div
+            key="agents"
+            variants={pageVariants}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+            transition={pageTransition}
+            style={{ position: 'fixed', inset: 0, overflow: 'auto' }}
+          >
+            <AgentsToolsPage
+              apps={appState.config.portalApps}
+              onBack={() => navigate('landing')}
+            />
           </motion.div>
         )}
       </AnimatePresence>

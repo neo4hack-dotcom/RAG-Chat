@@ -8,6 +8,7 @@ type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 interface LandingPageProps {
   onNavigate: (page: Page) => void;
   documentationUrl?: string;
+  portalAppsCount?: number;
   settingsAccessPassword?: string;
   onOpenSettings: () => void;
 }
@@ -57,7 +58,7 @@ const CARDS = [
     shadowColor: 'rgba(139,92,246,0.40)',
     iconBg: 'rgba(139,92,246,0.15)',
     iconColor: '#8b5cf6',
-    tag: 'Coming Soon',
+    tag: 'App Portal',
     tagColor: '#7c3aed',
     tagBg: 'rgba(139,92,246,0.12)',
   },
@@ -185,7 +186,7 @@ function FeatureCard({
           transition={{ duration: 0.3 }}
         >
           <span className="text-[14px] font-semibold" style={{ color: card.iconColor }}>
-            {card.id === 'chat' ? 'Get started' : 'Learn more'}
+            {card.id === 'chat' ? 'Get started' : card.id === 'agents' ? 'Open portal' : 'Learn more'}
           </span>
           <motion.div animate={{ x: hovered ? 4 : 0 }} transition={{ duration: 0.25 }}>
             <ArrowRight size={16} style={{ color: card.iconColor }} />
@@ -263,12 +264,20 @@ function HeroHeadline() {
 }
 
 /* ---------- Main component ---------- */
-export function LandingPage({ onNavigate, documentationUrl, settingsAccessPassword, onOpenSettings }: LandingPageProps) {
+export function LandingPage({ onNavigate, documentationUrl, portalAppsCount = 0, settingsAccessPassword, onOpenSettings }: LandingPageProps) {
   const [contactOpen, setContactOpen] = useState(false);
   const [isAccessPromptOpen, setIsAccessPromptOpen] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [accessError, setAccessError] = useState('');
   const effectivePassword = settingsAccessPassword || 'MM@2026';
+  const cards = CARDS.map((card) =>
+    card.id === 'agents'
+      ? {
+          ...card,
+          tag: portalAppsCount > 0 ? `${portalAppsCount} App${portalAppsCount > 1 ? 's' : ''}` : 'App Portal',
+        }
+      : card
+  );
 
   const submitSettingsAccess = () => {
     if (passwordInput === effectivePassword) {
@@ -353,7 +362,7 @@ export function LandingPage({ onNavigate, documentationUrl, settingsAccessPasswo
       {/* Cards grid */}
       <section className="relative z-10 px-6 pb-28 max-w-6xl mx-auto">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {CARDS.map((card, i) => (
+          {cards.map((card, i) => (
             <FeatureCard key={card.id} card={card} index={i} onNavigate={onNavigate} />
           ))}
         </div>

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, CircleDashed, Loader2, XCircle, BrainCircuit, File, Database, Copy, Check } from "lucide-react";
-import { Message, cn, AgentStep, ChartSpec, ChatAction } from "../lib/utils";
+import { Message, cn, AgentStep, ChartSpec, ChatAction, preprocessMarkdown } from "../lib/utils";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -13,6 +13,33 @@ interface ChatMessageProps {
   onCheckboxToggle?: (messageId: string, text: string, checked: boolean) => void;
   onAction?: (action: ChatAction, message: Message) => void;
   showSteps?: boolean;
+}
+
+function MessageCopyButton({ text, isUser }: { text: string; isUser: boolean }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    });
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      className={cn(
+        "absolute top-3 right-3 inline-flex items-center justify-center rounded-full p-2 opacity-0 transition-all group-hover:opacity-100",
+        isUser
+          ? "bg-white/15 text-white/80 hover:bg-white/25 hover:text-white"
+          : "bg-black/5 text-gray-500 hover:bg-black/10 hover:text-gray-900 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15 dark:hover:text-white"
+      )}
+      title={copied ? "Copied" : "Copy message"}
+    >
+      {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+    </button>
+  );
 }
 
 // ── Copy button for code blocks ──────────────────────────────────────────────
@@ -425,6 +452,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
 
   const content = message.content;
   const htmlMode = !isUser && isHtmlContent(content);
+  const renderedContent = !isUser && !htmlMode ? preprocessMarkdown(content) : content;
 
   return (
     <div className={cn("flex gap-4 w-full max-w-4xl mx-auto mb-8 animate-fade-in-up", isUser ? "flex-row-reverse" : "flex-row")}>
@@ -438,11 +466,13 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
       </div>
 
       <div className={cn(
-        "max-w-[85%] px-6 py-4 rounded-[2rem]",
+        "group relative max-w-[85%] px-6 py-4 rounded-[2rem]",
         isUser
           ? "bg-blue-500 text-white rounded-tr-sm shadow-md shadow-blue-500/10"
           : "glass-panel rounded-tl-sm w-full"
       )}>
+        <MessageCopyButton text={content} isUser={isUser} />
+
         {/* Agent Thinking Steps */}
         {showSteps && !isUser && message.steps && message.steps.length > 0 && (
           <div className="mb-4 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 rounded-xl overflow-hidden shadow-sm">
@@ -511,7 +541,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
               rehypePlugins={[rehypeRaw]}
               components={buildComponents(message.id, onCheckboxToggle) as any}
             >
-              {content}
+              {renderedContent}
             </ReactMarkdown>
           </div>
         )}

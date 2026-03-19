@@ -15,8 +15,11 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - [CrewAI Planning](#crewai-planning)
 - [RAG Pipeline](#rag-pipeline)
 - [ClickHouse Query Agent](#clickhouse-query-agent)
+- [Oracle Analyst Agent](#oracle-analyst-agent)
 - [File Management Agent](#file-management-agent)
+- [PDF Creator Agent](#pdf-creator-agent)
 - [Data Quality - Tables Agent](#data-quality---tables-agent)
+- [Agents & Tools App Portal](#agents--tools-app-portal)
 - [MCP Integration](#mcp-integration)
 - [Configuration](#configuration)
 - [Production Build](#production-build)
@@ -29,16 +32,19 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | Category | Details |
 |----------|---------|
 | **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, CrewAI - Planning |
-| **4 agent roles** | Agent Manager, ClickHouse Query, File management, Data quality - Tables |
+| **6 agent roles** | Agent Manager, ClickHouse Query, Oracle Analyst, File management, PDF creator, Data quality - Tables |
 | **Manager orchestration** | Agent Manager can delegate to every specialist agent and keep follow-up context across clarifications and confirmations |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
+| **Oracle agent** | Natural-language Oracle analysis, schema discovery, SQL validation, automatic repair on query errors, narrative Markdown output |
 | **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions |
+| **PDF creator agent** | Backend Python-only PDF export agent to turn the latest useful analysis or pasted content into a polished document |
 | **Data quality agent** | Statistical profiling + LLM scoring for ClickHouse tables, launched from an overlay form above the chat |
 | **Planner / scheduler** | Schedule existing agents on fixed frequency, ClickHouse watch, or file-arrival trigger |
 | **MCP tools** | Connect any MCP server via SSE, test connection, real agentic tool-call loop |
 | **Backend persistence** | App config, conversations and durable preferences stored in backend-managed `DB.json` |
 | **Backup workflow** | Export/import DB backups and force a resync from the latest backend state in Settings |
+| **Agents & Tools portal** | Configurable external application tiles managed in Settings and rendered as a glass-style portal page from the landing screen |
 | **Conversation memory** | Current conversation keeps a short backend-synced working memory window (at least 5 recent steps, currently 10 useful messages) |
 | **Markdown & HTML** | Syntax-highlighted code blocks, proper tables, raw HTML from LLMs, copy button |
 | **Clickable clarifications** | Agent choices are rendered as large clickable tiles in the chat instead of requiring manual retyping when possible |
@@ -79,6 +85,9 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
                            │  │  /api/clickhouse/test        │
                            │  │  /api/chat/clickhouse-agent  │
                            │  │  /api/chat/file-manager-agent│
+                           │  │  /api/chat/pdf-creator-agent │
+                           │  │  /api/oracle/test            │
+                           │  │  /api/chat/oracle-analyst... │
                            │  │  /api/data-quality/options   │
                            │  │  /api/chat/data-quality-agent│
                            │  │  /api/chat/manager-agent     │
@@ -107,6 +116,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, MCP client, OpenSearch management.
 - **Vector store** — OpenSearch with `opensearch-py` and `mcp` Python packages.
 - **Analytics store** — ClickHouse over HTTP for the SQL agent.
+- **Oracle store** — Oracle via Python `oracledb` for the Oracle Analyst agent.
 - **LLM / Embeddings** — Ollama (local) or any OpenAI-compatible API.
 
 ---
@@ -120,6 +130,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - **[Ollama](https://ollama.com)** (or any OpenAI-compatible server)
 - **[OpenSearch](https://opensearch.org)** running locally or remotely (for RAG mode)
 - **[ClickHouse](https://clickhouse.com)** running locally or remotely (optional, for the ClickHouse Query agent)
+- **Oracle Database** reachable from the backend (optional, for the Oracle Analyst agent)
 
 ### Ollama models
 
@@ -191,13 +202,15 @@ Answers include cited sources `[1]`, `[2]` and a confidence score.
 
 ### Agents
 
-Multi-agent orchestration with four roles:
+Multi-agent orchestration with six roles:
 
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
 | **ClickHouse Query** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
+| **Oracle Analyst** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries and answers in business-facing Markdown |
 | **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations |
+| **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
 | **Data quality - Tables** | Profiles ClickHouse tables and generates an English Markdown quality report from a dedicated overlay form |
 
 #### ClickHouse Query agent quick flow
@@ -214,6 +227,20 @@ Multi-agent orchestration with four roles:
 
 The ClickHouse agent uses the backend only and always relies on the configured local/application LLM endpoint for planning and summarisation.
 
+#### Oracle Analyst quick flow
+
+1. Configure Oracle in **Settings → Oracle Analyst**.
+2. Add one or more Oracle connections and use **Test Oracle** to verify access and preview tables.
+3. Switch to **Agents** mode and select **Oracle Analyst**.
+4. Ask a business question in English.
+5. The backend agent can:
+   - list accessible Oracle tables,
+   - inspect schema,
+   - validate the SQL with Oracle-friendly checks,
+   - execute the query,
+   - repair the SQL automatically when Oracle returns a recoverable error,
+   - and return an English Markdown answer with executive summary, key metrics, SQL used, preview table, insights, actions performed, and confidence score.
+
 #### File management quick flow
 
 1. Switch to **Agents** mode and select **File management**.
@@ -223,6 +250,13 @@ The ClickHouse agent uses the backend only and always relies on the configured l
    - custom system prompt.
 3. Ask to list, read, create, move, edit or delete files.
 4. The backend Python agent plans one tool at a time and asks for confirmation before overwrite/delete/move actions.
+
+#### PDF creator quick flow
+
+1. Switch to **Agents** mode and select **PDF creator**.
+2. Ask to export the latest useful analysis, or paste the content to turn into a PDF.
+3. The backend Python agent prepares a clean export with a professional layout.
+4. If the target PDF path already exists, the agent asks for explicit confirmation before overwrite.
 
 #### Data quality quick flow
 
@@ -371,6 +405,49 @@ Optional chart generation when requested or clearly useful
 
 ---
 
+## Oracle Analyst Agent
+
+The Oracle Analyst agent is designed for Oracle-specific natural-language analytics with a narrative business-facing answer.
+
+### Workflow
+
+```text
+User enters Oracle business question
+    ↓
+Agent lists accessible tables when needed
+    ↓
+Agent inspects Oracle schema
+    ↓
+Local LLM generates Oracle-optimized read-only SQL
+    ↓
+Backend validates query via Oracle-safe explain / parse strategy
+    ↓
+Backend executes the query
+    ↓
+If Oracle returns an error, the agent retries with an automatic SQL repair
+    ↓
+Local LLM writes final Markdown answer in English
+```
+
+### Output
+
+- Executive summary
+- Key metrics
+- SQL used
+- Preview data table
+- Insights and recommendations
+- Actions performed
+- Confidence score
+
+### Backend endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/oracle/test` | Test Oracle connectivity and preview accessible tables |
+| `POST /api/chat/oracle-analyst-agent` | Oracle Analyst workflow: discover tables, inspect schema, validate SQL, execute query, summarize result |
+
+---
+
 ## File Management Agent
 
 The File Management agent is a backend Python-only ReAct loop focused on safe filesystem work.
@@ -395,6 +472,25 @@ The File Management agent is a backend Python-only ReAct loop focused on safe fi
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/chat/file-manager-agent` | Runs the file-management ReAct loop and guarded tool execution |
+
+---
+
+## PDF Creator Agent
+
+The PDF Creator agent is a backend Python-only export agent built to turn chat results into a clean, shareable PDF.
+
+### Capabilities
+
+- Reuses the latest useful assistant result in the chat
+- Accepts pasted content when no reusable result is available
+- Applies a professional layout aligned with the UI tone
+- Requires confirmation before overwriting an existing PDF target
+
+### Backend endpoint
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/chat/pdf-creator-agent` | Builds a professional PDF from the latest relevant analysis or explicit content |
 
 ---
 
@@ -433,6 +529,30 @@ Final Markdown report returned in chat
 |----------|-------------|
 | `POST /api/data-quality/options` | Load tables and schema metadata for the Data Quality form |
 | `POST /api/chat/data-quality-agent` | Execute a full data-quality run from structured parameters |
+
+---
+
+## Agents & Tools App Portal
+
+The **Agents & Tools** card on the landing page now opens a dynamic application portal instead of a placeholder page.
+
+### How it works
+
+1. Open **Settings → App Portal**.
+2. Add as many application tiles as needed.
+3. For each tile, define:
+   - application name,
+   - target URL,
+   - hover-only description.
+4. Save the settings.
+5. From the landing page, open **Agents & Tools** to browse the configured tiles.
+
+### UI behaviour
+
+- Tiles use the same Apple-inspired / liquid-glass design language as the rest of the app.
+- The description appears only on hover.
+- Clicking a tile opens the target application in a new browser tab.
+- The portal content is persisted in the backend `DB.json` state.
 
 ---
 
@@ -504,6 +624,22 @@ All settings are available in-app (no `.env` file needed).
 | Chunk Overlap | `50` | Sentence overlap between chunks |
 | KNN Neighbors | `50` | Nearest neighbours to retrieve |
 
+### Oracle Analyst Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Connection ID | `oracle_default` | Stable identifier for a saved Oracle connection |
+| Label | `Default Oracle` | Display name shown in Settings |
+| Host / Port | `localhost:1521` | Oracle network endpoint when not using a full DSN |
+| Service Name / SID | empty | Oracle target instance identifier |
+| Full DSN | empty | Optional DSN overriding host + port + service/SID |
+| Username / Password | — | Oracle credentials |
+| Row limit | `1000` | Safety cap applied to Oracle query results |
+| Max retries | `3` | Compatibility retry setting for Oracle workflows |
+| Max iterations | `8` | UI-configurable compatibility field, runtime stays capped for safety |
+| Toolkit ID | empty | Optional toolkit selector for future extension |
+| System Prompt | built-in | Customises the Oracle Analyst behaviour |
+
 ### ClickHouse Query Agent Settings
 
 | Setting | Default | Description |
@@ -519,6 +655,16 @@ All settings are available in-app (no `.env` file needed).
 | Default Query Limit | `200` | Safety cap applied to row-returning ClickHouse queries |
 
 Use **Test ClickHouse** in the settings panel to verify the connection and preview the first available tables.
+
+### App Portal Settings
+
+Each app tile entry contains:
+
+| Field | Description |
+|-------|-------------|
+| Application name | Visible title on the Agents & Tools portal tile |
+| URL | External link opened in a new browser tab |
+| Hover description | Text revealed only when the tile is hovered |
 
 ### File Management Settings
 
@@ -592,6 +738,7 @@ ODIN AI Portal is designed to be **100% local**:
 | SQL analytics | ClickHouse over HTTP (`httpx`) |
 | MCP client | `mcp` Python SDK (SSE transport) |
 | HTTP client | `httpx` (async) |
+| Oracle driver | `oracledb` |
 | LLM / Embeddings | Ollama or any OpenAI-compatible API |
 
 ---

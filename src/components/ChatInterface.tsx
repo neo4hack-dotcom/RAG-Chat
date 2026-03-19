@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check } from "lucide-react";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -30,6 +30,8 @@ const AGENT_INTRO_MARKERS = {
   manager: "<!-- agent-intro:manager -->",
   clickhouse_query: "<!-- agent-intro:clickhouse_query -->",
   file_management: "<!-- agent-intro:file_management -->",
+  pdf_creator: "<!-- agent-intro:pdf_creator -->",
+  oracle_analyst: "<!-- agent-intro:oracle_analyst -->",
   data_quality_tables: "<!-- agent-intro:data_quality_tables -->",
 } as const;
 
@@ -40,7 +42,8 @@ function getAgentIntroContent(agentRole: AgentRole): string | null {
 
 This manager works in English and can orchestrate the available specialist agents.
 
-- It routes requests to ClickHouse Query, File management, or Data quality - Tables when needed.
+- It routes requests to ClickHouse Query, File management, Oracle Analyst, or Data quality - Tables when needed.
+- It can also route export-ready results to PDF creator when you want a polished document.
 - It keeps the conversation context while delegated agents ask follow-up questions.
 - It answers directly when no specialist tool is required.`;
   }
@@ -68,6 +71,29 @@ This agent works in English and uses backend Python tools to inspect and manage 
 - Use the Configure button, or double-click the agent chip below, to configure the sandbox base path, iteration limit, or custom system prompt.`;
   }
 
+  if (agentRole === 'pdf_creator') {
+    return `${AGENT_INTRO_MARKERS.pdf_creator}
+## PDF Creator Agent
+
+This agent works in English and turns the latest analysis or pasted content into a polished PDF.
+
+- It creates a clean export with a professional layout that matches the app's visual tone.
+- It can reuse the latest useful assistant result in the chat, or ask you to paste content explicitly.
+- Existing PDF files always require confirmation before overwrite.`;
+  }
+
+  if (agentRole === 'oracle_analyst') {
+    return `${AGENT_INTRO_MARKERS.oracle_analyst}
+## Oracle Analyst Agent
+
+This agent works in English and queries Oracle safely from natural language.
+
+- It inspects accessible tables and schema before generating Oracle SQL.
+- It validates read-only SQL before execution and can recover from query errors automatically.
+- It returns an executive summary, key metrics, the SQL used, a preview data table, insights, and a confidence score.
+- Configure one or more Oracle connections in Settings, then ask a business question directly.`;
+  }
+
   if (agentRole === 'data_quality_tables') {
     return `${AGENT_INTRO_MARKERS.data_quality_tables}
 ## Data Quality - Tables Agent
@@ -90,6 +116,10 @@ function hasAgentIntroMessage(messages: Message[], agentRole: AgentRole): boolea
         ? AGENT_INTRO_MARKERS.clickhouse_query
         : agentRole === 'file_management'
           ? AGENT_INTRO_MARKERS.file_management
+          : agentRole === 'pdf_creator'
+            ? AGENT_INTRO_MARKERS.pdf_creator
+          : agentRole === 'oracle_analyst'
+            ? AGENT_INTRO_MARKERS.oracle_analyst
           : agentRole === 'data_quality_tables'
             ? AGENT_INTRO_MARKERS.data_quality_tables
           : null;
@@ -185,7 +215,7 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 
 - C'est l'agent **chef d'orchestre**.
 - Tu peux lui décrire directement un objectif métier, par exemple : **"analyse les ventes puis exporte le résultat en CSV"**.
-- Il peut déléguer à d'autres agents comme **ClickHouse Query**, **File management** ou **Data quality - Tables** quand c'est pertinent.
+- Il peut déléguer à d'autres agents comme **ClickHouse Query**, **Oracle Analyst**, **File management**, **PDF creator** ou **Data quality - Tables** quand c'est pertinent.
 - C'est le bon choix si tu ne sais pas encore quel agent utiliser.
 
 ### ClickHouse Query
@@ -195,12 +225,25 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 - Il peut aussi proposer ou générer un **graphique** quand le résultat s'y prête.
 - Utilise-le pour des demandes comme : **"show me the revenue by month"**, **"find the latest failed jobs"**, ou **"compare sales by region"**.
 
+### Oracle Analyst
+
+- Cet agent sert à **interroger une base Oracle** en langage naturel.
+- Il explore les tables accessibles, inspecte le schéma, génère du **SQL Oracle optimisé**, puis répond avec une **synthèse narrative en Markdown**.
+- Il valide la requête avant exécution et peut corriger automatiquement le SQL si Oracle renvoie une erreur exploitable.
+- Utilise-le pour des demandes comme : **"summarize overdue invoices from Oracle"**, **"show top customers by revenue in Oracle"**, ou **"compare monthly orders in the Oracle ERP schema"**.
+
 ### File management
 
 - Cet agent sert à **lire, créer, modifier, déplacer et supprimer des fichiers**.
 - Il peut travailler sur des fichiers texte, CSV et Excel, avec confirmation avant les actions sensibles.
 - Utilise-le pour : **créer un fichier**, **générer un export CSV/XLSX**, **lire un dossier**, **résumer un fichier**, ou **mettre à jour un document**.
 - Il est particulièrement utile après une requête de données quand tu veux **sauvegarder le résultat dans un fichier**.
+
+### PDF creator
+
+- Cet agent sert à **transformer une analyse, une synthèse ou un résultat en PDF professionnel**.
+- Il peut reprendre le **dernier résultat utile du chat** ou un contenu que tu colles manuellement.
+- Utilise-le quand tu veux un **livrable PDF clair et partageable**, avec une mise en page cohérente avec l'app.
 
 ### Data quality - Tables
 
@@ -220,7 +263,9 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 
 - Si tu veux un résultat métier sans te poser de question, commence par **Agent Manager**.
 - Si tu veux interroger des données, choisis **ClickHouse Query**.
+- Si tu veux analyser des données Oracle, choisis **Oracle Analyst**.
 - Si tu veux produire ou manipuler un fichier, choisis **File management**.
+- Si tu veux transformer un résultat en document prêt à partager, choisis **PDF creator**.
 - Si tu veux auditer la qualité d'une table, choisis **Data quality - Tables** puis **Open form**.
 - Si tu veux automatiser un scénario récurrent, utilise **CrewAI - Planning**.
 
@@ -235,7 +280,7 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 
 - This is the **orchestrator** agent.
 - You can give it a business outcome such as **"analyze sales and export the result to CSV"**.
-- It can delegate to **ClickHouse Query**, **File management**, or **Data quality - Tables** when needed.
+- It can delegate to **ClickHouse Query**, **Oracle Analyst**, **File management**, **PDF creator**, or **Data quality - Tables** when needed.
 - Use it when you want the app to decide the best path for you.
 
 ### ClickHouse Query
@@ -245,12 +290,25 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 - It can also suggest or generate a **chart** when the result is easier to understand visually.
 - Use it for requests like **"show revenue by month"**, **"find the latest failed jobs"**, or **"compare sales by region"**.
 
+### Oracle Analyst
+
+- This agent is designed to **query an Oracle database from natural language**.
+- It discovers accessible tables, inspects schema, generates **optimized Oracle SQL**, and returns a **narrative Markdown answer**.
+- It validates the query before execution and can automatically repair the SQL when Oracle returns a useful error message.
+- Use it for requests like **"summarize overdue invoices from Oracle"**, **"show top customers by revenue in Oracle"**, or **"compare monthly orders in the Oracle ERP schema"**.
+
 ### File management
 
 - This agent is built to **read, create, edit, move, and delete files**.
 - It supports text files, CSV, and Excel workflows, with confirmation before destructive actions.
 - Use it to **create a file**, **export data to CSV/XLSX**, **inspect folders**, **summarize a file**, or **update existing content**.
 - It is especially useful after a data query when you want to **save the result as a file**.
+
+### PDF creator
+
+- This agent is built to **turn an analysis, summary, or result into a professional PDF**.
+- It can reuse the **latest useful assistant result in the chat** or work from content you paste manually.
+- Use it when you want a **shareable PDF deliverable** with a clean layout aligned with the app.
 
 ### Data quality - Tables
 
@@ -270,7 +328,9 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 
 - Start with **Agent Manager** if you want the app to figure out the best execution path.
 - Pick **ClickHouse Query** when your goal is to analyze data from ClickHouse.
+- Pick **Oracle Analyst** when your goal is to analyze data from Oracle.
 - Pick **File management** when your goal is to create, inspect, or export files.
+- Pick **PDF creator** when your goal is to turn an analysis into a polished PDF deliverable.
 - Pick **Data quality - Tables** and click **Open form** when you want a guided table-quality analysis.
 - Use **CrewAI - Planning** when you want an automated recurring workflow.
 
@@ -304,6 +364,7 @@ export function ChatInterface({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [chatZoom, setChatZoom] = useState(CHAT_ZOOM_DEFAULT);
   const [isZoomControlOpen, setIsZoomControlOpen] = useState(false);
+  const [isInputCopied, setIsInputCopied] = useState(false);
   
   // Refs for DOM elements
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -320,6 +381,8 @@ export function ChatInterface({
   const clickhouseAgentState = currentConversation?.agentState?.clickhouse;
   const planningAgentState = normalizePlanningAgentState((currentConversation?.agentState as any)?.planning, browserTimeZone);
   const fileManagerAgentState = normalizeFileManagerAgentState((currentConversation?.agentState as any)?.fileManager);
+  const pdfCreatorAgentState = normalizePdfCreatorAgentState((currentConversation?.agentState as any)?.pdfCreator);
+  const oracleAnalystAgentState = normalizeOracleAnalystAgentState((currentConversation?.agentState as any)?.oracleAnalyst);
   const dataQualityAgentState = normalizeDataQualityState((currentConversation?.agentState as any)?.dataQuality);
   const fallbackMessages = currentConversation?.messages || [
     {
@@ -347,7 +410,7 @@ export function ChatInterface({
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
   const [planningBusy, setPlanningBusy] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
-  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'data_quality_tables');
+  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
   const [isDataQualityModalOpen, setIsDataQualityModalOpen] = useState(false);
   const [isDataQualityMetadataLoading, setIsDataQualityMetadataLoading] = useState(false);
@@ -489,14 +552,14 @@ export function ChatInterface({
   }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen]);
 
   useEffect(() => {
-    if (workflow === 'AGENT' && (agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'data_quality_tables')) {
+    if (workflow === 'AGENT' && (agentRole === 'clickhouse_query' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables')) {
       setIsOtherAgentsOpen(true);
     }
   }, [workflow, agentRole]);
 
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
-    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'file_management' && agentRole !== 'data_quality_tables') return;
+    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst' && agentRole !== 'data_quality_tables') return;
     if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
 
     const bootstrapKey = `${currentConversation.id}:${agentRole}:${currentConversation.updatedAt}`;
@@ -974,6 +1037,14 @@ export function ChatInterface({
     setAttachments(prev => prev.filter(a => a.id !== id));
   };
 
+  const handleCopyInput = () => {
+    if (!input.trim()) return;
+    navigator.clipboard.writeText(input).then(() => {
+      setIsInputCopied(true);
+      window.setTimeout(() => setIsInputCopied(false), 1800);
+    });
+  };
+
   // Auto-resize the textarea based on content
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
@@ -1053,6 +1124,8 @@ export function ChatInterface({
       let nextClickhouseAgentState = clickhouseAgentState;
       let nextPlanningAgentState = planningAgentState;
       let nextFileManagerAgentState = fileManagerAgentState;
+      let nextPdfCreatorAgentState = pdfCreatorAgentState;
+      let nextOracleAnalystAgentState = oracleAnalystAgentState;
       let nextDataQualityAgentState = dataQualityAgentState;
 
       // Route the request based on the selected workflow
@@ -1207,6 +1280,8 @@ export function ChatInterface({
             manager_state: managerAgentState ?? undefined,
             clickhouse_state: clickhouseAgentState ?? undefined,
             file_manager_state: fileManagerAgentState ?? undefined,
+            pdf_creator_state: pdfCreatorAgentState ?? undefined,
+            oracle_analyst_state: oracleAnalystAgentState ?? undefined,
             data_quality_state: dataQualityAgentState ?? undefined,
             clickhouse: {
               host: config.clickhouseHost,
@@ -1218,6 +1293,25 @@ export function ChatInterface({
               verify_ssl: config.clickhouseVerifySsl,
               http_path: config.clickhouseHttpPath,
               query_limit: config.clickhouseQueryLimit,
+            },
+            oracle_connections: (config.oracleConnections ?? []).map((connection) => ({
+              id: connection.id,
+              label: connection.label,
+              host: connection.host,
+              port: connection.port,
+              service_name: connection.serviceName,
+              sid: connection.sid,
+              dsn: connection.dsn,
+              username: connection.username,
+              password: connection.password,
+            })),
+            oracle_analyst_config: {
+              connection_id: config.oracleAnalystConfig.connectionId,
+              row_limit: config.oracleAnalystConfig.rowLimit,
+              max_retries: config.oracleAnalystConfig.maxRetries,
+              max_iterations: config.oracleAnalystConfig.maxIterations,
+              toolkit_id: config.oracleAnalystConfig.toolkitId,
+              system_prompt: config.oracleAnalystConfig.systemPrompt,
             },
             file_manager_config: {
               base_path: config.fileManagerConfig.basePath,
@@ -1242,6 +1336,8 @@ export function ChatInterface({
         nextManagerAgentState = normalizeManagerAgentState((data.agent_state as any)?.manager);
         nextClickhouseAgentState = (data.agent_state as any)?.clickhouse ?? nextClickhouseAgentState;
         nextFileManagerAgentState = normalizeFileManagerAgentState((data.agent_state as any)?.fileManager);
+        nextPdfCreatorAgentState = normalizePdfCreatorAgentState((data.agent_state as any)?.pdfCreator);
+        nextOracleAnalystAgentState = normalizeOracleAnalystAgentState((data.agent_state as any)?.oracleAnalyst);
         nextDataQualityAgentState = normalizeDataQualityState((data.agent_state as any)?.dataQuality);
         setIsConnected(true);
 
@@ -1266,6 +1362,8 @@ export function ChatInterface({
               manager: nextManagerAgentState,
               clickhouse: nextClickhouseAgentState,
               fileManager: nextFileManagerAgentState,
+              pdfCreator: nextPdfCreatorAgentState,
+              oracleAnalyst: nextOracleAnalystAgentState,
               dataQuality: nextDataQualityAgentState,
             },
             messages: [...updated[idx].messages, assistantManagerMsg],
@@ -1396,9 +1494,136 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
+      } else if (workflow === 'AGENT' && agentRole === 'pdf_creator') {
+        const response = await fetch('/api/chat/pdf-creator-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: pdfCreatorAgentState ?? undefined,
+            file_manager_config: {
+              base_path: config.fileManagerConfig.basePath,
+              max_iterations: config.fileManagerConfig.maxIterations,
+              system_prompt: config.fileManagerConfig.systemPrompt,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `PDF Creator Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextPdfCreatorAgentState = normalizePdfCreatorAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantPdfCreatorMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+          actions: data.actions,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              pdfCreator: nextPdfCreatorAgentState,
+            },
+            messages: [...updated[idx].messages, assistantPdfCreatorMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantPdfCreatorMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (workflow === 'AGENT' && agentRole === 'oracle_analyst') {
+        const response = await fetch('/api/chat/oracle-analyst-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: oracleAnalystAgentState ?? undefined,
+            oracle_connections: (config.oracleConnections ?? []).map((connection) => ({
+              id: connection.id,
+              label: connection.label,
+              host: connection.host,
+              port: connection.port,
+              service_name: connection.serviceName,
+              sid: connection.sid,
+              dsn: connection.dsn,
+              username: connection.username,
+              password: connection.password,
+            })),
+            oracle_analyst_config: {
+              connection_id: config.oracleAnalystConfig.connectionId,
+              row_limit: config.oracleAnalystConfig.rowLimit,
+              max_retries: config.oracleAnalystConfig.maxRetries,
+              max_iterations: config.oracleAnalystConfig.maxIterations,
+              toolkit_id: config.oracleAnalystConfig.toolkitId,
+              system_prompt: config.oracleAnalystConfig.systemPrompt,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Oracle Analyst Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextOracleAnalystAgentState = normalizeOracleAnalystAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantOracleMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              oracleAnalyst: nextOracleAnalystAgentState,
+            },
+            messages: [...updated[idx].messages, assistantOracleMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantOracleMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
       } else {
         // Standard LLM / Agent flow (calls external API directly from frontend)
-        let dynamicSystemPrompt = config.systemPrompt;
+        let dynamicSystemPrompt = `${config.systemPrompt}\n\n[SYSTEM: If you need clarification and you offer explicit choices, format every selectable option as its own markdown task list item using exactly "- [ ] Option". Keep option labels short so the UI can turn them into clickable replies.]`;
         if (workflow === 'AGENT') {
           dynamicSystemPrompt += `\n\n[SYSTEM: You are currently operating as an Agent with the role: ${agentRole.toUpperCase()}. Act accordingly.]`;
         }
@@ -1552,8 +1777,12 @@ export function ChatInterface({
       ? "Describe the automation you want to schedule..."
       : workflow === 'AGENT' && agentRole === 'clickhouse_query'
         ? "Ask a ClickHouse question or request a chart..."
-        : workflow === 'AGENT' && agentRole === 'file_management'
-          ? "Ask to list, read, create, move, edit, or delete files..."
+      : workflow === 'AGENT' && agentRole === 'file_management'
+        ? "Ask to list, read, create, move, edit, or delete files..."
+        : workflow === 'AGENT' && agentRole === 'pdf_creator'
+          ? "Ask to turn the latest analysis or pasted content into a PDF..."
+        : workflow === 'AGENT' && agentRole === 'oracle_analyst'
+          ? "Ask an Oracle business question and I will translate it into SQL..."
         : workflow === 'AGENT' && agentRole === 'data_quality_tables'
           ? "Open the Data Quality form to configure a profiling run..."
         : workflow === 'AGENT' && agentRole === 'manager'
@@ -1822,6 +2051,15 @@ export function ChatInterface({
               rows={1}
             />
             <button
+              type="button"
+              onClick={handleCopyInput}
+              disabled={!input.trim()}
+              className="flex-shrink-0 w-12 h-12 rounded-2xl text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center transition-colors mb-1 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={isInputCopied ? "Copied" : "Copy input"}
+            >
+              {isInputCopied ? <Check className="w-4.5 h-4.5" /> : <Copy className="w-4.5 h-4.5" />}
+            </button>
+            <button
               onClick={() => handleSend()}
               disabled={(!input.trim() && attachments.length === 0) || isLoading}
               className="flex-shrink-0 w-12 h-12 rounded-2xl bg-black text-white flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-800 transition-colors mb-1 mr-1"
@@ -1904,7 +2142,7 @@ export function ChatInterface({
                 </button>
               </div>
 
-              <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-24 opacity-100' : 'max-h-0 opacity-0'}`}>
+              <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-28 opacity-100' : 'max-h-0 opacity-0'}`}>
                 <div className="flex items-center gap-2 pl-3 ml-1 border-l-2 border-cyan-200 overflow-x-auto scrollbar-hide">
                   <button
                     onClick={() => onAgentRoleChange('clickhouse_query')}
@@ -1919,6 +2157,18 @@ export function ChatInterface({
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
                     <FolderOpen className="w-3.5 h-3.5" /> File management
+                  </button>
+                  <button
+                    onClick={() => onAgentRoleChange('pdf_creator')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <File className="w-3.5 h-3.5" /> PDF creator
+                  </button>
+                  <button
+                    onClick={() => onAgentRoleChange('oracle_analyst')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <Database className="w-3.5 h-3.5" /> Oracle Analyst
                   </button>
                   <button
                     onClick={() => onAgentRoleChange('data_quality_tables')}

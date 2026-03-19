@@ -35,6 +35,14 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     knnNeighbors: config.knnNeighbors || 50,
     mcpTools: config.mcpTools ?? [],
     documentationUrl: config.documentationUrl ?? '',
+    portalApps: Array.isArray(config.portalApps)
+      ? config.portalApps.map((app, index) => ({
+          id: app.id || `portal_app_${index + 1}`,
+          name: app.name || '',
+          url: app.url || '',
+          description: app.description || '',
+        }))
+      : [],
     settingsAccessPassword: config.settingsAccessPassword || 'MM@2026',
     clickhouseHost: config.clickhouseHost || 'localhost',
     clickhousePort: config.clickhousePort || 8123,
@@ -45,6 +53,41 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     clickhouseVerifySsl: config.clickhouseVerifySsl ?? true,
     clickhouseHttpPath: config.clickhouseHttpPath ?? '',
     clickhouseQueryLimit: config.clickhouseQueryLimit || 200,
+    oracleConnections: Array.isArray(config.oracleConnections)
+      ? config.oracleConnections.map((connection, index) => ({
+          id: connection.id || `oracle_${index + 1}`,
+          label: connection.label || `Oracle ${index + 1}`,
+          host: connection.host || 'localhost',
+          port: Number(connection.port) || 1521,
+          serviceName: connection.serviceName || '',
+          sid: connection.sid || '',
+          dsn: connection.dsn || '',
+          username: connection.username || '',
+          password: connection.password || '',
+        }))
+      : [
+          {
+            id: 'oracle_default',
+            label: 'Default Oracle',
+            host: 'localhost',
+            port: 1521,
+            serviceName: '',
+            sid: '',
+            dsn: '',
+            username: '',
+            password: '',
+          },
+        ],
+    oracleAnalystConfig: {
+      connectionId: config.oracleAnalystConfig?.connectionId || config.oracleConnections?.[0]?.id || 'oracle_default',
+      rowLimit: Math.min(50000, Math.max(1, Number(config.oracleAnalystConfig?.rowLimit ?? 1000) || 1000)),
+      maxRetries: Math.min(10, Math.max(1, Number(config.oracleAnalystConfig?.maxRetries ?? 3) || 3)),
+      maxIterations: Math.min(20, Math.max(1, Number(config.oracleAnalystConfig?.maxIterations ?? 8) || 8)),
+      toolkitId: config.oracleAnalystConfig?.toolkitId ?? '',
+      systemPrompt:
+        config.oracleAnalystConfig?.systemPrompt ??
+        'You are the Oracle Analyst agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise.',
+    },
     fileManagerConfig: {
       basePath: config.fileManagerConfig?.basePath ?? '',
       maxIterations: Math.min(15, Math.max(1, config.fileManagerConfig?.maxIterations ?? 10)),
@@ -86,7 +129,7 @@ export function SettingsModal({
   const [testMessage, setTestMessage] = useState('');
   
   // Tab state (LLM, RAG, MCP, or DB backup settings)
-  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'mcp' | 'storage'>('llm');
+  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'oracle' | 'apps' | 'mcp' | 'storage'>('llm');
 
   // Connection test states for OpenSearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -94,6 +137,7 @@ export function SettingsModal({
   const [clickhouseTestStatus, setClickhouseTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [clickhouseTestMessage, setClickhouseTestMessage] = useState('');
   const [clickhouseTablesPreview, setClickhouseTablesPreview] = useState<string[]>([]);
+  const [oracleTestStates, setOracleTestStates] = useState<Record<string, { status: 'idle' | 'testing' | 'success' | 'error'; message: string; tables: string[] }>>({});
 
   // Setup index status
   const [setupStatus, setSetupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
@@ -208,6 +252,132 @@ export function SettingsModal({
     } catch (err) {
       setClickhouseTestStatus('error');
       setClickhouseTestMessage(err instanceof Error ? err.message : 'Failed to connect');
+    }
+  };
+
+  const updateOracleConnection = (index: number, patch: Partial<AppConfig['oracleConnections'][number]>) => {
+    setLocalConfig((prev) => {
+      const currentConnections = [...(prev.oracleConnections ?? [])];
+      if (!currentConnections[index]) return prev;
+      const previousId = currentConnections[index].id;
+      const nextId = patch.id !== undefined
+        ? (String(patch.id).trim() || `oracle_${index + 1}`)
+        : previousId;
+      currentConnections[index] = {
+        ...currentConnections[index],
+        ...patch,
+        id: nextId,
+      };
+      const nextSelectedConnectionId = prev.oracleAnalystConfig.connectionId === previousId
+        ? nextId
+        : prev.oracleAnalystConfig.connectionId;
+      return {
+        ...prev,
+        oracleConnections: currentConnections,
+        oracleAnalystConfig: {
+          ...prev.oracleAnalystConfig,
+          connectionId: currentConnections.some((connection) => connection.id === nextSelectedConnectionId)
+            ? nextSelectedConnectionId
+            : (currentConnections[0]?.id ?? prev.oracleAnalystConfig.connectionId),
+        },
+      };
+    });
+  };
+
+  const addOracleConnection = () => {
+    const nextId = `oracle_${Date.now()}`;
+    setLocalConfig((prev) => ({
+      ...prev,
+      oracleConnections: [
+        ...(prev.oracleConnections ?? []),
+        {
+          id: nextId,
+          label: `Oracle ${(prev.oracleConnections?.length ?? 0) + 1}`,
+          host: 'localhost',
+          port: 1521,
+          serviceName: '',
+          sid: '',
+          dsn: '',
+          username: '',
+          password: '',
+        },
+      ],
+      oracleAnalystConfig: {
+        ...prev.oracleAnalystConfig,
+        connectionId: prev.oracleAnalystConfig.connectionId || nextId,
+      },
+    }));
+  };
+
+  const deleteOracleConnection = (index: number) => {
+    setLocalConfig((prev) => {
+      const currentConnections = [...(prev.oracleConnections ?? [])];
+      if (currentConnections.length <= 1 || !currentConnections[index]) {
+        return prev;
+      }
+      const removedId = currentConnections[index].id;
+      const nextConnections = currentConnections.filter((_, connectionIndex) => connectionIndex !== index);
+      return {
+        ...prev,
+        oracleConnections: nextConnections,
+        oracleAnalystConfig: {
+          ...prev.oracleAnalystConfig,
+          connectionId: prev.oracleAnalystConfig.connectionId === removedId
+            ? (nextConnections[0]?.id ?? prev.oracleAnalystConfig.connectionId)
+            : prev.oracleAnalystConfig.connectionId,
+        },
+      };
+    });
+  };
+
+  const testOracleConnection = async (connectionId: string) => {
+    const connection = (localConfig.oracleConnections ?? []).find((item) => item.id === connectionId);
+    if (!connection) return;
+    setOracleTestStates((prev) => ({
+      ...prev,
+      [connectionId]: { status: 'testing', message: '', tables: [] },
+    }));
+    try {
+      const response = await fetch('/api/oracle/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          connection: {
+            id: connection.id,
+            label: connection.label,
+            host: connection.host,
+            port: connection.port,
+            service_name: connection.serviceName,
+            sid: connection.sid,
+            dsn: connection.dsn,
+            username: connection.username,
+            password: connection.password,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const summary = `Connected · schema: ${data.current_schema || 'unknown'} · user: ${data.session_user || 'unknown'} · ${data.table_count} table(s)`;
+      setOracleTestStates((prev) => ({
+        ...prev,
+        [connectionId]: {
+          status: 'success',
+          message: summary,
+          tables: Array.isArray(data.tables) ? data.tables : [],
+        },
+      }));
+    } catch (err) {
+      setOracleTestStates((prev) => ({
+        ...prev,
+        [connectionId]: {
+          status: 'error',
+          message: err instanceof Error ? err.message : 'Failed to connect',
+          tables: [],
+        },
+      }));
     }
   };
 
@@ -469,6 +639,43 @@ export function SettingsModal({
     }
   };
 
+  const addPortalApp = () => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      portalApps: [
+        ...(prev.portalApps ?? []),
+        {
+          id: `portal_app_${Date.now()}`,
+          name: '',
+          url: '',
+          description: '',
+        },
+      ],
+    }));
+  };
+
+  const updatePortalApp = (index: number, patch: Partial<AppConfig['portalApps'][number]>) => {
+    setLocalConfig((prev) => {
+      const nextApps = [...(prev.portalApps ?? [])];
+      if (!nextApps[index]) return prev;
+      nextApps[index] = {
+        ...nextApps[index],
+        ...patch,
+      };
+      return {
+        ...prev,
+        portalApps: nextApps,
+      };
+    });
+  };
+
+  const deletePortalApp = (index: number) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      portalApps: (prev.portalApps ?? []).filter((_, appIndex) => appIndex !== index),
+    }));
+  };
+
   const formattedLastSync = lastSyncedAt
     ? new Date(lastSyncedAt).toLocaleString()
     : 'No successful sync has been confirmed yet.';
@@ -512,6 +719,18 @@ export function SettingsModal({
               className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'mcp' ? 'border-teal-500 text-teal-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             >
               MCP Tools
+            </button>
+            <button
+              onClick={() => setActiveTab('oracle')}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'oracle' ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              Oracle Analyst
+            </button>
+            <button
+              onClick={() => setActiveTab('apps')}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'apps' ? 'border-sky-500 text-sky-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              App Portal
             </button>
             <button
               onClick={() => setActiveTab('storage')}
@@ -608,6 +827,414 @@ export function SettingsModal({
                   />
                 </div>
               </div>
+            </div>
+          ) : activeTab === 'oracle' ? (
+            <div className="space-y-6">
+              <div className="p-4 rounded-2xl bg-orange-50/80 dark:bg-orange-900/20 border border-orange-200/70 dark:border-orange-700/40">
+                <div className="flex items-center gap-2 mb-2">
+                  <Database className="w-4 h-4 text-orange-600 dark:text-orange-300" />
+                  <h3 className="text-sm font-semibold text-orange-900 dark:text-orange-200">Oracle Analyst</h3>
+                </div>
+                <p className="text-xs text-orange-800/90 dark:text-orange-300/90 leading-relaxed">
+                  Configure one or more Oracle connections, then choose which connection the Oracle Analyst agent should use by default. The backend stays Python-only and uses the local LLM to inspect schema, validate SQL, execute safe read-only queries, and summarize the result in English.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                    <Database className="w-4 h-4 text-orange-500" /> Oracle Connections
+                  </h3>
+                  <button
+                    onClick={addOracleConnection}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200 rounded-xl hover:bg-orange-100 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add connection
+                  </button>
+                </div>
+
+                {(localConfig.oracleConnections ?? []).map((connection, index) => {
+                  const testState = oracleTestStates[connection.id];
+                  const isDefaultConnection = localConfig.oracleAnalystConfig.connectionId === connection.id;
+                  return (
+                    <div key={connection.id || `oracle-${index}`} className="p-4 bg-white/60 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-2xl space-y-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{connection.label || `Oracle ${index + 1}`}</h4>
+                          <p className="text-[11px] text-gray-500 dark:text-gray-400">Use either a full DSN or the host + port + service name / SID combination.</p>
+                        </div>
+                        {isDefaultConnection && (
+                          <span className="px-2 py-1 rounded-full bg-orange-100 text-orange-700 text-[10px] font-semibold border border-orange-200">
+                            Default connection
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Connection ID</label>
+                          <input
+                            type="text"
+                            value={connection.id}
+                            onChange={(e) => updateOracleConnection(index, { id: e.target.value })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder={`oracle_${index + 1}`}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Label</label>
+                          <input
+                            type="text"
+                            value={connection.label}
+                            onChange={(e) => updateOracleConnection(index, { label: e.target.value })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder="Finance Oracle"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Host</label>
+                          <input
+                            type="text"
+                            value={connection.host}
+                            onChange={(e) => updateOracleConnection(index, { host: e.target.value })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder="localhost"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Port</label>
+                          <input
+                            type="number"
+                            value={connection.port}
+                            onChange={(e) => updateOracleConnection(index, { port: parseInt(e.target.value, 10) || 1521 })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder="1521"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Service name</label>
+                          <input
+                            type="text"
+                            value={connection.serviceName}
+                            onChange={(e) => updateOracleConnection(index, { serviceName: e.target.value })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder="ORCLPDB1"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">SID</label>
+                          <input
+                            type="text"
+                            value={connection.sid}
+                            onChange={(e) => updateOracleConnection(index, { sid: e.target.value })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder="Leave empty if you use service name"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Full DSN (optional)</label>
+                        <input
+                          type="text"
+                          value={connection.dsn}
+                          onChange={(e) => updateOracleConnection(index, { dsn: e.target.value })}
+                          className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                          placeholder="DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)..."
+                        />
+                        <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">If provided, the DSN overrides the host + port + service name / SID combination.</p>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Username</label>
+                          <input
+                            type="text"
+                            value={connection.username}
+                            onChange={(e) => updateOracleConnection(index, { username: e.target.value })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder="system"
+                            autoComplete="username"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Password</label>
+                          <input
+                            type="password"
+                            value={connection.password}
+                            onChange={(e) => updateOracleConnection(index, { password: e.target.value })}
+                            className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                            placeholder="••••••••"
+                            autoComplete="current-password"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => testOracleConnection(connection.id)}
+                          disabled={testState?.status === 'testing'}
+                          className="px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-xl font-medium transition-colors flex items-center gap-2 whitespace-nowrap text-sm disabled:opacity-60"
+                        >
+                          {testState?.status === 'testing' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Oracle'}
+                        </button>
+                        <button
+                          onClick={() => setLocalConfig((prev) => ({
+                            ...prev,
+                            oracleAnalystConfig: {
+                              ...prev.oracleAnalystConfig,
+                              connectionId: connection.id,
+                            },
+                          }))}
+                          className="px-4 py-2 bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 rounded-xl font-medium transition-colors text-sm"
+                        >
+                          Use as default
+                        </button>
+                        <button
+                          onClick={() => deleteOracleConnection(index)}
+                          disabled={(localConfig.oracleConnections ?? []).length <= 1}
+                          className="px-4 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-xl font-medium transition-colors text-sm disabled:opacity-40"
+                        >
+                          Delete
+                        </button>
+                      </div>
+
+                      {testState?.status === 'success' && (
+                        <div className="space-y-2">
+                          <p className="text-emerald-600 text-xs flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {testState.message}</p>
+                          {testState.tables.length > 0 && (
+                            <div className="space-y-1">
+                              <p className="text-[11px] font-medium text-gray-600 dark:text-gray-300">Accessible tables preview</p>
+                              <div className="flex flex-wrap gap-1">
+                                {testState.tables.map((table) => (
+                                  <span
+                                    key={`${connection.id}-${table}`}
+                                    className="px-2 py-0.5 bg-orange-50 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border border-orange-200 dark:border-orange-700 rounded-md text-[10px] font-medium"
+                                  >
+                                    {table}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {testState?.status === 'error' && (
+                        <p className="text-red-600 text-xs flex items-center gap-1"><XCircle className="w-3 h-3" /> {testState.message}</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="pt-2 border-t border-gray-100 dark:border-gray-800 space-y-4">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                  <Bot className="w-4 h-4 text-orange-500" /> Oracle Analyst Defaults
+                </h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Default connection</label>
+                    <select
+                      value={localConfig.oracleAnalystConfig.connectionId}
+                      onChange={(e) => setLocalConfig((prev) => ({
+                        ...prev,
+                        oracleAnalystConfig: {
+                          ...prev.oracleAnalystConfig,
+                          connectionId: e.target.value,
+                        },
+                      }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                    >
+                      {(localConfig.oracleConnections ?? []).map((connection) => (
+                        <option key={connection.id} value={connection.id}>
+                          {connection.label || connection.id}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Toolkit ID (optional)</label>
+                    <input
+                      type="text"
+                      value={localConfig.oracleAnalystConfig.toolkitId}
+                      onChange={(e) => setLocalConfig((prev) => ({
+                        ...prev,
+                        oracleAnalystConfig: {
+                          ...prev.oracleAnalystConfig,
+                          toolkitId: e.target.value,
+                        },
+                      }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                      placeholder="default"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Row limit</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50000}
+                      value={localConfig.oracleAnalystConfig.rowLimit}
+                      onChange={(e) => setLocalConfig((prev) => ({
+                        ...prev,
+                        oracleAnalystConfig: {
+                          ...prev.oracleAnalystConfig,
+                          rowLimit: Math.min(50000, Math.max(1, parseInt(e.target.value, 10) || 1000)),
+                        },
+                      }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Max retries</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={localConfig.oracleAnalystConfig.maxRetries}
+                      onChange={(e) => setLocalConfig((prev) => ({
+                        ...prev,
+                        oracleAnalystConfig: {
+                          ...prev.oracleAnalystConfig,
+                          maxRetries: Math.min(10, Math.max(1, parseInt(e.target.value, 10) || 3)),
+                        },
+                      }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Max iterations</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={localConfig.oracleAnalystConfig.maxIterations}
+                      onChange={(e) => setLocalConfig((prev) => ({
+                        ...prev,
+                        oracleAnalystConfig: {
+                          ...prev.oracleAnalystConfig,
+                          maxIterations: Math.min(20, Math.max(1, parseInt(e.target.value, 10) || 8)),
+                        },
+                      }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all"
+                    />
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-gray-500 dark:text-gray-400 -mt-2">
+                  The ReAct runtime is capped at 8 iterations for safety. The compatibility setting above is kept for configuration consistency.
+                </p>
+
+                <div>
+                  <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Custom system prompt</label>
+                  <textarea
+                    value={localConfig.oracleAnalystConfig.systemPrompt}
+                    onChange={(e) => setLocalConfig((prev) => ({
+                      ...prev,
+                      oracleAnalystConfig: {
+                        ...prev.oracleAnalystConfig,
+                        systemPrompt: e.target.value,
+                      },
+                    }))}
+                    className="w-full min-h-[140px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-3 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-orange-500/40 transition-all resize-none"
+                    placeholder="You are the Oracle Analyst agent..."
+                  />
+                </div>
+              </div>
+            </div>
+          ) : activeTab === 'apps' ? (
+            <div className="space-y-6">
+              <div className="p-4 rounded-[1.75rem] bg-[linear-gradient(135deg,rgba(240,249,255,0.95),rgba(224,242,254,0.88),rgba(239,246,255,0.92))] border border-sky-200/80 shadow-[0_18px_40px_rgba(14,165,233,0.10)]">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <Layers className="w-4 h-4 text-sky-500" />
+                      <h3 className="text-sm font-semibold text-sky-950">Agents & Tools app portal</h3>
+                    </div>
+                    <p className="text-xs text-sky-900/80 leading-relaxed max-w-2xl">
+                      Configure the external apps you want to expose on the landing page through <strong>Agents & Tools</strong>. Each configured app becomes a modern glass tile on the portal page, opens in a new browser tab, and reveals its description only on hover.
+                    </p>
+                  </div>
+                  <button
+                    onClick={addPortalApp}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-white/80 text-sky-700 border border-sky-200 rounded-xl hover:bg-white transition-colors shadow-sm"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add app
+                  </button>
+                </div>
+              </div>
+
+              {(localConfig.portalApps ?? []).length === 0 ? (
+                <div className="rounded-[1.75rem] border border-dashed border-sky-200 bg-white/70 px-6 py-10 text-center shadow-[0_10px_24px_rgba(148,163,184,0.08)]">
+                  <p className="text-sm font-medium text-gray-700">No app tile configured yet.</p>
+                  <p className="text-xs text-gray-500 mt-2">Create your first app tile to populate the Agents & Tools page.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {(localConfig.portalApps ?? []).map((app, index) => (
+                    <div
+                      key={app.id || `portal-app-${index}`}
+                      className="rounded-[1.9rem] border border-white/70 bg-[linear-gradient(140deg,rgba(255,255,255,0.88),rgba(248,250,252,0.74),rgba(240,249,255,0.70))] backdrop-blur-xl p-5 shadow-[0_20px_40px_rgba(15,23,42,0.08)]"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-4">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-[0.2em] text-sky-500 font-semibold">App tile {index + 1}</p>
+                          <h4 className="text-base font-semibold text-gray-900 mt-1">{app.name || 'Untitled app'}</h4>
+                        </div>
+                        <button
+                          onClick={() => deletePortalApp(index)}
+                          className="w-9 h-9 rounded-full border border-red-100 bg-white/80 text-red-400 hover:text-red-600 hover:border-red-200 transition-colors flex items-center justify-center"
+                          title="Delete app tile"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Application name</label>
+                          <input
+                            type="text"
+                            value={app.name}
+                            onChange={(e) => updatePortalApp(index, { name: e.target.value })}
+                            className="w-full bg-white/85 border border-white/80 rounded-2xl px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-sky-500/40 transition-all"
+                            placeholder="Sales cockpit"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">URL</label>
+                          <input
+                            type="url"
+                            value={app.url}
+                            onChange={(e) => updatePortalApp(index, { url: e.target.value })}
+                            className="w-full bg-white/85 border border-white/80 rounded-2xl px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-sky-500/40 transition-all"
+                            placeholder="https://app.example.com"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Hover description</label>
+                          <textarea
+                            value={app.description}
+                            onChange={(e) => updatePortalApp(index, { description: e.target.value })}
+                            className="w-full min-h-[110px] bg-white/85 border border-white/80 rounded-[1.4rem] px-3 py-3 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-sky-500/40 transition-all resize-none"
+                            placeholder="Short explanation shown only when the user hovers the tile."
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ) : activeTab === 'mcp' ? (
             <div className="space-y-5">

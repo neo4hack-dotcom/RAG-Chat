@@ -193,16 +193,17 @@ export function PlanningModal({
   const runCount = planningState.runs.length;
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-[80] bg-black/45 backdrop-blur-sm p-4"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <div className="flex h-full items-center justify-center pointer-events-none">
-        <div className="pointer-events-auto w-full max-w-[1280px] max-h-[92vh] overflow-hidden rounded-[2rem] border border-white/20 bg-[#f8f8f6] dark:bg-[#101115] shadow-2xl shadow-black/30">
+    <>
+      <div
+        className="fixed inset-0 z-[80] bg-black/45 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div className="fixed inset-0 z-[81] overflow-y-auto p-4">
+        <div className="flex min-h-full items-center justify-center">
+          <div
+            className="w-full max-w-[1280px] max-h-[92vh] overflow-hidden rounded-[2rem] border border-white/20 bg-[#f8f8f6] dark:bg-[#101115] shadow-2xl shadow-black/30"
+            onClick={(event) => event.stopPropagation()}
+          >
         <div className="flex items-center justify-between gap-4 px-6 py-5 border-b border-gray-200/70 dark:border-gray-800/80 bg-white/80 dark:bg-black/20">
           <div>
             <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">
@@ -688,10 +689,11 @@ export function PlanningModal({
               </div>
             </div>
           </div>
-        </div>
+          </div>
         </div>
       </div>
-    </div>,
+    </div>
+    </>,
     document.body
   );
 }
