@@ -452,11 +452,43 @@ export function ChatInterface({
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
 
   // --- ACTIONS ---
-  
-  // Start a completely new chat session
-  const createNewChat = () => {
+
+  const resetChatShell = () => {
+    agentIntroBootstrapRef.current = null;
+    dataQualityAutoOpenRef.current = false;
     onCurrentIdChange(null);
     setInput("");
+    setAttachments([]);
+    setIsLoading(false);
+    setIsPlanningModalOpen(false);
+    setIsPlanningMonitorOpen(false);
+    setIsFileManagerConfigOpen(false);
+    setIsDataQualityModalOpen(false);
+    setDataQualityFormError(null);
+    setIsConsoleOpen(false);
+  };
+
+  // Start a completely new chat session
+  const createNewChat = () => {
+    resetChatShell();
+  };
+
+  const handleWorkflowSelection = (nextWorkflow: WorkflowMode) => {
+    if (workflow === nextWorkflow) return;
+    resetChatShell();
+    onWorkflowChange(nextWorkflow);
+  };
+
+  const handleAgentRoleSelection = (nextRole: AgentRole) => {
+    if (workflow === 'AGENT' && agentRole === nextRole) return;
+    resetChatShell();
+    onAgentRoleChange(nextRole);
+  };
+
+  const handleMcpToolSelection = (nextToolId: string) => {
+    if (mcpToolId === nextToolId) return;
+    resetChatShell();
+    onMcpToolIdChange(nextToolId);
   };
 
   // Reset the current chat to its initial state (welcome message only)
@@ -2208,31 +2240,31 @@ export function ChatInterface({
           <div className="flex flex-col gap-2 overflow-hidden flex-1">
             <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
             <button
-              onClick={() => onWorkflowChange('LLM')}
+              onClick={() => handleWorkflowSelection('LLM')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'LLM' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Cpu className="w-3.5 h-3.5" /> Pure LLM
             </button>
             <button
-              onClick={() => onWorkflowChange('RAG')}
+              onClick={() => handleWorkflowSelection('RAG')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'RAG' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Database className="w-3.5 h-3.5" /> RAG Knowledge
             </button>
             <button
-              onClick={() => onWorkflowChange('AGENT')}
+              onClick={() => handleWorkflowSelection('AGENT')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'AGENT' ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Network className="w-3.5 h-3.5" /> Agents
             </button>
             <button
-              onClick={() => onWorkflowChange('MCP')}
+              onClick={() => handleWorkflowSelection('MCP')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'MCP' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-200 border border-teal-200 dark:border-teal-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <Cpu className="w-3.5 h-3.5" /> MCP
             </button>
             <button
-              onClick={() => onWorkflowChange('CREWAI')}
+              onClick={() => handleWorkflowSelection('CREWAI')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'CREWAI' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
             >
               <CalendarDays className="w-3.5 h-3.5" /> CrewAI - Planning
@@ -2248,7 +2280,7 @@ export function ChatInterface({
                 (config.mcpTools ?? []).map((tool: McpTool) => (
                   <button
                     key={tool.id}
-                    onClick={() => onMcpToolIdChange(tool.id)}
+                    onClick={() => handleMcpToolSelection(tool.id)}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
                   >
                     <Network className="w-3.5 h-3.5" /> {tool.label}
@@ -2263,7 +2295,7 @@ export function ChatInterface({
             <div className="flex flex-col gap-2 pl-2 border-l-2 border-purple-200 pb-1">
               <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
                 <button
-                  onClick={() => onAgentRoleChange('manager')}
+                  onClick={() => handleAgentRoleSelection('manager')}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                 >
                   <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
@@ -2280,19 +2312,19 @@ export function ChatInterface({
               <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-40 opacity-100' : 'max-h-0 opacity-0'}`}>
                 <div className="flex items-center gap-2 pl-3 ml-1 border-l-2 border-cyan-200 overflow-x-auto scrollbar-hide">
                   <button
-                    onClick={() => onAgentRoleChange('clickhouse_query')}
+                    onClick={() => handleAgentRoleSelection('clickhouse_query')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
                     <Database className="w-3.5 h-3.5" /> Clickhouse SQL
                   </button>
                   <button
-                    onClick={() => onAgentRoleChange('data_analyst')}
+                    onClick={() => handleAgentRoleSelection('data_analyst')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
                     <Cpu className="w-3.5 h-3.5" /> Data Analyst
                   </button>
                   <button
-                    onClick={() => onAgentRoleChange('file_management')}
+                    onClick={() => handleAgentRoleSelection('file_management')}
                     onDoubleClick={() => setIsFileManagerConfigOpen(true)}
                     title="Double-click to configure"
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
@@ -2300,19 +2332,19 @@ export function ChatInterface({
                     <FolderOpen className="w-3.5 h-3.5" /> File management
                   </button>
                   <button
-                    onClick={() => onAgentRoleChange('pdf_creator')}
+                    onClick={() => handleAgentRoleSelection('pdf_creator')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
                     <File className="w-3.5 h-3.5" /> PDF creator
                   </button>
                   <button
-                    onClick={() => onAgentRoleChange('oracle_analyst')}
+                    onClick={() => handleAgentRoleSelection('oracle_analyst')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
                     <Database className="w-3.5 h-3.5" /> Oracle SQL
                   </button>
                   <button
-                    onClick={() => onAgentRoleChange('data_quality_tables')}
+                    onClick={() => handleAgentRoleSelection('data_quality_tables')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
                   >
                     <BarChart3 className="w-3.5 h-3.5" /> Data quality - Tables

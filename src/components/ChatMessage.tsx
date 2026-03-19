@@ -498,7 +498,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
   const renderedContent = !isUser && !htmlMode ? preprocessMarkdown(content) : content;
 
   return (
-    <div className={cn("flex gap-4 w-full max-w-4xl mx-auto mb-8 animate-fade-in-up", isUser ? "flex-row-reverse" : "flex-row")}>
+    <div className={cn("flex gap-4 w-full max-w-[77rem] mx-auto mb-8 animate-fade-in-up", isUser ? "flex-row-reverse" : "flex-row")}>
       <div className={cn(
         "flex-shrink-0 w-10 h-10 rounded-2xl flex items-center justify-center shadow-sm",
         isUser
@@ -509,9 +509,9 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
       </div>
 
       <div className={cn(
-        "group relative max-w-[85%] px-6 py-4 rounded-[2rem]",
+        "group relative px-6 py-4 rounded-[2rem]",
         isUser
-          ? "bg-blue-500 text-white rounded-tr-sm shadow-md shadow-blue-500/10"
+          ? "max-w-[88%] bg-blue-500 text-white rounded-tr-sm shadow-md shadow-blue-500/10"
           : "glass-panel rounded-tl-sm w-full"
       )}>
         <MessageCopyButton text={content} isUser={isUser} />
