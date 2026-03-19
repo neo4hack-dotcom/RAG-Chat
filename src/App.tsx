@@ -130,11 +130,16 @@ export default function App() {
   const latestStateRef = useRef(appState);
   const initialSyncCompleteRef = useRef(false);
   const skipNextPersistRef = useRef(false);
+  const isSettingsOpenRef = useRef(isSettingsOpen);
 
   useEffect(() => {
     latestStateRef.current = appState;
     persistLocalCache(appState);
   }, [appState]);
+
+  useEffect(() => {
+    isSettingsOpenRef.current = isSettingsOpen;
+  }, [isSettingsOpen]);
 
   const updatePreferences = useCallback((updater: Partial<AppPreferences> | ((prev: AppPreferences) => AppPreferences)) => {
     setAppState((prev) => {
@@ -310,10 +315,12 @@ export default function App() {
 
   useEffect(() => {
     const handleFocus = () => {
+      if (isSettingsOpenRef.current) return;
       void syncFromDb({ force: true, showBusy: false });
     };
 
     const handleVisibilityChange = () => {
+      if (isSettingsOpenRef.current) return;
       if (document.visibilityState === 'visible') {
         void syncFromDb({ force: true, showBusy: false });
       }

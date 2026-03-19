@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import httpx
 import ipaddress
 import json
@@ -32,8 +32,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from opensearchpy import OpenSearch
 from urllib.parse import urlparse
-from mcp import ClientSession
-from mcp.client.sse import sse_client
+from fastmcp import Client as FastMCPClient
+from fastmcp.client.transports import SSETransport, StreamableHttpTransport
 
 
 @asynccontextmanager
@@ -174,9 +174,14 @@ DEFAULT_APP_CONFIG = {
     "apiKey": "",
     "model": "llama3",
     "systemPrompt": (
-        "You are a helpful, smart, and concise AI assistant. Format your responses "
-        "beautifully using markdown. When offering choices or clarification options, "
-        "always use markdown task lists (- [ ] Option) so the UI can present clickable replies."
+        "You are a helpful, smart, and concise AI assistant. Present non-JSON answers "
+        "in polished Markdown with clear sections, concise bullets, tasteful **bold** "
+        "emphasis, and tables when they help. Safe semantic HTML fragments such as "
+        "<section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and "
+        "<blockquote> are allowed when they genuinely improve the layout. Never return "
+        "a full HTML document, CSS, or JavaScript. When offering choices or clarification "
+        "options, always use markdown task lists (- [ ] Option) so the UI can present "
+        "clickable replies."
     ),
     "disableSslVerification": False,
     "elasticsearchUrl": "http://localhost:9200",
@@ -227,7 +232,9 @@ DEFAULT_APP_CONFIG = {
         "toolkitId": "",
         "systemPrompt": (
             "You are the Oracle SQL agent. Reply in English. Use Oracle tools before making assumptions, "
-            "generate optimized Oracle SQL with explicit columns, and keep the final answer business-facing and precise."
+            "generate optimized Oracle SQL with explicit columns, and present final user-facing answers "
+            "in polished Markdown with clear sections, concise bullets, and tasteful emphasis. "
+            "Safe semantic HTML fragments are allowed when they improve readability."
         ),
     },
     "fileManagerConfig": {
@@ -236,7 +243,9 @@ DEFAULT_APP_CONFIG = {
         "systemPrompt": (
             "You are the File Management agent. Reply in English by default. Use "
             "filesystem tools instead of guessing, keep answers short and factual, "
-            "and ask for confirmation before destructive or overwrite actions."
+            "ask for confirmation before destructive or overwrite actions, and present "
+            "final user-facing answers in polished Markdown with concise structure and "
+            "tasteful emphasis."
         ),
     },
 }
@@ -704,6 +713,97 @@ def _build_mcp_http_client_factory(
         return httpx.AsyncClient(**kwargs)
 
     return factory
+
+
+def _build_fastmcp_transport(
+    target: str,
+    *,
+    disable_ssl_verification: bool = False,
+):
+    normalized_target = _normalize_local_service_url(target)
+    parsed = urlparse(normalized_target)
+    normalized_path = (parsed.path or "").rstrip("/").lower()
+    transport_factory = _build_mcp_http_client_factory(
+        normalized_target,
+        disable_ssl_verification=disable_ssl_verification,
+    )
+
+    if normalized_path.endswith("/sse") or normalized_path == "/sse":
+        return SSETransport(
+            normalized_target,
+            httpx_client_factory=transport_factory,
+        )
+
+    return StreamableHttpTransport(
+        normalized_target,
+        httpx_client_factory=transport_factory,
+    )
+
+
+@asynccontextmanager
+async def _fastmcp_client(
+    target: str,
+    *,
+    disable_ssl_verification: bool = False,
+):
+    client = FastMCPClient(
+        _build_fastmcp_transport(
+            target,
+            disable_ssl_verification=disable_ssl_verification,
+        ),
+        auto_initialize=True,
+    )
+    try:
+        async with client:
+            yield client
+    finally:
+        with suppress(Exception):
+            await client.close()
+
+
+def _stringify_mcp_content_block(block: Any) -> str:
+    text_value = getattr(block, "text", None)
+    if isinstance(text_value, str) and text_value.strip():
+        return text_value.strip()
+
+    resource = getattr(block, "resource", None)
+    if resource is not None:
+        resource_text = getattr(resource, "text", None)
+        if isinstance(resource_text, str) and resource_text.strip():
+            return resource_text.strip()
+        resource_uri = getattr(resource, "uri", None)
+        if resource_uri:
+            return str(resource_uri)
+        if hasattr(resource, "model_dump"):
+            return json.dumps(resource.model_dump(), ensure_ascii=False, indent=2)
+
+    uri_value = getattr(block, "uri", None)
+    if uri_value:
+        name_value = getattr(block, "name", None)
+        return f"{name_value}: {uri_value}" if name_value else str(uri_value)
+
+    if hasattr(block, "model_dump"):
+        return json.dumps(block.model_dump(), ensure_ascii=False, indent=2)
+
+    return str(block).strip()
+
+
+def _format_mcp_tool_result(result: Any) -> str:
+    rendered_parts: list[str] = []
+    content_blocks = getattr(result, "content", None) or []
+    for block in content_blocks:
+        rendered = _stringify_mcp_content_block(block)
+        if rendered:
+            rendered_parts.append(rendered)
+
+    structured = getattr(result, "structuredContent", None)
+    if structured:
+        rendered_parts.append(json.dumps(structured, ensure_ascii=False, indent=2))
+
+    output = "\n".join(part for part in rendered_parts if part).strip()
+    if getattr(result, "isError", False):
+        return f"[Tool error] {output or 'The MCP server returned an error.'}"
+    return output
 
 def quote_clickhouse_literal(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
@@ -12682,23 +12782,17 @@ async def list_embedding_models(req: EmbeddingModelsRequest):
 
 @app.post("/api/mcp/test")
 async def test_mcp_connection(req: MCPTestRequest):
-    """Connect to an MCP server via SSE and return its available tools."""
+    """Connect to an MCP server via FastMCP and return its available tools."""
     try:
-        normalized_url = _normalize_local_service_url(req.url)
-        async with sse_client(
-            normalized_url,
-            httpx_client_factory=_build_mcp_http_client_factory(
-                normalized_url,
-                disable_ssl_verification=req.disable_ssl_verification,
-            ),
-        ) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools_result = await session.list_tools()
-                tools = [
-                    {"name": t.name, "description": t.description or ""}
-                    for t in tools_result.tools
-                ]
+        async with _fastmcp_client(
+            req.url,
+            disable_ssl_verification=req.disable_ssl_verification,
+        ) as client:
+            tool_definitions = await client.list_tools()
+            tools = [
+                {"name": tool.name, "description": tool.description or ""}
+                for tool in tool_definitions
+            ]
         return {"status": "ok", "tools": tools, "tool_count": len(tools)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -12721,152 +12815,144 @@ def _mcp_tool_to_openai(tool) -> dict:
 
 @app.post("/api/chat/mcp")
 async def chat_mcp(req: MCPChatRequest):
-    """Agentic loop: connects to MCP server, lets LLM call tools, returns final answer."""
+    """Agentic loop: connects to an MCP server via FastMCP, lets the LLM call tools, returns the final answer."""
     try:
-        normalized_mcp_url = _normalize_local_service_url(req.mcp_url)
-        async with sse_client(
-            normalized_mcp_url,
-            httpx_client_factory=_build_mcp_http_client_factory(
-                normalized_mcp_url,
-                disable_ssl_verification=req.disable_ssl_verification,
-            ),
-        ) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools_result = await session.list_tools()
-                openai_tools = [_mcp_tool_to_openai(t) for t in tools_result.tools]
-                memory_history = _normalized_history_messages(
-                    req.history,
-                    current_message=req.message,
-                    max_steps=CHAT_MEMORY_MAX_STEPS,
-                )
+        async with _fastmcp_client(
+            req.mcp_url,
+            disable_ssl_verification=req.disable_ssl_verification,
+        ) as client:
+            tool_definitions = await client.list_tools()
+            openai_tools = [_mcp_tool_to_openai(tool) for tool in tool_definitions]
+            memory_history = _normalized_history_messages(
+                req.history,
+                current_message=req.message,
+                max_steps=CHAT_MEMORY_MAX_STEPS,
+            )
 
-                # Build initial messages
-                messages: list[dict] = []
-                if req.system_prompt:
-                    messages.append({"role": "system", "content": req.system_prompt})
-                for m in memory_history:
-                    role = "user" if m.get("role") == "user" else "assistant"
-                    messages.append({"role": role, "content": m.get("content", "")})
-                messages.append({"role": "user", "content": req.message})
+            # Build initial messages
+            messages: list[dict] = []
+            if req.system_prompt:
+                messages.append({"role": "system", "content": req.system_prompt})
+            for m in memory_history:
+                role = "user" if m.get("role") == "user" else "assistant"
+                messages.append({"role": role, "content": m.get("content", "")})
+            messages.append({"role": "user", "content": req.message})
 
-                tool_calls_log: list[dict] = []
-                MAX_TURNS = 5
+            tool_calls_log: list[dict] = []
+            MAX_TURNS = 5
 
-                for _ in range(MAX_TURNS):
-                    # Call LLM with tools
-                    headers = {"Content-Type": "application/json"}
-                    if req.llm_api_key:
-                        headers["Authorization"] = f"Bearer {req.llm_api_key}"
-                    normalized_base_url = _normalize_local_service_url(req.llm_base_url)
+            for _ in range(MAX_TURNS):
+                # Call LLM with tools
+                headers = {"Content-Type": "application/json"}
+                if req.llm_api_key:
+                    headers["Authorization"] = f"Bearer {req.llm_api_key}"
+                normalized_base_url = _normalize_local_service_url(req.llm_base_url)
 
-                    if req.llm_provider == "ollama":
-                        endpoint = normalized_base_url.rstrip("/") + "/api/chat"
-                        payload: dict = {
-                            "model": req.llm_model,
-                            "messages": messages,
-                            "stream": False,
-                            "tools": openai_tools,
-                        }
-                        async with httpx.AsyncClient(
-                            **_httpx_async_client_kwargs(
-                                endpoint,
-                                timeout=120.0,
-                                verify=False if req.disable_ssl_verification else None,
-                            )
-                        ) as client:
-                            resp = await client.post(endpoint, json=payload, headers=headers)
-                            resp.raise_for_status()
-                        data = resp.json()
-                        llm_msg = data.get("message", {})
-                        content = llm_msg.get("content", "")
-                        raw_tool_calls = llm_msg.get("tool_calls", [])
+                if req.llm_provider == "ollama":
+                    endpoint = normalized_base_url.rstrip("/") + "/api/chat"
+                    payload: dict = {
+                        "model": req.llm_model,
+                        "messages": messages,
+                        "stream": False,
+                        "tools": openai_tools,
+                    }
+                    async with httpx.AsyncClient(
+                        **_httpx_async_client_kwargs(
+                            endpoint,
+                            timeout=120.0,
+                            verify=False if req.disable_ssl_verification else None,
+                        )
+                    ) as llm_client:
+                        resp = await llm_client.post(endpoint, json=payload, headers=headers)
+                        resp.raise_for_status()
+                    data = resp.json()
+                    llm_msg = data.get("message", {})
+                    content = llm_msg.get("content", "")
+                    raw_tool_calls = llm_msg.get("tool_calls", [])
+                else:
+                    endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
+                    payload = {
+                        "model": req.llm_model,
+                        "messages": messages,
+                        "tools": openai_tools,
+                    }
+                    async with httpx.AsyncClient(
+                        **_httpx_async_client_kwargs(
+                            endpoint,
+                            timeout=120.0,
+                            verify=False if req.disable_ssl_verification else None,
+                        )
+                    ) as llm_client:
+                        resp = await llm_client.post(endpoint, json=payload, headers=headers)
+                        resp.raise_for_status()
+                    data = resp.json()
+                    choice = data["choices"][0]["message"]
+                    content = choice.get("content") or ""
+                    raw_tool_calls = choice.get("tool_calls", [])
+
+                # No tool calls → final answer
+                if not raw_tool_calls:
+                    return {
+                        "answer": content,
+                        "tool_calls": tool_calls_log,
+                    }
+
+                # Append assistant message with tool calls
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": raw_tool_calls,
+                })
+
+                # Execute each tool call via FastMCP
+                for tc in raw_tool_calls:
+                    # Normalise across Ollama / OpenAI formats
+                    if isinstance(tc, dict) and "function" in tc:
+                        fn = tc["function"]
+                        tool_name = fn.get("name", "")
+                        raw_args = fn.get("arguments", "{}")
+                        tool_id = tc.get("id", tool_name)
                     else:
-                        endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
-                        payload = {
-                            "model": req.llm_model,
-                            "messages": messages,
-                            "tools": openai_tools,
-                        }
-                        async with httpx.AsyncClient(
-                            **_httpx_async_client_kwargs(
-                                endpoint,
-                                timeout=120.0,
-                                verify=False if req.disable_ssl_verification else None,
-                            )
-                        ) as client:
-                            resp = await client.post(endpoint, json=payload, headers=headers)
-                            resp.raise_for_status()
-                        data = resp.json()
-                        choice = data["choices"][0]["message"]
-                        content = choice.get("content") or ""
-                        raw_tool_calls = choice.get("tool_calls", [])
+                        # Ollama sometimes returns {"name":..., "arguments":...} directly
+                        tool_name = tc.get("name", "")
+                        raw_args = tc.get("arguments", "{}")
+                        tool_id = tool_name
 
-                    # No tool calls → final answer
-                    if not raw_tool_calls:
-                        return {
-                            "answer": content,
-                            "tool_calls": tool_calls_log,
-                        }
+                    tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
 
-                    # Append assistant message with tool calls
-                    messages.append({
-                        "role": "assistant",
-                        "content": content,
-                        "tool_calls": raw_tool_calls,
+                    try:
+                        result = await client.call_tool_mcp(tool_name, tool_args or {})
+                        tool_output = _format_mcp_tool_result(result)
+                    except Exception as e:
+                        tool_output = f"[Tool error] {e}"
+
+                    tool_calls_log.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result": tool_output,
                     })
 
-                    # Execute each tool call via MCP
-                    for tc in raw_tool_calls:
-                        # Normalise across Ollama / OpenAI formats
-                        if isinstance(tc, dict) and "function" in tc:
-                            fn = tc["function"]
-                            tool_name = fn.get("name", "")
-                            raw_args = fn.get("arguments", "{}")
-                            tool_id = tc.get("id", tool_name)
-                        else:
-                            # Ollama sometimes returns {"name":..., "arguments":...} directly
-                            tool_name = tc.get("name", "")
-                            raw_args = tc.get("arguments", "{}")
-                            tool_id = tool_name
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "name": tool_name,
+                        "content": tool_output,
+                    })
 
-                        tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-
-                        try:
-                            result = await session.call_tool(tool_name, tool_args)
-                            tool_output = "\n".join(
-                                c.text for c in result.content if hasattr(c, "text")
-                            ) or str(result.content)
-                        except Exception as e:
-                            tool_output = f"[Tool error] {e}"
-
-                        tool_calls_log.append({
-                            "tool": tool_name,
-                            "args": tool_args,
-                            "result": tool_output,
-                        })
-
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_id,
-                            "name": tool_name,
-                            "content": tool_output,
-                        })
-
-                # Safety net: ask LLM for a final answer without tools
-                messages.append({
-                    "role": "user",
-                    "content": "Please summarise the results above as a final answer.",
-                })
-                final = await llm_chat(
-                    messages,
-                    req.llm_base_url,
-                    req.llm_model,
-                    req.llm_provider,
-                    req.llm_api_key,
-                    disable_ssl_verification=req.disable_ssl_verification,
-                )
-                return {"answer": final, "tool_calls": tool_calls_log}
+            # Safety net: ask LLM for a final answer without tools
+            messages.append({
+                "role": "user",
+                "content": "Please summarise the results above as a final answer.",
+            })
+            final = await llm_chat(
+                messages,
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+                disable_ssl_verification=req.disable_ssl_verification,
+            )
+            return {"answer": final, "tool_calls": tool_calls_log}
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

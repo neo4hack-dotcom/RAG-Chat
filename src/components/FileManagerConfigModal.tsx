@@ -15,7 +15,7 @@ function normalizeLocalConfig(config: FileManagerAgentConfig): FileManagerAgentC
     maxIterations: Math.min(15, Math.max(1, config.maxIterations ?? 10)),
     systemPrompt:
       config.systemPrompt ||
-      "You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, and ask for confirmation before destructive or overwrite actions.",
+      "You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, ask for confirmation before destructive or overwrite actions, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis.",
   };
 }
 

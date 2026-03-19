@@ -166,6 +166,13 @@ const CHAT_ZOOM_MIN = 0.85;
 const CHAT_ZOOM_MAX = 1.4;
 const CHAT_ZOOM_STEP = 0.05;
 const CHAT_ZOOM_DEFAULT = 1;
+const BEAUTIFUL_RESPONSE_PROMPT = "[SYSTEM: For every non-JSON answer, produce a polished, presentation-ready result. Prefer elegant Markdown with short section headings, compact bullet lists, tasteful **bold** emphasis, comparison tables when useful, and blockquotes for notes. You may use safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> when they genuinely improve the layout. Never output a full HTML document, CSS, JavaScript, <head>, <body>, <iframe>, or inline event handlers. Keep the result clean, premium, readable, and visually impressive in the chat UI.]";
+const CLICKABLE_CHOICES_PROMPT = '[SYSTEM: If you need clarification and you offer explicit choices, format every selectable option as its own markdown task list item using exactly "- [ ] Option". Keep option labels short so the UI can turn them into clickable replies.]';
+const WELCOME_MESSAGE_CONTENT = "# Welcome to RAGnarok ⚡️\n\nI'm your AI assistant, ready to connect to your LLMs, RAG system, or agents.";
+
+function isDefaultWelcomeMessage(message: Message): boolean {
+  return message.role === 'assistant' && message.content.trim() === WELCOME_MESSAGE_CONTENT;
+}
 
 function clampChatZoom(value: number): number {
   return Math.min(CHAT_ZOOM_MAX, Math.max(CHAT_ZOOM_MIN, Number(value) || CHAT_ZOOM_DEFAULT));
@@ -217,6 +224,13 @@ function isAppCapabilitiesQuery(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) return false;
   return isFrenchCapabilitiesQuery(normalized) || isEnglishCapabilitiesQuery(normalized);
+}
+
+function withBeautifulResponsePrompt(basePrompt: string): string {
+  const normalized = String(basePrompt || '').trim();
+  return normalized
+    ? `${normalized}\n\n${BEAUTIFUL_RESPONSE_PROMPT}`
+    : BEAUTIFUL_RESPONSE_PROMPT;
 }
 
 function buildAppCapabilitiesReply(text: string): string {
@@ -419,7 +433,7 @@ export function ChatInterface({
     {
       id: "1",
       role: "assistant",
-      content: "# Welcome to RAGnarok ⚡️\n\nI'm your AI assistant, ready to connect to your LLMs, RAG system, or agents.",
+      content: WELCOME_MESSAGE_CONTENT,
       timestamp: Date.now(),
       steps: [
         { id: 'init-1', title: 'System Initialization', status: 'success', details: 'Loaded configuration and connected to local environment.' },
@@ -434,6 +448,10 @@ export function ChatInterface({
   const messages = pendingAgentIntro && !hasAgentIntroMessage(fallbackMessages, agentRole)
     ? [...fallbackMessages, pendingAgentIntro]
     : fallbackMessages;
+  const shouldHideWelcomeMessage = input.trim().length > 0 && !messages.some((message) => message.role === 'user');
+  const visibleMessages = shouldHideWelcomeMessage
+    ? messages.filter((message) => !isDefaultWelcomeMessage(message))
+    : messages;
   const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
   const [isPlanningMonitorOpen, setIsPlanningMonitorOpen] = useState(false);
   const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
@@ -499,7 +517,7 @@ export function ChatInterface({
         ? { ...c, messages: [{
             id: Date.now().toString(),
             role: "assistant",
-            content: "# Welcome to RAGnarok ⚡️\n\nI'm your AI assistant, ready to connect to your LLMs, RAG system, or agents.",
+            content: WELCOME_MESSAGE_CONTENT,
             timestamp: Date.now(),
             steps: [
               { id: 'init-1', title: 'System Initialization', status: 'success', details: 'Loaded configuration and connected to local environment.' },
@@ -508,7 +526,7 @@ export function ChatInterface({
           }], memory: buildConversationMemory([{
             id: Date.now().toString(),
             role: "assistant",
-            content: "# Welcome to RAGnarok ⚡️\n\nI'm your AI assistant, ready to connect to your LLMs, RAG system, or agents.",
+            content: WELCOME_MESSAGE_CONTENT,
             timestamp: Date.now(),
           }]), updatedAt: Date.now(), agentState: undefined } 
         : c
@@ -1137,7 +1155,8 @@ export function ChatInterface({
     };
 
     let activeConvId = currentId;
-    let activeMessages = [...messages, userMsg];
+    const persistedMessages = messages.filter((message) => !isDefaultWelcomeMessage(message));
+    let activeMessages = [...persistedMessages, userMsg];
 
     // Create a new conversation if one doesn't exist
     if (!activeConvId) {
@@ -1270,7 +1289,7 @@ export function ChatInterface({
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
-            system_prompt: config.systemPrompt,
+            system_prompt: formattedSystemPrompt,
             disable_ssl_verification: disableSslVerification,
           }),
         });
@@ -1404,18 +1423,18 @@ export function ChatInterface({
               max_retries: config.oracleAnalystConfig.maxRetries,
               max_iterations: config.oracleAnalystConfig.maxIterations,
               toolkit_id: config.oracleAnalystConfig.toolkitId,
-              system_prompt: config.oracleAnalystConfig.systemPrompt,
+              system_prompt: formattedOracleSystemPrompt,
             },
             file_manager_config: {
               base_path: config.fileManagerConfig.basePath,
               max_iterations: config.fileManagerConfig.maxIterations,
-              system_prompt: config.fileManagerConfig.systemPrompt,
+              system_prompt: formattedFileManagerSystemPrompt,
             },
             llm_base_url: config.baseUrl,
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
             llm_provider: config.provider,
-            system_prompt: config.systemPrompt,
+            system_prompt: formattedSystemPrompt,
             disable_ssl_verification: disableSslVerification,
           }),
         });
@@ -1609,7 +1628,7 @@ export function ChatInterface({
             file_manager_config: {
               base_path: config.fileManagerConfig.basePath,
               max_iterations: config.fileManagerConfig.maxIterations,
-              system_prompt: config.fileManagerConfig.systemPrompt,
+              system_prompt: formattedFileManagerSystemPrompt,
             },
             llm_base_url: config.baseUrl,
             llm_model: config.model,
@@ -1667,7 +1686,7 @@ export function ChatInterface({
             file_manager_config: {
               base_path: config.fileManagerConfig.basePath,
               max_iterations: config.fileManagerConfig.maxIterations,
-              system_prompt: config.fileManagerConfig.systemPrompt,
+              system_prompt: formattedFileManagerSystemPrompt,
             },
             llm_base_url: config.baseUrl,
             llm_model: config.model,
@@ -1739,7 +1758,7 @@ export function ChatInterface({
               max_retries: config.oracleAnalystConfig.maxRetries,
               max_iterations: config.oracleAnalystConfig.maxIterations,
               toolkit_id: config.oracleAnalystConfig.toolkitId,
-              system_prompt: config.oracleAnalystConfig.systemPrompt,
+              system_prompt: formattedOracleSystemPrompt,
             },
             llm_base_url: config.baseUrl,
             llm_model: config.model,
@@ -1787,7 +1806,7 @@ export function ChatInterface({
         return;
       } else {
         // Standard LLM / Agent flow (calls external API directly from frontend)
-        let dynamicSystemPrompt = `${config.systemPrompt}\n\n[SYSTEM: If you need clarification and you offer explicit choices, format every selectable option as its own markdown task list item using exactly "- [ ] Option". Keep option labels short so the UI can turn them into clickable replies.]`;
+        let dynamicSystemPrompt = `${formattedSystemPrompt}\n\n${CLICKABLE_CHOICES_PROMPT}`;
         if (workflow === 'AGENT') {
           dynamicSystemPrompt += `\n\n[SYSTEM: You are currently operating as an Agent with the role: ${agentRole.toUpperCase()}. Act accordingly.]`;
         }
@@ -1957,6 +1976,11 @@ export function ChatInterface({
           ? "Message your MCP tool..."
           : "Message your AI agent...";
   const chatZoomPercent = Math.round(chatZoom * 100);
+  const workflowRailButtonBase = "w-full flex items-center justify-start gap-2.5 px-3.5 py-3 rounded-2xl text-xs font-medium transition-all text-left";
+  const workflowRailSubButtonBase = "w-full flex items-center justify-start gap-2 px-3 py-2.5 rounded-2xl text-xs font-medium transition-all text-left";
+  const formattedSystemPrompt = withBeautifulResponsePrompt(config.systemPrompt);
+  const formattedOracleSystemPrompt = withBeautifulResponsePrompt(config.oracleAnalystConfig.systemPrompt);
+  const formattedFileManagerSystemPrompt = withBeautifulResponsePrompt(config.fileManagerConfig.systemPrompt);
 
   return (
     <div className="flex h-screen relative overflow-hidden bg-[#f5f5f5] dark:bg-[#0f0f13] transition-colors duration-300">
@@ -2076,322 +2100,334 @@ export function ChatInterface({
         className="flex-1 flex flex-col min-h-0"
         style={{ zoom: chatZoom }}
       >
-      {/* Chat Area */}
-      <main className="flex-1 overflow-y-auto p-4 md:p-8 z-10 scroll-smooth">
-        <div className="max-w-[77rem] mx-auto pb-20">
-          {messages.map((msg) => (
-            <ChatMessage
-              key={msg.id}
-              message={msg}
-              onCheckboxToggle={handleCheckboxToggle}
-              onAction={handleChatAction}
-              showSteps={workflow === 'AGENT' || workflow === 'CREWAI'}
-            />
-          ))}
-          
-          {isLoading && (
-            <div className="flex gap-4 w-full max-w-[77rem] mx-auto mb-8 animate-fade-in-up">
-              <div className="flex-shrink-0 w-10 h-10 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center shadow-sm">
-                <Bot className="w-5 h-5 text-gray-400 dark:text-gray-500" />
-              </div>
-              <div className="glass-panel px-6 py-4 rounded-[2rem] rounded-tl-sm flex items-center gap-2">
-                <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
-                <span className="text-sm text-gray-500 dark:text-gray-400 font-medium">Thinking...</span>
-              </div>
-            </div>
-          )}
-
-          {workflow === 'CREWAI' && (
-            <div className="max-w-[77rem] mx-auto mb-4 p-4 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 dark:from-emerald-900/20 dark:via-teal-900/20 dark:to-cyan-900/20 border border-emerald-200/60 dark:border-emerald-700/40 shadow-sm animate-fade-in-up">
-              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <CalendarDays className="w-4 h-4 text-emerald-600 dark:text-emerald-300" />
-                    <h3 className="font-semibold text-emerald-900 dark:text-emerald-200 text-[13px]">CrewAI - Planning</h3>
-                  </div>
-                  <div className="text-[11px] text-emerald-900/85 dark:text-emerald-300/90 leading-relaxed space-y-1">
-                    <p>This mode schedules existing agents from natural language or from a guided planner form.</p>
-                    <ul className="list-disc pl-4 space-y-0.5">
-                      <li>Use natural language to describe what should run, when it should run, and which agents should execute.</li>
-                      <li>Open the planner form to configure fixed schedules, ClickHouse watches, or file-arrival triggers.</li>
-                      <li>Saved plans are persisted in the backend and executed automatically by the Python server.</li>
-                    </ul>
-                  </div>
+        <div className="flex-1 min-h-0 px-4 md:px-8 pb-4">
+          <div className="h-full max-w-[98rem] mx-auto flex flex-col xl:flex-row gap-4 xl:gap-6">
+            <aside className="xl:w-[260px] xl:flex-shrink-0">
+              <div className="glass-panel rounded-[2rem] p-3 xl:p-4 flex flex-col gap-3 xl:sticky xl:top-4">
+                <div className="px-1">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
+                    Modes
+                  </p>
                 </div>
-                <div className="flex flex-col items-start md:items-end gap-2">
-                  <div className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
-                    {planningState.plans.length} plan(s) · {planningState.runs.length} run(s)
+
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={() => handleWorkflowSelection('LLM')}
+                    className={`${workflowRailButtonBase} ${workflow === 'LLM' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <Cpu className="w-4 h-4" /> Pure LLM
+                  </button>
+                  <button
+                    onClick={() => handleWorkflowSelection('RAG')}
+                    className={`${workflowRailButtonBase} ${workflow === 'RAG' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <Database className="w-4 h-4" /> RAG Knowledge
+                  </button>
+                  <button
+                    onClick={() => handleWorkflowSelection('AGENT')}
+                    className={`${workflowRailButtonBase} ${workflow === 'AGENT' ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <Network className="w-4 h-4" /> Agents
+                  </button>
+                  <button
+                    onClick={() => handleWorkflowSelection('MCP')}
+                    className={`${workflowRailButtonBase} ${workflow === 'MCP' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-200 border border-teal-200 dark:border-teal-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <Cpu className="w-4 h-4" /> MCP
+                  </button>
+                  <button
+                    onClick={() => handleWorkflowSelection('CREWAI')}
+                    className={`${workflowRailButtonBase} ${workflow === 'CREWAI' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
+                  >
+                    <CalendarDays className="w-4 h-4" /> CrewAI - Planning
+                  </button>
+                </div>
+
+                {workflow === 'MCP' && (
+                  <div className="rounded-[1.5rem] border border-teal-200/70 dark:border-teal-800/60 bg-teal-50/70 dark:bg-teal-950/20 p-3 flex flex-col gap-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-teal-700 dark:text-teal-300">
+                      MCP Tools
+                    </div>
+                    {(config.mcpTools ?? []).length === 0 ? (
+                      <span className="text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
+                    ) : (
+                      (config.mcpTools ?? []).map((tool: McpTool) => (
+                        <button
+                          key={tool.id}
+                          onClick={() => handleMcpToolSelection(tool.id)}
+                          className={`${workflowRailSubButtonBase} ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20 border border-teal-500' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-teal-200/70 dark:border-teal-800/70 hover:bg-white dark:hover:bg-white/10'}`}
+                        >
+                          <Network className="w-3.5 h-3.5" /> {tool.label}
+                        </button>
+                      ))
+                    )}
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                )}
+
+                {workflow === 'AGENT' && (
+                  <div className="rounded-[1.5rem] border border-purple-200/70 dark:border-purple-800/60 bg-purple-50/70 dark:bg-purple-950/20 p-3 flex flex-col gap-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-purple-700 dark:text-purple-300">
+                      Agent Selection
+                    </div>
+
                     <button
-                      type="button"
-                      onClick={() => openPlanningModal(planningAgentState.draft)}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                      onClick={() => handleAgentRoleSelection('manager')}
+                      className={`${workflowRailSubButtonBase} ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-purple-200/70 dark:border-purple-800/70 hover:bg-white dark:hover:bg-white/10'}`}
                     >
-                      <CalendarDays className="w-3.5 h-3.5" />
-                      Open planner form
+                      <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
                     </button>
+
                     <button
-                      type="button"
-                      onClick={openPlanningMonitor}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl border border-emerald-300/70 bg-white/70 text-emerald-900 text-xs font-medium hover:bg-white transition-colors dark:border-emerald-700/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                      onClick={() => setIsOtherAgentsOpen((open) => !open)}
+                      className={`${workflowRailSubButtonBase} ${isOtherAgentsOpen ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-purple-200/70 dark:border-purple-800/70 hover:bg-white dark:hover:bg-white/10'}`}
                     >
-                      <BarChart3 className="w-3.5 h-3.5" />
-                      Open activity monitor
+                      {isOtherAgentsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                      Other agents
                     </button>
+
+                    <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-[32rem] opacity-100' : 'max-h-0 opacity-0'}`}>
+                      <div className="mt-1 pl-3 border-l-2 border-cyan-200 dark:border-cyan-800 flex flex-col gap-2">
+                        <button
+                          onClick={() => handleAgentRoleSelection('clickhouse_query')}
+                          className={`${workflowRailSubButtonBase} ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20 border border-cyan-500' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-cyan-200/70 dark:border-cyan-800/70 hover:bg-white dark:hover:bg-white/10'}`}
+                        >
+                          <Database className="w-3.5 h-3.5" /> Clickhouse SQL
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('data_analyst')}
+                          className={`${workflowRailSubButtonBase} ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20 border border-violet-500' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-violet-200/70 dark:border-violet-800/70 hover:bg-white dark:hover:bg-white/10'}`}
+                        >
+                          <Cpu className="w-3.5 h-3.5" /> Data Analyst
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('file_management')}
+                          onDoubleClick={() => setIsFileManagerConfigOpen(true)}
+                          title="Double-click to configure"
+                          className={`${workflowRailSubButtonBase} ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20 border border-emerald-500' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-emerald-200/70 dark:border-emerald-800/70 hover:bg-white dark:hover:bg-white/10'}`}
+                        >
+                          <FolderOpen className="w-3.5 h-3.5" /> File management
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('pdf_creator')}
+                          className={`${workflowRailSubButtonBase} ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20 border border-slate-700' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-slate-200/70 dark:border-slate-700 hover:bg-white dark:hover:bg-white/10'}`}
+                        >
+                          <File className="w-3.5 h-3.5" /> PDF creator
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('oracle_analyst')}
+                          className={`${workflowRailSubButtonBase} ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20 border border-orange-500' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-orange-200/70 dark:border-orange-800/70 hover:bg-white dark:hover:bg-white/10'}`}
+                        >
+                          <Database className="w-3.5 h-3.5" /> Oracle SQL
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('data_quality_tables')}
+                          className={`${workflowRailSubButtonBase} ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20 border border-fuchsia-500' : 'bg-white/80 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-fuchsia-200/70 dark:border-fuchsia-800/70 hover:bg-white dark:hover:bg-white/10'}`}
+                        >
+                          <BarChart3 className="w-3.5 h-3.5" /> Data quality - Tables
+                        </button>
+                      </div>
+                    </div>
+
+                    {agentRole === 'file_management' && (
+                      <button
+                        type="button"
+                        onClick={() => setIsFileManagerConfigOpen(true)}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
+                      >
+                        <Settings className="w-3.5 h-3.5" />
+                        Configure
+                      </button>
+                    )}
+
+                    {agentRole === 'data_quality_tables' && (
+                      <button
+                        type="button"
+                        onClick={() => void openDataQualityModal()}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
+                      >
+                        <BarChart3 className="w-3.5 h-3.5" />
+                        Open form
+                      </button>
+                    )}
                   </div>
+                )}
+
+                <div className="pt-1 border-t border-gray-200/70 dark:border-gray-800/70">
+                  <button
+                    onClick={() => setIsConsoleOpen(true)}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-3 rounded-2xl border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:text-indigo-500 hover:border-indigo-200 dark:hover:border-indigo-900/50 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-all shadow-sm group"
+                    title="Agent Console"
+                  >
+                    <Terminal className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                    Agent Console
+                  </button>
                 </div>
               </div>
-            </div>
-          )}
+            </aside>
 
-          {workflow === 'RAG' && (
-            <div className="max-w-[77rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200/50 dark:border-blue-700/40 shadow-sm animate-fade-in-up">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Database className="w-4 h-4 text-blue-500" />
-                <h3 className="font-semibold text-blue-900 dark:text-blue-200 text-[13px]">Retrieval-Augmented Generation (RAG)</h3>
-              </div>
-              <div className="text-[11px] text-blue-800/90 dark:text-blue-300/90 leading-relaxed space-y-1">
-                <p>Welcome to <strong>RAG</strong> mode. This workflow helps you find and synthesize information from your documents:</p>
-                <ul className="list-disc pl-4 space-y-0.5">
-                  <li><strong>Retrieve:</strong> Your query is converted into a vector using the local embedding model and searched against the Elasticsearch database.</li>
-                  <li><strong>Augment:</strong> The most relevant document chunks (optimized with overlap) are retrieved using K-Nearest Neighbors (KNN).</li>
-                  <li><strong>Generate:</strong> The LLM uses this retrieved context to provide accurate, grounded answers.</li>
-                </ul>
-                <p className="italic mt-1 text-blue-700/70">Tip: You can configure the Elasticsearch URL, embedding model, chunk size, and KNN neighbors in the settings.</p>
-              </div>
-            </div>
-          )}
+            <div className="flex-1 min-w-0 flex flex-col min-h-0">
+              {/* Chat Area */}
+              <main className="flex-1 overflow-y-auto z-10 scroll-smooth">
+                <div className="max-w-[77rem] mx-auto pb-16">
+                  {visibleMessages.map((msg) => (
+                    <ChatMessage
+                      key={msg.id}
+                      message={msg}
+                      onCheckboxToggle={handleCheckboxToggle}
+                      onAction={handleChatAction}
+                      showSteps={workflow === 'AGENT' || workflow === 'CREWAI'}
+                    />
+                  ))}
 
-          <div ref={messagesEndRef} />
-        </div>
-      </main>
-
-      {/* Input Area */}
-      <div className="p-4 md:p-8 pt-0 z-10 w-full max-w-[77rem] mx-auto">
-        <div className="glass-panel rounded-[2rem] p-2 flex flex-col gap-2 shadow-2xl shadow-black/5">
-          {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-2 px-4 pt-3 pb-1">
-              {attachments.map(att => (
-                <div key={att.id} className="relative group flex items-center gap-2 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 px-3 py-1.5 rounded-xl text-sm shadow-sm">
-                  {att.type.startsWith('image/') ? (
-                    <img src={att.data} alt={att.name} className="w-6 h-6 object-cover rounded-md" />
-                  ) : (
-                    <File className="w-4 h-4 text-blue-500 dark:text-blue-400" />
+                  {isLoading && (
+                    <div className="flex gap-3 w-full max-w-[77rem] mx-auto mb-5 animate-fade-in-up">
+                      <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center shadow-sm">
+                        <Bot className="w-5 h-5 text-gray-400 dark:text-gray-500" />
+                      </div>
+                      <div className="glass-panel px-5 py-3 rounded-[1.7rem] rounded-tl-sm flex items-center gap-2">
+                        <Loader2 className="w-4.5 h-4.5 text-blue-500 animate-spin" />
+                        <span className="text-[13px] text-gray-500 dark:text-gray-400 font-medium">Thinking...</span>
+                      </div>
+                    </div>
                   )}
-                  <span className="truncate max-w-[120px] font-medium text-gray-700 dark:text-gray-200">{att.name}</span>
-                  <button
-                    onClick={() => removeAttachment(att.id)}
-                    className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
+
+                  {workflow === 'CREWAI' && (
+                    <div className="max-w-[77rem] mx-auto mb-4 p-4 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 dark:from-emerald-900/20 dark:via-teal-900/20 dark:to-cyan-900/20 border border-emerald-200/60 dark:border-emerald-700/40 shadow-sm animate-fade-in-up">
+                      <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                        <div>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <CalendarDays className="w-4 h-4 text-emerald-600 dark:text-emerald-300" />
+                            <h3 className="font-semibold text-emerald-900 dark:text-emerald-200 text-[13px]">CrewAI - Planning</h3>
+                          </div>
+                          <div className="text-[11px] text-emerald-900/85 dark:text-emerald-300/90 leading-relaxed space-y-1">
+                            <p>This mode schedules existing agents from natural language or from a guided planner form.</p>
+                            <ul className="list-disc pl-4 space-y-0.5">
+                              <li>Use natural language to describe what should run, when it should run, and which agents should execute.</li>
+                              <li>Open the planner form to configure fixed schedules, ClickHouse watches, or file-arrival triggers.</li>
+                              <li>Saved plans are persisted in the backend and executed automatically by the Python server.</li>
+                            </ul>
+                          </div>
+                        </div>
+                        <div className="flex flex-col items-start md:items-end gap-2">
+                          <div className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
+                            {planningState.plans.length} plan(s) · {planningState.runs.length} run(s)
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openPlanningModal(planningAgentState.draft)}
+                              className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                            >
+                              <CalendarDays className="w-3.5 h-3.5" />
+                              Open planner form
+                            </button>
+                            <button
+                              type="button"
+                              onClick={openPlanningMonitor}
+                              className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl border border-emerald-300/70 bg-white/70 text-emerald-900 text-xs font-medium hover:bg-white transition-colors dark:border-emerald-700/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                            >
+                              <BarChart3 className="w-3.5 h-3.5" />
+                              Open activity monitor
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {workflow === 'RAG' && (
+                    <div className="max-w-[77rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200/50 dark:border-blue-700/40 shadow-sm animate-fade-in-up">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <Database className="w-4 h-4 text-blue-500" />
+                        <h3 className="font-semibold text-blue-900 dark:text-blue-200 text-[13px]">Retrieval-Augmented Generation (RAG)</h3>
+                      </div>
+                      <div className="text-[11px] text-blue-800/90 dark:text-blue-300/90 leading-relaxed space-y-1">
+                        <p>Welcome to <strong>RAG</strong> mode. This workflow helps you find and synthesize information from your documents:</p>
+                        <ul className="list-disc pl-4 space-y-0.5">
+                          <li><strong>Retrieve:</strong> Your query is converted into a vector using the local embedding model and searched against the Elasticsearch database.</li>
+                          <li><strong>Augment:</strong> The most relevant document chunks (optimized with overlap) are retrieved using K-Nearest Neighbors (KNN).</li>
+                          <li><strong>Generate:</strong> The LLM uses this retrieved context to provide accurate, grounded answers.</li>
+                        </ul>
+                        <p className="italic mt-1 text-blue-700/70">Tip: You can configure the Elasticsearch URL, embedding model, chunk size, and KNN neighbors in the settings.</p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div ref={messagesEndRef} />
                 </div>
-              ))}
-            </div>
-          )}
-          
-          <div className="flex items-end gap-2 w-full">
-            <input
-              type="file"
-              multiple
-              ref={fileInputRef}
-              onChange={handleFileChange}
-              className="hidden"
-              accept="image/*,.pdf,.txt,.csv,.md"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex-shrink-0 w-12 h-12 rounded-2xl text-gray-400 dark:text-gray-500 hover:text-blue-500 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 flex items-center justify-center transition-colors mb-1 ml-1"
-              title="Attach file"
-            >
-              <Paperclip className="w-5 h-5" />
-            </button>
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              placeholder={inputPlaceholder}
-              className="w-full min-h-[56px] bg-transparent border-none resize-none focus:ring-0 px-2 py-4 text-[14px] leading-relaxed text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 outline-none overflow-y-auto"
-              rows={1}
-            />
-            <button
-              type="button"
-              onClick={handleCopyInput}
-              disabled={!input.trim()}
-              className="flex-shrink-0 w-12 h-12 rounded-2xl text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center transition-colors mb-1 disabled:opacity-40 disabled:cursor-not-allowed"
-              title={isInputCopied ? "Copied" : "Copy input"}
-            >
-              {isInputCopied ? <Check className="w-4.5 h-4.5" /> : <Copy className="w-4.5 h-4.5" />}
-            </button>
-            <button
-              onClick={() => handleSend()}
-              disabled={(!input.trim() && attachments.length === 0) || isLoading}
-              className="flex-shrink-0 w-12 h-12 rounded-2xl bg-black text-white flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-800 transition-colors mb-1 mr-1"
-            >
-              <Send className="w-5 h-5 ml-0.5" />
-            </button>
-          </div>
-        </div>
+              </main>
 
-        {/* Workflow Selector & Console Button */}
-        <div className="mt-3 px-2 flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-          <div className="flex flex-col gap-2 overflow-hidden flex-1">
-            <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
-            <button
-              onClick={() => handleWorkflowSelection('LLM')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'LLM' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
-            >
-              <Cpu className="w-3.5 h-3.5" /> Pure LLM
-            </button>
-            <button
-              onClick={() => handleWorkflowSelection('RAG')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'RAG' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
-            >
-              <Database className="w-3.5 h-3.5" /> RAG Knowledge
-            </button>
-            <button
-              onClick={() => handleWorkflowSelection('AGENT')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'AGENT' ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
-            >
-              <Network className="w-3.5 h-3.5" /> Agents
-            </button>
-            <button
-              onClick={() => handleWorkflowSelection('MCP')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'MCP' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-200 border border-teal-200 dark:border-teal-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
-            >
-              <Cpu className="w-3.5 h-3.5" /> MCP
-            </button>
-            <button
-              onClick={() => handleWorkflowSelection('CREWAI')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${workflow === 'CREWAI' ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-700 shadow-sm' : 'bg-white/50 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white/80 dark:hover:bg-white/10'}`}
-            >
-              <CalendarDays className="w-3.5 h-3.5" /> CrewAI - Planning
-            </button>
-          </div>
+              {/* Input Area */}
+              <div className="pt-3 z-10 w-full max-w-[77rem] mx-auto">
+                <div className="glass-panel rounded-[1.8rem] p-1.5 flex flex-col gap-1.5 shadow-2xl shadow-black/5">
+                  {attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-2 px-3.5 pt-2.5 pb-1">
+                      {attachments.map(att => (
+                        <div key={att.id} className="relative group flex items-center gap-2 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 px-2.5 py-1.5 rounded-xl text-sm shadow-sm">
+                          {att.type.startsWith('image/') ? (
+                            <img src={att.data} alt={att.name} className="w-6 h-6 object-cover rounded-md" />
+                          ) : (
+                            <File className="w-4 h-4 text-blue-500 dark:text-blue-400" />
+                          )}
+                          <span className="truncate max-w-[120px] font-medium text-gray-700 dark:text-gray-200">{att.name}</span>
+                          <button
+                            onClick={() => removeAttachment(att.id)}
+                            className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
-          {/* Sub-options for MCP */}
-          <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'MCP' ? 'max-h-10 opacity-100' : 'max-h-0 opacity-0'}`}>
-            <div className="flex items-center gap-2 pl-2 border-l-2 border-teal-200 overflow-x-auto pb-1 scrollbar-hide">
-              {(config.mcpTools ?? []).length === 0 ? (
-                <span className="text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
-              ) : (
-                (config.mcpTools ?? []).map((tool: McpTool) => (
-                  <button
-                    key={tool.id}
-                    onClick={() => handleMcpToolSelection(tool.id)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/60 text-gray-600 border border-gray-200 hover:bg-white'}`}
-                  >
-                    <Network className="w-3.5 h-3.5" /> {tool.label}
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-
-          {/* Sub-options for AGENT */}
-          <div className={`overflow-hidden transition-all duration-300 ease-in-out ${workflow === 'AGENT' ? 'max-h-40 opacity-100' : 'max-h-0 opacity-0'}`}>
-            <div className="flex flex-col gap-2 pl-2 border-l-2 border-purple-200 pb-1">
-              <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
-                <button
-                  onClick={() => handleAgentRoleSelection('manager')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20 border-none' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                >
-                  <Star className={`w-3.5 h-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'text-amber-500 fill-amber-500'}`} /> Agent Manager
-                </button>
-                <button
-                  onClick={() => setIsOtherAgentsOpen((open) => !open)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${isOtherAgentsOpen ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200 border border-purple-200 dark:border-purple-700 shadow-sm' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                >
-                  {isOtherAgentsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                  Other agents
-                </button>
-              </div>
-
-              <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-40 opacity-100' : 'max-h-0 opacity-0'}`}>
-                <div className="flex items-center gap-2 pl-3 ml-1 border-l-2 border-cyan-200 overflow-x-auto scrollbar-hide">
-                  <button
-                    onClick={() => handleAgentRoleSelection('clickhouse_query')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <Database className="w-3.5 h-3.5" /> Clickhouse SQL
-                  </button>
-                  <button
-                    onClick={() => handleAgentRoleSelection('data_analyst')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <Cpu className="w-3.5 h-3.5" /> Data Analyst
-                  </button>
-                  <button
-                    onClick={() => handleAgentRoleSelection('file_management')}
-                    onDoubleClick={() => setIsFileManagerConfigOpen(true)}
-                    title="Double-click to configure"
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <FolderOpen className="w-3.5 h-3.5" /> File management
-                  </button>
-                  <button
-                    onClick={() => handleAgentRoleSelection('pdf_creator')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <File className="w-3.5 h-3.5" /> PDF creator
-                  </button>
-                  <button
-                    onClick={() => handleAgentRoleSelection('oracle_analyst')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <Database className="w-3.5 h-3.5" /> Oracle SQL
-                  </button>
-                  <button
-                    onClick={() => handleAgentRoleSelection('data_quality_tables')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20' : 'bg-white/60 dark:bg-white/5 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-white dark:hover:bg-white/10'}`}
-                  >
-                    <BarChart3 className="w-3.5 h-3.5" /> Data quality - Tables
-                  </button>
+                  <div className="flex items-end gap-2 w-full">
+                    <input
+                      type="file"
+                      multiple
+                      ref={fileInputRef}
+                      onChange={handleFileChange}
+                      className="hidden"
+                      accept="image/*,.pdf,.txt,.csv,.md"
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex-shrink-0 w-11 h-11 rounded-2xl text-gray-400 dark:text-gray-500 hover:text-blue-500 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 flex items-center justify-center transition-colors mb-0.5 ml-1"
+                      title="Attach file"
+                    >
+                      <Paperclip className="w-5 h-5" />
+                    </button>
+                    <textarea
+                      ref={textareaRef}
+                      value={input}
+                      onChange={handleInputChange}
+                      onKeyDown={handleKeyDown}
+                      placeholder={inputPlaceholder}
+                      className="w-full min-h-[48px] bg-transparent border-none resize-none focus:ring-0 px-2 py-3 text-[14px] leading-[1.65] text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 outline-none overflow-y-auto"
+                      rows={1}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCopyInput}
+                      disabled={!input.trim()}
+                      className="flex-shrink-0 w-11 h-11 rounded-2xl text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center transition-colors mb-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={isInputCopied ? "Copied" : "Copy input"}
+                    >
+                      {isInputCopied ? <Check className="w-4.5 h-4.5" /> : <Copy className="w-4.5 h-4.5" />}
+                    </button>
+                    <button
+                      onClick={() => handleSend()}
+                      disabled={(!input.trim() && attachments.length === 0) || isLoading}
+                      className="flex-shrink-0 w-11 h-11 rounded-2xl bg-black text-white flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-800 transition-colors mb-0.5 mr-0.5"
+                    >
+                      <Send className="w-4.5 h-4.5 ml-0.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
-              {agentRole === 'file_management' && (
-                <div className="flex items-center gap-2 pl-3 ml-1">
-                  <button
-                    type="button"
-                    onClick={() => setIsFileManagerConfigOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
-                  >
-                    <Settings className="w-3.5 h-3.5" />
-                    Configure
-                  </button>
-                </div>
-              )}
-              {agentRole === 'data_quality_tables' && (
-                <div className="flex items-center gap-2 pl-3 ml-1">
-                  <button
-                    type="button"
-                    onClick={() => void openDataQualityModal()}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-black text-white hover:bg-gray-800 transition-colors whitespace-nowrap"
-                  >
-                    <BarChart3 className="w-3.5 h-3.5" />
-                    Open form
-                  </button>
-                </div>
-              )}
             </div>
           </div>
-          </div>
-          
-          <div className="flex-shrink-0 self-end sm:self-auto flex items-center pt-0.5">
-            <button
-               onClick={() => setIsConsoleOpen(true)}
-               className="flex items-center justify-center w-8 h-8 rounded-full border border-gray-200 dark:border-gray-800 text-gray-400 dark:text-gray-500 hover:text-indigo-500 hover:border-indigo-200 dark:hover:border-indigo-900/50 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-all shadow-sm group"
-               title="Agent Console"
-            >
-               <Terminal className="w-4 h-4 group-hover:scale-110 transition-transform" />
-            </button>
-          </div>
         </div>
-
-      </div>
-      </div>
       </div>
 
       <div
@@ -2473,6 +2509,7 @@ export function ChatInterface({
             </span>
           </div>
         </button>
+      </div>
       </div>
 
       <PlanningModal

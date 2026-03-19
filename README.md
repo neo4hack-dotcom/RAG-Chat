@@ -14,7 +14,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - [State Persistence & Backup](#state-persistence--backup)
 - [CrewAI Planning](#crewai-planning)
 - [RAG Pipeline](#rag-pipeline)
-- [Clickhouse SQL Agent](#clickhouse-sql-agent)
+- [ClickHouse SQL Agent](#clickhouse-sql-agent)
 - [Data Analyst Agent](#data-analyst-agent)
 - [Oracle SQL Agent](#oracle-sql-agent)
 - [File Management Agent](#file-management-agent)
@@ -33,7 +33,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | Category | Details |
 |----------|---------|
 | **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, CrewAI - Planning |
-| **7 agent roles** | Agent Manager, Clickhouse SQL, Data Analyst, Oracle SQL, File management, PDF creator, Data quality - Tables |
+| **7 agent roles** | Agent Manager, ClickHouse SQL, Data Analyst, Oracle SQL, File management, PDF creator, Data quality - Tables |
 | **Manager orchestration** | Agent Manager can delegate to every specialist agent and keep follow-up context across clarifications and confirmations |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
@@ -43,7 +43,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **PDF creator agent** | Backend Python-only PDF export agent to turn the latest useful analysis or pasted content into a polished document |
 | **Data quality agent** | Statistical profiling + LLM scoring for ClickHouse tables, launched from an overlay form above the chat |
 | **Planner / scheduler** | Schedule existing agents on fixed frequency, ClickHouse watch, or file-arrival trigger |
-| **MCP tools** | Connect any MCP server via SSE, test connection, real agentic tool-call loop |
+| **MCP tools** | Connect any MCP server via FastMCP, test connection, real agentic tool-call loop over SSE or streamable HTTP |
 | **Backend persistence** | App config, conversations and durable preferences stored in backend-managed `DB.json` |
 | **Backup workflow** | Export/import DB backups and force a resync from the latest backend state in Settings |
 | **Agents & Tools portal** | Configurable external application tiles managed in Settings and rendered as a glass-style portal page from the landing screen |
@@ -111,13 +111,14 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
                                                 └─────────────────┘
                                                     MCP Server
                                                ┌────▼──────────────┐
-                                               │  any SSE MCP tool │
+                                               │ any MCP server    │
+                                               │ SSE or HTTP       │
                                                └───────────────────┘
 ```
 
 - **Frontend** — React 19 + TypeScript + Tailwind CSS, bundled with Vite.
-- **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, MCP client, OpenSearch management.
-- **Vector store** — OpenSearch with `opensearch-py` and `mcp` Python packages.
+- **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, FastMCP-based MCP client, OpenSearch management.
+- **Vector store** — OpenSearch with `opensearch-py`.
 - **Analytics store** — ClickHouse over HTTP for the SQL agent.
 - **Oracle store** — Oracle via Python `oracledb` for the Oracle SQL agent.
 - **LLM / Embeddings** — Ollama (local) or any OpenAI-compatible API.
@@ -132,7 +133,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - **Node.js 18+**
 - **[Ollama](https://ollama.com)** (or any OpenAI-compatible server)
 - **[OpenSearch](https://opensearch.org)** running locally or remotely (for RAG mode)
-- **[ClickHouse](https://clickhouse.com)** running locally or remotely (optional, for the Clickhouse SQL agent)
+- **[ClickHouse](https://clickhouse.com)** running locally or remotely (optional, for the ClickHouse SQL agent)
 - **Oracle Database** reachable from the backend (optional, for the Oracle SQL agent)
 
 ### Ollama models
@@ -210,17 +211,17 @@ Multi-agent orchestration with seven roles:
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
-| **Clickhouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
+| **ClickHouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
 | **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, and can export the latest dataset to CSV |
 | **Oracle SQL** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries and answers in business-facing Markdown |
 | **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations |
 | **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
 | **Data quality - Tables** | Profiles ClickHouse tables and generates an English Markdown quality report from a dedicated overlay form |
 
-#### Clickhouse SQL agent quick flow
+#### ClickHouse SQL agent quick flow
 
-1. Configure ClickHouse in **Settings → RAG & OpenSearch → Clickhouse SQL Agent**.
-2. Switch to **Agents** mode and select **Clickhouse SQL**.
+1. Configure ClickHouse in **Settings → ClickHouse SQL**.
+2. Switch to **Agents** mode and select **ClickHouse SQL**.
 3. Ask the analytical question directly — the agent tries to infer the best table automatically.
 4. If multiple tables, fields or date columns are plausible, it asks the user to choose with clickable task-tile options.
 5. It generates a read-only ClickHouse query, validates it, executes it, and returns:
@@ -233,7 +234,7 @@ The ClickHouse agent uses the backend only and always relies on the configured l
 
 #### Data Analyst quick flow
 
-1. Configure ClickHouse in **Settings → RAG & OpenSearch → Clickhouse SQL Agent**.
+1. Configure ClickHouse in **Settings → ClickHouse SQL**.
 2. Optionally configure OpenSearch + embeddings if you want the agent to use knowledge-base lookups as part of the analysis.
 3. Switch to **Agents** mode and select **Data Analyst**.
 4. Ask a deeper analytical question, for example:
@@ -283,7 +284,7 @@ The ClickHouse agent uses the backend only and always relies on the configured l
 
 #### Data quality quick flow
 
-1. Configure ClickHouse once in **Settings → RAG & OpenSearch → Clickhouse SQL Agent**.
+1. Configure ClickHouse once in **Settings → ClickHouse SQL**.
 2. Switch to **Agents** mode and select **Data quality - Tables**.
 3. A dedicated form opens above the chat.
 4. Select:
@@ -344,7 +345,7 @@ In **Settings → DB Backup**, you can:
 Connect any [Model Context Protocol](https://modelcontextprotocol.io) server and have the LLM call its tools autonomously:
 
 1. Open **Settings → MCP Tools**.
-2. Add a tool: give it a label and its SSE URL (e.g. `http://localhost:3000/sse`).
+2. Add a tool: give it a label and its MCP endpoint URL (for example `http://localhost:3000/sse` or a streamable HTTP endpoint).
 3. Click **Test** — available tools appear as badges on success.
 4. In the chat, switch to **MCP** mode and select the tool.
 5. Send a message — the backend runs the full agentic loop (list tools → LLM decides → call tool via MCP → feed result → final answer). Tool calls are visible in the collapsible "Agent Thinking Process" panel.
@@ -380,9 +381,9 @@ Response + sources + confidence score
 
 ---
 
-## Clickhouse SQL Agent
+## ClickHouse SQL Agent
 
-The Clickhouse SQL agent is designed to follow a conservative analytics workflow instead of guessing columns blindly.
+The ClickHouse SQL agent is designed to follow a conservative analytics workflow instead of guessing columns blindly.
 
 ### Workflow
 
@@ -626,7 +627,7 @@ The **Agents & Tools** card on the landing page now opens a dynamic application 
 
 ## MCP Integration
 
-The backend uses the **`mcp` Python SDK** to communicate with MCP servers over Server-Sent Events (SSE).
+The backend uses **FastMCP** on the Python side to communicate with MCP servers.
 
 ### Backend endpoints
 
@@ -637,17 +638,19 @@ The backend uses the **`mcp` Python SDK** to communicate with MCP servers over S
 
 ### MCP server URL format
 
-Your MCP server must expose an SSE endpoint. Typical formats:
+Your MCP server can expose either an **SSE** endpoint or a **streamable HTTP** endpoint. Typical formats:
 
 ```
 http://localhost:3000/sse
 http://my-mcp-server:8080/sse
+http://localhost:3000/mcp
+http://my-mcp-server:8080/mcp
 ```
 
 ### Tool call flow
 
 ```
-1. Backend connects to MCP server via SSE
+1. Backend connects to the MCP server via FastMCP
 2. Lists available tools → converts to OpenAI function-calling format
 3. Sends user message + tool list to LLM
 4. LLM returns tool_calls → backend calls each tool via MCP
@@ -678,6 +681,7 @@ All settings are available in-app (no `.env` file needed).
 | API Key | — | Required for OpenAI-compatible providers |
 | Model | `llama3` | Model name (`ollama list` to see available) |
 | System Prompt | — | Prepended to every conversation |
+| Disable SSL verification for backend calls | `false` | Global override for self-signed or internal certificates used by LLM, embeddings, ClickHouse, MCP, and model discovery |
 
 ### RAG & OpenSearch Settings
 
@@ -708,7 +712,7 @@ All settings are available in-app (no `.env` file needed).
 | Toolkit ID | empty | Optional toolkit selector for future extension |
 | System Prompt | built-in | Customises the Oracle SQL behaviour |
 
-### Clickhouse SQL Agent Settings
+### ClickHouse SQL Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -722,7 +726,7 @@ All settings are available in-app (no `.env` file needed).
 | HTTP Path | empty | Optional custom ClickHouse HTTP path |
 | Default Query Limit | `200` | Safety cap applied to row-returning ClickHouse queries |
 
-Use **Test ClickHouse** in the settings panel to verify the connection and preview the first available tables.
+Use **Test ClickHouse** in the dedicated ClickHouse settings page to verify the connection and preview the first available tables.
 
 The **Data Analyst** agent reuses the same ClickHouse connection and query limit settings. If OpenSearch and embeddings are configured, it can also add knowledge-base search as one of its analytical steps.
 
@@ -759,7 +763,7 @@ Each MCP tool entry has:
 | Field | Description |
 |-------|-------------|
 | Label | Display name shown in the chat mode selector |
-| URL (SSE) | Full SSE endpoint of the MCP server |
+| URL (SSE or HTTP) | Full MCP endpoint URL for either SSE or streamable HTTP |
 
 ### Backend Environment Variables
 
@@ -806,7 +810,7 @@ ODIN AI Portal is designed to be **100% local**:
 | Backend | Python 3.11, FastAPI, Uvicorn |
 | Vector store | OpenSearch (`opensearch-py`) |
 | SQL analytics | ClickHouse over HTTP (`httpx`) |
-| MCP client | `mcp` Python SDK (SSE transport) |
+| MCP client | FastMCP Python client (`fastmcp`) |
 | HTTP client | `httpx` (async) |
 | Oracle driver | `oracledb` |
 | LLM / Embeddings | Ollama or any OpenAI-compatible API |
