@@ -402,6 +402,7 @@ export type AppConfig = {
   apiKey: string;
   model: string;
   systemPrompt: string;
+  disableSslVerification: boolean;
   elasticsearchUrl: string;
   elasticsearchIndex: string;
   elasticsearchUsername: string;
@@ -462,6 +463,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   apiKey: "",
   model: "llama3",
   systemPrompt: "You are a helpful, smart, and concise AI assistant. Format your responses beautifully using markdown. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies.",
+  disableSslVerification: false,
   elasticsearchUrl: "http://localhost:9200",
   elasticsearchIndex: "rag_documents",
   elasticsearchUsername: "",
@@ -914,6 +916,7 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
   return {
     ...DEFAULT_CONFIG,
     ...(config ?? {}),
+    disableSslVerification: config?.disableSslVerification ?? DEFAULT_CONFIG.disableSslVerification,
     settingsAccessPassword: config?.settingsAccessPassword || DEFAULT_CONFIG.settingsAccessPassword,
     portalApps: incomingPortalApps
       .filter((app): app is PortalApp => Boolean(app))
