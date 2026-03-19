@@ -113,7 +113,7 @@ function FeatureCard({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={handleMouseLeave}
       onClick={() => onNavigate(card.id)}
-      className="relative cursor-pointer select-none"
+      className="relative cursor-pointer select-none h-full"
     >
       {/* Outer glow ring */}
       <motion.div
@@ -129,7 +129,7 @@ function FeatureCard({
 
       {/* Card body */}
       <motion.div
-        className="relative overflow-hidden rounded-3xl p-8 flex flex-col gap-5"
+        className="relative overflow-hidden rounded-3xl p-8 flex flex-col gap-5 h-full"
         animate={{
           background: hovered ? card.hoverGradient : card.gradient,
           y: hovered ? -10 : 0,
@@ -290,7 +290,7 @@ export function LandingPage({ onNavigate, documentationUrl, settingsAccessPasswo
         initial={{ opacity: 0, y: -16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease: 'easeOut' }}
-        className="relative z-10 flex items-center justify-end px-8 py-5 max-w-7xl mx-auto"
+        className="relative z-10 flex items-center justify-between px-8 py-5 max-w-7xl mx-auto"
       >
         <div className="flex items-center gap-1">
           <button
@@ -300,11 +300,13 @@ export function LandingPage({ onNavigate, documentationUrl, settingsAccessPasswo
               setIsAccessPromptOpen(true);
             }}
             className="w-9 h-9 rounded-full border border-gray-200/80 bg-white/75 backdrop-blur-sm text-gray-400 hover:text-gray-700 hover:border-gray-300 hover:bg-white transition-all duration-200 flex items-center justify-center"
-            title="Protected configuration"
-            aria-label="Protected configuration"
+            title="Protected settings"
+            aria-label="Protected settings"
           >
             <Settings size={14} />
           </button>
+        </div>
+        <div className="flex items-center gap-1">
           {documentationUrl ? (
             <a
               href={documentationUrl}
@@ -374,7 +376,7 @@ export function LandingPage({ onNavigate, documentationUrl, settingsAccessPasswo
                   <Lock size={12} />
                   Protected Access
                 </div>
-                <h3 className="mt-1 text-lg font-semibold text-gray-900">Configuration</h3>
+                <h3 className="mt-1 text-lg font-semibold text-gray-900">Settings</h3>
                 <p className="mt-1 text-sm text-gray-500 leading-relaxed">
                   Enter the password to open the settings panel.
                 </p>

@@ -138,12 +138,12 @@ export function SettingsModal({
       const data = await response.json();
       setMcpTestStates(prev => ({
         ...prev,
-        [tool.id]: { status: 'success', message: `${data.tool_count} outil(s) disponible(s)`, tools: data.tools },
+        [tool.id]: { status: 'success', message: `${data.tool_count} tool(s) available`, tools: data.tools },
       }));
     } catch (err) {
       setMcpTestStates(prev => ({
         ...prev,
-        [tool.id]: { status: 'error', message: err instanceof Error ? err.message : 'Échec de connexion', tools: [] },
+        [tool.id]: { status: 'error', message: err instanceof Error ? err.message : 'Connection failed', tools: [] },
       }));
     }
   };
@@ -320,14 +320,14 @@ export function SettingsModal({
         throw new Error((err as any).detail || `HTTP ${response.status}`);
       }
       const data = await response.json();
-      let msg = `Modèle OK · dimension: ${data.dimension}`;
+      let msg = `Model OK · dimension: ${data.dimension}`;
       if (data.opensearch) {
         if (data.opensearch.status === 'compatible') {
-          msg += ` · compatible avec l'index OpenSearch ✓`;
+          msg += ` · compatible with the OpenSearch index ✓`;
         } else if (data.opensearch.status === 'incompatible') {
           msg += ` · ⚠ ${data.opensearch.message}`;
         } else if (data.opensearch.status === 'no_index') {
-          msg += ` · index inexistant (utilisez "Setup Index")`;
+          msg += ` · index not found (use "Setup Index")`;
         } else if (data.opensearch.status === 'error') {
           msg += ` · OpenSearch: ${data.opensearch.message}`;
         }
@@ -446,11 +446,11 @@ export function SettingsModal({
   };
 
   const handleExportDb = async () => {
-    await runDbAction('Sauvegarde DB exportée avec succès.', onExportDb);
+    await runDbAction('DB backup exported successfully.', onExportDb);
   };
 
   const handleSyncDb = async () => {
-    await runDbAction('Interface réalignée sur la dernière version de la DB.', onSyncFromDb);
+    await runDbAction('The interface is now aligned with the latest DB version.', onSyncFromDb);
   };
 
   const handleImportDbFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -460,7 +460,7 @@ export function SettingsModal({
     try {
       const text = await file.text();
       const snapshot = JSON.parse(text);
-      await runDbAction(`Sauvegarde "${file.name}" importée avec succès.`, () => onImportDb(snapshot));
+      await runDbAction(`Backup "${file.name}" imported successfully.`, () => onImportDb(snapshot));
     } catch (error) {
       setDbStatus('error');
       setDbMessage(error instanceof Error ? error.message : 'Import DB failed');
@@ -471,7 +471,7 @@ export function SettingsModal({
 
   const formattedLastSync = lastSyncedAt
     ? new Date(lastSyncedAt).toLocaleString()
-    : 'Aucune synchronisation confirmée pour le moment.';
+    : 'No successful sync has been confirmed yet.';
 
   return (
     <>
@@ -484,7 +484,7 @@ export function SettingsModal({
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-semibold flex items-center gap-3 dark:text-white">
               <Settings className="w-6 h-6 text-blue-500" />
-              Configuration
+              Settings
             </h2>
             <button
               onClick={onClose}
@@ -526,10 +526,10 @@ export function SettingsModal({
               <div className="p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-900/20 border border-amber-200/70 dark:border-amber-700/40">
                 <div className="flex items-center gap-2 mb-2">
                   <Database className="w-4 h-4 text-amber-600 dark:text-amber-300" />
-                  <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">Source de vérité: `DB.json`</h3>
+                  <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">Source of truth: `DB.json`</h3>
                 </div>
                 <p className="text-xs text-amber-800/90 dark:text-amber-300/90 leading-relaxed">
-                  Les informations de connexion, les conversations et les préférences durables sont sauvegardées côté backend. Cette section permet d&apos;exporter, d&apos;importer et de réaligner l&apos;interface avec la dernière version de la base.
+                  Connection details, conversations, and durable preferences are saved on the backend. Use this section to export, import, and realign the interface with the latest database version.
                 </p>
               </div>
 
@@ -569,7 +569,7 @@ export function SettingsModal({
 
               <div className="p-4 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-2">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Dernière synchro DB</span>
+                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Latest DB sync</span>
                   <span className="text-xs text-gray-500 dark:text-gray-400 text-right">{formattedLastSync}</span>
                 </div>
                 {dbStatus === 'success' && (
@@ -592,13 +592,13 @@ export function SettingsModal({
               <div className="p-4 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-3">
                 <div className="flex items-center gap-2">
                   <Key className="w-4 h-4 text-amber-600 dark:text-amber-300" />
-                  <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Protection de l&apos;accès configuration</h3>
+                  <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Settings access protection</h3>
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-                  Le bouton discret de la landing page demande ce mot de passe avant d&apos;ouvrir les paramètres. Valeur par défaut: <span className="font-mono">MM@2026</span>.
+                  The discreet button on the landing page asks for this password before opening Settings. Default value: <span className="font-mono">MM@2026</span>.
                 </p>
                 <div>
-                  <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Mot de passe d&apos;accès</label>
+                  <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Access password</label>
                   <input
                     type="password"
                     value={localConfig.settingsAccessPassword}
@@ -625,11 +625,11 @@ export function SettingsModal({
                   <Plus className="w-3.5 h-3.5" /> Add Tool
                 </button>
               </div>
-              <p className="text-xs text-gray-500 dark:text-gray-400 -mt-3">Ces outils apparaissent dans le dropdown du bouton MCP dans l'interface de chat.</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 -mt-3">These tools appear in the MCP button dropdown inside the chat interface.</p>
 
               {(localConfig.mcpTools ?? []).length === 0 && (
                 <div className="text-center py-8 text-sm text-gray-400 dark:text-gray-500 border border-dashed border-gray-200 dark:border-gray-700 rounded-xl">
-                  Aucun outil MCP. Cliquez sur « Add Tool » pour en ajouter.
+                  No MCP tools yet. Click "Add Tool" to create one.
                 </div>
               )}
 
@@ -651,7 +651,7 @@ export function SettingsModal({
                                 setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
                               }}
                               className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
-                              placeholder="Mon outil MCP"
+                              placeholder="My MCP tool"
                             />
                           </div>
                           <div>
@@ -824,7 +824,7 @@ export function SettingsModal({
                     className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
                     placeholder="https://docs.example.com"
                   />
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Lien ouvert au clic sur « Documentation » de la page d'accueil. Laissez vide pour masquer le bouton.</p>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">This link opens when the user clicks "Documentation" on the home page. Leave it empty to hide the button.</p>
                 </div>
 
                 <div>
@@ -1101,7 +1101,7 @@ export function SettingsModal({
                       </button>
                     </div>
                     <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                      Base URL (ex: <code>http://host/v1</code>) ou URL complète se terminant par <code>/embeddings</code> (ex: <code>http://host/v1/openai/embeddings</code>).
+                      Base URL (for example <code>http://host/v1</code>) or a full URL ending with <code>/embeddings</code> (for example <code>http://host/v1/openai/embeddings</code>).
                     </p>
                     <label className="flex items-center gap-2 mt-2 cursor-pointer select-none w-fit">
                       <input
@@ -1110,7 +1110,7 @@ export function SettingsModal({
                         onChange={(e) => setLocalConfig({ ...localConfig, embeddingVerifySsl: e.target.checked })}
                         className="w-4 h-4 rounded text-blue-500 focus:ring-blue-500"
                       />
-                      <span className="text-xs text-gray-600 dark:text-gray-400">Vérifier le certificat SSL</span>
+                      <span className="text-xs text-gray-600 dark:text-gray-400">Verify SSL certificate</span>
                     </label>
                     {embedTestStatus === 'success' && <p className="text-emerald-600 text-xs mt-2 flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/> {embedTestMessage}</p>}
                     {embedTestStatus === 'error' && <p className="text-red-600 text-xs mt-2 flex items-center gap-1"><XCircle className="w-3 h-3"/> {embedTestMessage}</p>}

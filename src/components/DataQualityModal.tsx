@@ -397,6 +397,9 @@ export function DataQualityModal({
         </div>
 
         <div className="flex items-center justify-end gap-3 px-6 py-5 border-t border-gray-200/70 dark:border-gray-800/80 bg-white/70 dark:bg-black/10">
+          <div className="mr-auto text-xs text-gray-500 dark:text-gray-400">
+            Review the configuration, then launch the agent from here. The final report will be posted back into the chat.
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -410,7 +413,7 @@ export function DataQualityModal({
             disabled={isBusy || isLoadingMetadata || !selectedTable || selectedColumns.length === 0}
             className="px-4 py-2 rounded-2xl bg-black text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {isBusy ? "Running..." : "Run analysis"}
+            {isBusy ? "Launching..." : "Launch"}
           </button>
         </div>
       </div>

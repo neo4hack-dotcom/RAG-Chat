@@ -3008,6 +3008,75 @@ def execute_file_manager_tool(tool_name: str, tool_input: dict[str, Any], base_p
     return handler(**safe_input)
 
 
+def _try_extract_file_export_payload(user_message: str) -> Optional[dict[str, Any]]:
+    text = str(user_message or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = extract_json_object(text)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("__file_export__"):
+        return None
+
+    export_format = str(parsed.get("format") or "").strip().lower()
+    if export_format == "xls":
+        export_format = "xlsx"
+    if export_format not in {"csv", "tsv", "xlsx"}:
+        raise ValueError("Unsupported file export format. Use `csv`, `tsv`, or `xlsx`.")
+
+    path = str(parsed.get("path") or "").strip()
+    if export_format == "xlsx" and path.lower().endswith(".xls"):
+        path = path[:-4] + ".xlsx"
+    headers = [str(item) for item in (parsed.get("headers") or []) if str(item).strip()]
+    raw_rows = parsed.get("rows") or []
+    if not isinstance(raw_rows, list):
+        raise ValueError("The file export payload must provide `rows` as a list.")
+    rows = []
+    for row in raw_rows:
+        if isinstance(row, list):
+            rows.append(list(row))
+        elif isinstance(row, dict) and headers:
+            rows.append([row.get(header) for header in headers])
+    return {
+        "format": export_format,
+        "path": path,
+        "sheet_name": str(parsed.get("sheet_name") or parsed.get("sheetName") or "Results").strip() or "Results",
+        "headers": headers,
+        "rows": rows,
+        "source_sql": str(parsed.get("source_sql") or parsed.get("sourceSql") or "").strip(),
+        "source_request": str(parsed.get("source_request") or parsed.get("sourceRequest") or "").strip(),
+    }
+
+
+def _serialize_delimited_rows(headers: list[str], rows: list[list[Any]], delimiter: str) -> str:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=delimiter)
+    if headers:
+        writer.writerow(headers)
+    for row in rows:
+        writer.writerow([
+            json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
+            for value in row
+        ])
+    return buffer.getvalue()
+
+
+def _file_export_answer(result: dict[str, Any], payload: dict[str, Any]) -> str:
+    preview = result.get("preview") or ""
+    answer = (
+        "## File Export\n"
+        f"{result['summary']}\n\n"
+        f"- **Format:** `{payload.get('format')}`\n"
+        f"- **Target:** `{payload.get('path')}`"
+    )
+    if payload.get("source_sql"):
+        answer += "\n- **Source SQL available:** yes"
+    if preview:
+        answer += f"\n\n## Preview\n{preview}"
+    return answer
+
+
 async def plan_file_manager_step(
     user_message: str,
     history: list[dict[str, Any]],
@@ -3172,6 +3241,7 @@ def _default_manager_agent_state() -> dict[str, Any]:
         "active_delegate": None,
         "last_routing_reason": "",
         "last_delegate_label": "",
+        "pending_pipeline": None,
     }
 
 
@@ -3207,6 +3277,33 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
     return resolved
 
 
+def _normalize_manager_pending_pipeline(payload: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    kind = str(payload.get("kind") or "").strip()
+    stage = str(payload.get("stage") or "").strip()
+    next_delegate = _normalize_manager_delegate_role(
+        payload.get("next_delegate") or payload.get("nextDelegate"),
+        allow_manager=False,
+    )
+    export_format = str(payload.get("export_format") or payload.get("exportFormat") or "").strip().lower() or None
+    if kind != "clickhouse_to_file" or next_delegate != "file_management":
+        return None
+    if stage not in {"awaiting_clickhouse", "awaiting_export_details"}:
+        stage = "awaiting_clickhouse"
+    if export_format not in {"csv", "tsv", "xlsx", None}:
+        export_format = None
+    return {
+        "kind": "clickhouse_to_file",
+        "stage": stage,
+        "next_delegate": "file_management",
+        "export_format": export_format,
+        "target_path": str(payload.get("target_path") or payload.get("targetPath") or "").strip(),
+        "source_request": str(payload.get("source_request") or payload.get("sourceRequest") or "").strip(),
+        "reason": str(payload.get("reason") or "").strip(),
+    }
+
+
 def _normalize_manager_agent_state(payload: Optional[dict]) -> dict[str, Any]:
     state = _default_manager_agent_state()
     if not isinstance(payload, dict):
@@ -3221,6 +3318,9 @@ def _normalize_manager_agent_state(payload: Optional[dict]) -> dict[str, Any]:
     state["last_delegate_label"] = str(
         payload.get("last_delegate_label") or payload.get("lastDelegateLabel") or ""
     ).strip()
+    state["pending_pipeline"] = _normalize_manager_pending_pipeline(
+        payload.get("pending_pipeline") or payload.get("pendingPipeline")
+    )
     return state
 
 
@@ -3246,6 +3346,7 @@ def _manager_specialist_state_summary(
     clickhouse_state: dict[str, Any],
     file_manager_state: dict[str, Any],
     data_quality_state: dict[str, Any],
+    manager_state: Optional[dict[str, Any]] = None,
 ) -> str:
     clickhouse_summary = {
         "stage": clickhouse_state.get("stage") or "idle",
@@ -3269,12 +3370,229 @@ def _manager_specialist_state_summary(
     }
     return json.dumps(
         {
+            "manager": {
+                "pending_pipeline": (manager_state or {}).get("pending_pipeline"),
+            },
             "clickhouse": clickhouse_summary,
             "file_management": file_summary,
             "data_quality_tables": data_quality_summary,
         },
         ensure_ascii=False,
         indent=2,
+    )
+
+
+MANAGER_EXPORT_FORMAT_OPTIONS = ["CSV (.csv)", "Excel (.xlsx)"]
+MANAGER_EXPORT_KEYWORDS = [
+    "export",
+    "save",
+    "write",
+    "create file",
+    "create csv",
+    "create excel",
+    "generate csv",
+    "generate excel",
+    "download csv",
+    "download excel",
+    "sauvegarder",
+    "exporter",
+    "creer un csv",
+    "creer un excel",
+    "genere un csv",
+    "genere un excel",
+]
+
+
+def _extract_manager_export_format(user_message: str) -> Optional[str]:
+    normalized = normalize_intent_text(user_message)
+    if ".csv" in normalized or re.search(r"\bcsv\b", normalized):
+        return "csv"
+    if ".tsv" in normalized or re.search(r"\btsv\b", normalized):
+        return "tsv"
+    if any(token in normalized for token in [".xlsx", ".xls"]) or re.search(r"\bexcel\b", normalized):
+        return "xlsx"
+    return None
+
+
+def _extract_manager_export_path(user_message: str, export_format: Optional[str] = None) -> str:
+    lowered = user_message.strip()
+    quoted_match = re.search(r'["\']([^"\']+\.(?:csv|tsv|xlsx|xls))["\']', lowered, flags=re.IGNORECASE)
+    if quoted_match:
+        candidate = quoted_match.group(1).strip()
+        if candidate.lower().endswith(".xls"):
+            return candidate[:-4] + ".xlsx"
+        return candidate
+
+    patterns = [
+        r'(?:named|called|as|to|into|in|vers|dans|nomme|nommé|appele|appelé)\s+([A-Za-z0-9_./\\\\-]+\.(?:csv|tsv|xlsx|xls))',
+    ]
+    extension = f".{export_format}" if export_format in {"csv", "tsv", "xlsx"} else ""
+    for pattern in patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = match.group(1).strip()
+        if not candidate:
+            continue
+        if extension and "." not in Path(candidate).name:
+            candidate = f"{candidate}{extension}"
+        if re.search(r"\.(csv|tsv|xlsx|xls)$", candidate, flags=re.IGNORECASE):
+            if candidate.lower().endswith(".xls"):
+                return candidate[:-4] + ".xlsx"
+            return candidate
+
+    matches = re.findall(r'([A-Za-z0-9_./\\\\-]+\.(?:csv|tsv|xlsx|xls))', lowered, flags=re.IGNORECASE)
+    if matches:
+        candidate = matches[-1].strip().strip('"').strip("'")
+        if candidate.lower().endswith(".xls"):
+            return candidate[:-4] + ".xlsx"
+        return candidate
+    return ""
+
+
+def _extract_clickhouse_file_export_pipeline(user_message: str) -> Optional[dict[str, Any]]:
+    normalized = normalize_intent_text(user_message)
+    has_export_signal = any(token in normalized for token in MANAGER_EXPORT_KEYWORDS) or any(
+        token in normalized for token in ["csv", "tsv", "excel", "xlsx", "xls"]
+    )
+    if not has_export_signal:
+        return None
+
+    export_format = _extract_manager_export_format(user_message)
+    target_path = _extract_manager_export_path(user_message, export_format)
+    return {
+        "kind": "clickhouse_to_file",
+        "stage": "awaiting_clickhouse",
+        "next_delegate": "file_management",
+        "export_format": export_format,
+        "target_path": target_path,
+        "source_request": user_message.strip(),
+        "reason": "The user wants the ClickHouse result to be exported as a file after the query runs.",
+    }
+
+
+def _manager_pending_pipeline_requires_details(pipeline: Optional[dict[str, Any]]) -> bool:
+    if not isinstance(pipeline, dict):
+        return False
+    return not pipeline.get("export_format") or not pipeline.get("target_path")
+
+
+def _manager_export_details_prompt(pipeline: dict[str, Any]) -> str:
+    missing_format = not pipeline.get("export_format")
+    missing_path = not pipeline.get("target_path")
+    if missing_format and missing_path:
+        return append_choice_markdown(
+            (
+                "## File Export Details Needed\n"
+                "I already have the ClickHouse result. To create the export file, I still need the output format and the target file name or path."
+            ),
+            "Format",
+            "Choose the file format first.",
+            MANAGER_EXPORT_FORMAT_OPTIONS,
+        ) + "\n\nThen tell me the target file name or full path, for example `exports/result.csv`."
+    if missing_format:
+        return append_choice_markdown(
+            (
+                "## File Export Details Needed\n"
+                f"I already have the ClickHouse result and the target path `{pipeline.get('target_path')}`."
+            ),
+            "Format",
+            "Choose the file format for the export.",
+            MANAGER_EXPORT_FORMAT_OPTIONS,
+        )
+    return (
+        "## File Export Details Needed\n"
+        f"I already have the ClickHouse result and the requested format **{pipeline.get('export_format')}**.\n\n"
+        "Please tell me the target file name or full path, for example `exports/result."
+        f"{pipeline.get('export_format')}`."
+    )
+
+
+def _manager_update_export_pipeline_from_reply(
+    pipeline: dict[str, Any],
+    user_message: str,
+) -> dict[str, Any]:
+    updated = dict(pipeline)
+    format_choice = resolve_user_choice(user_message, MANAGER_EXPORT_FORMAT_OPTIONS)
+    if format_choice == "CSV (.csv)":
+        updated["export_format"] = "csv"
+    elif format_choice == "Excel (.xlsx)":
+        updated["export_format"] = "xlsx"
+    elif not updated.get("export_format"):
+        updated["export_format"] = _extract_manager_export_format(user_message)
+
+    detected_path = _extract_manager_export_path(user_message, updated.get("export_format"))
+    if detected_path:
+        updated["target_path"] = detected_path
+
+    if updated.get("export_format") and updated.get("target_path"):
+        updated["stage"] = "awaiting_clickhouse"
+    else:
+        updated["stage"] = "awaiting_export_details"
+    return updated
+
+
+def _manager_export_headers_and_rows(clickhouse_state: dict[str, Any]) -> tuple[list[str], list[list[Any]]]:
+    headers = [
+        str(item.get("name") or "").strip()
+        for item in (clickhouse_state.get("last_result_meta") or [])
+        if str(item.get("name") or "").strip()
+    ]
+    rows_data = clickhouse_state.get("last_result_rows") or []
+    if not headers and rows_data:
+        headers = [str(key) for key in rows_data[0].keys()]
+
+    def _cell(value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return value
+
+    rows = [
+        [_cell(row.get(header)) for header in headers]
+        for row in rows_data
+    ]
+    return headers, rows
+
+
+def _build_file_export_payload_from_clickhouse(
+    pipeline: dict[str, Any],
+    clickhouse_state: dict[str, Any],
+) -> dict[str, Any]:
+    headers, rows = _manager_export_headers_and_rows(clickhouse_state)
+    export_format = pipeline.get("export_format") or "csv"
+    target_path = str(pipeline.get("target_path") or "").strip()
+    if export_format == "xlsx" and target_path.lower().endswith(".xls"):
+        target_path = target_path[:-4] + ".xlsx"
+    return {
+        "__file_export__": True,
+        "format": export_format,
+        "path": target_path,
+        "sheet_name": "Results",
+        "headers": headers,
+        "rows": rows,
+        "source_sql": str(clickhouse_state.get("last_sql") or "").strip(),
+        "source_request": str(pipeline.get("source_request") or "").strip(),
+    }
+
+
+def _manager_compose_chained_answer(
+    primary_answer: str,
+    secondary_answer: str,
+    secondary_label: str,
+) -> str:
+    first = str(primary_answer or "").strip()
+    second = str(secondary_answer or "").strip()
+    if not first:
+        return second
+    if not second:
+        return first
+    return (
+        f"{first}\n\n---\n\n"
+        f"## {secondary_label}\n"
+        "I then continued with the next specialist to complete the rest of the same request.\n\n"
+        f"{second}"
     )
 
 
@@ -3287,6 +3605,7 @@ def _heuristic_manager_delegate(
 ) -> Optional[tuple[str, str]]:
     normalized = normalize_intent_text(user_message)
     active_delegate = manager_state.get("active_delegate")
+    pending_pipeline = manager_state.get("pending_pipeline")
 
     if active_delegate == "file_management" and _file_manager_state_needs_followup(file_manager_state):
         return "file_management", "Continuing the active file-management confirmation flow."
@@ -3306,6 +3625,13 @@ def _heuristic_manager_delegate(
         return "clickhouse_query", "The user is continuing a ClickHouse clarification step."
     if _data_quality_state_needs_followup(data_quality_state):
         return "data_quality_tables", "The user is continuing a data-quality guided step."
+
+    if (
+        isinstance(pending_pipeline, dict)
+        and pending_pipeline.get("kind") == "clickhouse_to_file"
+        and pending_pipeline.get("stage") == "awaiting_export_details"
+    ):
+        return "manager", "The manager is waiting for the remaining file-export details before handing off to File management."
 
     if clickhouse_state.get("last_result_rows") and is_chart_followup_request(user_message):
         return "clickhouse_query", "The user is continuing the latest ClickHouse result with a chart follow-up."
@@ -3484,6 +3810,10 @@ def _heuristic_manager_delegate(
     file_hit = file_creation_or_edit_hit or any(token in normalized for token in file_tokens)
     clickhouse_hit = any(token in normalized for token in clickhouse_tokens)
     data_quality_hit = any(token in normalized for token in data_quality_tokens)
+    export_pipeline = _extract_clickhouse_file_export_pipeline(user_message)
+
+    if export_pipeline and clickhouse_hit:
+        return "clickhouse_query", "The request needs a ClickHouse query first and then a file export from the query result."
 
     if data_quality_hit and not file_hit:
         return "data_quality_tables", "The request is explicitly about table profiling or data-quality analysis."
@@ -3837,17 +4167,17 @@ async def summarize_clickhouse_result(
     prompt = f"""
 You are summarizing a ClickHouse query result for an end user.
 Write the full answer in English and keep it concise.
-Use exactly these sections in markdown:
-## Answer
-One short, precise answer.
+The tone must be business-facing and functional, not technical.
 
-## SQL
-```sql
-{executed_sql}
-```
-
-## Reasoning
-One short explanation of how the query was chosen.
+Formatting rules:
+- Return Markdown only.
+- Write only the business result section body, with no title.
+- Prefer either one short paragraph or 2 to 4 flat bullet points, depending on what is clearer.
+- Highlight the most important values, entities, dates, or thresholds with **bold**.
+- Focus on what the result means for the user.
+- Do not explain SQL generation, schema inspection, or tool usage.
+- Do not include headings, SQL blocks, reasoning sections, or code fences.
+- If the result is empty, say so clearly in one short sentence and give the most likely interpretation.
 
 Context:
 - User request: {user_request}
@@ -3865,6 +4195,67 @@ Context:
         llm_provider,
         llm_api_key,
     )
+
+
+def _clean_clickhouse_summary_markdown(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return "No clear business summary could be generated, but the query completed successfully."
+
+    cleaned = re.sub(r"^\s*#{1,6}\s*(answer|result|summary|executive summary)\s*\n+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(?is)\n*#{1,6}\s*sql\b[\s\S]*$", "", cleaned)
+    cleaned = re.sub(r"(?is)\n*#{1,6}\s*reasoning\b[\s\S]*$", "", cleaned)
+    cleaned = re.sub(r"(?is)```sql[\s\S]*?```", "", cleaned)
+    cleaned = re.sub(r"(?is)```[\s\S]*?```", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    return cleaned or "No clear business summary could be generated, but the query completed successfully."
+
+
+def _build_clickhouse_sql_section(executed_sqls: list[str]) -> str:
+    sql_statements = []
+    seen = set()
+    for statement in executed_sqls:
+        normalized = str(statement or "").strip()
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        sql_statements.append(normalized)
+
+    if not sql_statements:
+        return ""
+
+    if len(sql_statements) == 1:
+        return f"## Executed SQL\n```sql\n{sql_statements[0]}\n```"
+
+    blocks = []
+    for index, statement in enumerate(sql_statements, start=1):
+        blocks.append(f"### Query {index}\n```sql\n{statement}\n```")
+    return "## Executed SQL\n\n" + "\n\n".join(blocks)
+
+
+def build_clickhouse_response_markdown(
+    result_markdown: str,
+    executed_sqls: list[str],
+    middle_sections: Optional[list[str]] = None,
+) -> str:
+    sections = [
+        "## Result",
+        _clean_clickhouse_summary_markdown(result_markdown),
+    ]
+
+    for section in middle_sections or []:
+        normalized = str(section or "").strip()
+        if normalized:
+            sections.append(normalized)
+
+    sql_section = _build_clickhouse_sql_section(executed_sqls)
+    if sql_section:
+        sections.append(sql_section)
+
+    return "\n\n".join(sections)
 
 
 # ── CrewAI planning helpers ───────────────────────────────────────────────────
@@ -4580,7 +4971,7 @@ async def _run_clickhouse_planning_agent(
         generated["reasoning"] = repaired["reasoning"] or generated["reasoning"]
         result = await execute_clickhouse_sql(clickhouse, sql)
 
-    content = await summarize_clickhouse_result(
+    result_summary = await summarize_clickhouse_result(
         request_text,
         sql,
         generated["reasoning"],
@@ -4591,6 +4982,7 @@ async def _run_clickhouse_planning_agent(
         llm_config["llm_provider"],
         llm_config["llm_api_key"],
     )
+    content = build_clickhouse_response_markdown(result_summary, [sql])
     return {"agent": "clickhouse_query", "status": "success", "content": content}
 
 
@@ -5011,6 +5403,7 @@ class ManagerAgentStateModel(BaseModel):
     active_delegate: Optional[str] = None
     last_routing_reason: str = ""
     last_delegate_label: str = ""
+    pending_pipeline: Optional[dict] = None
 
 
 class FileManagerAgentConfigModel(BaseModel):
@@ -5438,6 +5831,7 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
     state = _normalize_file_manager_state(req.agent_state.model_dump())
     config = _normalize_file_manager_config(req.file_manager_config.model_dump())
     normalized_choice = normalize_choice(user_message).lower()
+    export_payload = _try_extract_file_export_payload(user_message)
 
     if not user_message:
         return {
@@ -5453,6 +5847,111 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
                     "title": "Ready for file operations",
                     "status": "success",
                     "details": "The agent is ready to reason over filesystem tasks with tool calls.",
+                }
+                ],
+            }
+
+    if export_payload:
+        if not export_payload.get("path"):
+            return {
+                "answer": (
+                    "## File Export\n"
+                    "I have the dataset ready, but I still need the target file name or path.\n\n"
+                    f"Requested format: **{export_payload.get('format')}**"
+                ),
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "fm-export-path",
+                        "title": "Waiting for export path",
+                        "status": "running",
+                        "details": "The export payload is ready, but the target file path is missing.",
+                    }
+                ],
+            }
+
+        try:
+            if export_payload["format"] in {"csv", "tsv"}:
+                content = _serialize_delimited_rows(
+                    export_payload.get("headers") or [],
+                    export_payload.get("rows") or [],
+                    "\t" if export_payload["format"] == "tsv" else ",",
+                )
+                target = _resolve_agent_path(export_payload["path"], config["basePath"])
+                result = (
+                    write_file_tool(export_payload["path"], content, confirmed=False, base_path=config["basePath"])
+                    if target.exists()
+                    else create_file_tool(export_payload["path"], content, base_path=config["basePath"])
+                )
+            else:
+                target = _resolve_agent_path(export_payload["path"], config["basePath"])
+                result = (
+                    write_excel_sheet_tool(
+                        export_payload["path"],
+                        export_payload.get("sheet_name") or "Results",
+                        headers=export_payload.get("headers") or [],
+                        rows=export_payload.get("rows") or [],
+                        confirmed=False,
+                        base_path=config["basePath"],
+                    )
+                    if target.exists()
+                    else create_excel_file_tool(
+                        export_payload["path"],
+                        sheet_name=export_payload.get("sheet_name") or "Results",
+                        headers=export_payload.get("headers") or [],
+                        rows=export_payload.get("rows") or [],
+                        base_path=config["basePath"],
+                    )
+                )
+        except Exception as exc:
+            return {
+                "answer": f"## File Export\nI could not prepare the export.\n\n```text\n{exc}\n```",
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "fm-export-error",
+                        "title": "Export failed",
+                        "status": "error",
+                        "details": str(exc),
+                    }
+                ],
+            }
+
+        state["last_tool_result"] = result["summary"]
+        state["last_visited_path"] = result.get("visited_path") or state.get("last_visited_path", "")
+        if result.get("requires_confirmation"):
+            pending_action = dict(result.get("pending_action") or {})
+            state["pending_confirmation"] = {
+                "tool_name": pending_action.get("tool_name"),
+                "tool_input": pending_action.get("tool_input") or {},
+                "preview": result.get("preview") or "",
+                "summary": result.get("summary") or "",
+                "requested_at": _utc_now_iso(),
+            }
+            answer, actions = _file_manager_confirmation_answer(state)
+            return {
+                "answer": answer,
+                "actions": actions,
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "fm-export-confirm",
+                        "title": "Confirmation required",
+                        "status": "running",
+                        "details": result["summary"],
+                    }
+                ],
+            }
+
+        return {
+            "answer": _file_export_answer(result, export_payload),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "fm-export-dataset",
+                    "title": "Exported ClickHouse result",
+                    "status": "success",
+                    "details": result["summary"],
                 }
             ],
         }
@@ -5772,10 +6271,23 @@ async def chat_data_quality_agent(req: DataQualityAgentRequest):
                 "details": "Built the final Markdown report in English.",
             }
         )
+        table_slug = re.sub(r"[^a-z0-9]+", "-", str(execution_state.get("table") or "data-quality").strip().lower()).strip("-") or "data-quality"
         return {
             "answer": execution_state["final_answer"],
             "agent_state": execution_state,
             "steps": steps,
+            "actions": [
+                {
+                    "id": "dq-export-pdf",
+                    "label": "Export Summary PDF",
+                    "actionType": "export_data_quality_pdf",
+                    "variant": "secondary",
+                    "payload": {
+                        "fileName": f"data-quality-{table_slug}.pdf",
+                        "title": f"Data Quality Summary - {execution_state.get('table') or 'Table'}",
+                    },
+                }
+            ],
         }
 
     start_over_requested = any(
@@ -6528,6 +7040,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
     data_quality_state = _normalize_data_quality_state(req.data_quality_state.model_dump())
     file_manager_config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+    pending_pipeline = manager_state.get("pending_pipeline")
 
     if not user_message:
         manager_state["active_delegate"] = None
@@ -6553,18 +7066,101 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             ],
         }
 
-    routing = await analyze_manager_routing(
-        user_message,
-        req.history,
-        manager_state,
-        clickhouse_state,
-        file_manager_state,
-        data_quality_state,
-        req.llm_base_url,
-        req.llm_model,
-        req.llm_provider,
-        req.llm_api_key,
-    )
+    async def _delegate_file_manager(message: str) -> dict[str, Any]:
+        return await chat_file_manager_agent(
+            FileManagerAgentRequest(
+                message=message,
+                history=req.history,
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_api_key=req.llm_api_key,
+                llm_provider=req.llm_provider,
+                agent_state=FileManagerAgentStateModel(**file_manager_state),
+                file_manager_config=FileManagerAgentConfigModel(
+                    base_path=file_manager_config["basePath"],
+                    max_iterations=file_manager_config["maxIterations"],
+                    system_prompt=file_manager_config["systemPrompt"],
+                ),
+            )
+        )
+
+    if (
+        isinstance(pending_pipeline, dict)
+        and pending_pipeline.get("kind") == "clickhouse_to_file"
+        and pending_pipeline.get("stage") == "awaiting_export_details"
+    ):
+        if is_negative_response(user_message) or normalize_choice(user_message).lower() in {"cancel", "stop", "never mind"}:
+            manager_state["pending_pipeline"] = None
+            manager_state["active_delegate"] = None
+            return {
+                "answer": "## Agent Manager\nThe pending file export was cancelled.",
+                "agent_state": {
+                    "manager": manager_state,
+                    "clickhouse": clickhouse_state,
+                    "fileManager": file_manager_state,
+                    "dataQuality": data_quality_state,
+                },
+                "steps": [
+                    {
+                        "id": "manager-export-cancelled",
+                        "title": "Cancelled pending export",
+                        "status": "success",
+                        "details": "The user cancelled the second step of the ClickHouse-to-file workflow.",
+                    }
+                ],
+            }
+
+        pending_pipeline = _manager_update_export_pipeline_from_reply(pending_pipeline, user_message)
+        manager_state["pending_pipeline"] = pending_pipeline
+        if _manager_pending_pipeline_requires_details(pending_pipeline):
+            manager_state["active_delegate"] = None
+            return {
+                "answer": _manager_export_details_prompt(pending_pipeline),
+                "agent_state": {
+                    "manager": manager_state,
+                    "clickhouse": clickhouse_state,
+                    "fileManager": file_manager_state,
+                    "dataQuality": data_quality_state,
+                },
+                "steps": [
+                    {
+                        "id": "manager-export-details",
+                        "title": "Waiting for export details",
+                        "status": "running",
+                        "details": "The manager still needs the target format or path before delegating to File management.",
+                    }
+                ],
+            }
+
+        delegate = "file_management"
+        routing = {
+            "delegate": "file_management",
+            "reasoning": "The manager now has the remaining export details and can continue with File management.",
+            "handoff_message": json.dumps(
+                _build_file_export_payload_from_clickhouse(pending_pipeline, clickhouse_state),
+                ensure_ascii=False,
+            ),
+        }
+    else:
+        routing = await analyze_manager_routing(
+            user_message,
+            req.history,
+            manager_state,
+            clickhouse_state,
+            file_manager_state,
+            data_quality_state,
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+        if routing["delegate"] == "clickhouse_query":
+            export_pipeline = _extract_clickhouse_file_export_pipeline(user_message)
+            if export_pipeline and not manager_state.get("pending_pipeline"):
+                manager_state["pending_pipeline"] = export_pipeline
+        elif routing["delegate"] != "file_management":
+            manager_state["pending_pipeline"] = None
+
     delegate = routing["delegate"]
     manager_state["last_routing_reason"] = routing["reasoning"]
     manager_state["last_delegate_label"] = _manager_specialist_label(delegate)
@@ -6580,6 +7176,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
 
     if delegate == "manager":
         manager_state["active_delegate"] = None
+        manager_state["pending_pipeline"] = None
         answer = await _run_manager_direct_response(
             req.history,
             req.llm_base_url,
@@ -6610,7 +7207,11 @@ async def chat_manager_agent(req: ManagerAgentRequest):
         if delegate == "clickhouse_query":
             delegated = await chat_clickhouse_agent(
                 ClickHouseAgentRequest(
-                    message=routing["handoff_message"],
+                    message=(
+                        routing["handoff_message"] + "\n\nDo not start a chart flow for this turn. Return the text result only."
+                        if manager_state.get("pending_pipeline")
+                        else routing["handoff_message"]
+                    ),
                     history=req.history,
                     clickhouse=req.clickhouse,
                     llm_base_url=req.llm_base_url,
@@ -6629,26 +7230,12 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                 "clickhouse_query" if _clickhouse_state_needs_followup(clickhouse_state) else None
             )
         elif delegate == "file_management":
-            delegated = await chat_file_manager_agent(
-                FileManagerAgentRequest(
-                    message=routing["handoff_message"],
-                    history=req.history,
-                    llm_base_url=req.llm_base_url,
-                    llm_model=req.llm_model,
-                    llm_api_key=req.llm_api_key,
-                    llm_provider=req.llm_provider,
-                    agent_state=FileManagerAgentStateModel(**file_manager_state),
-                    file_manager_config=FileManagerAgentConfigModel(
-                        base_path=file_manager_config["basePath"],
-                        max_iterations=file_manager_config["maxIterations"],
-                        system_prompt=file_manager_config["systemPrompt"],
-                    ),
-                )
-            )
+            delegated = await _delegate_file_manager(routing["handoff_message"])
             file_manager_state = _normalize_file_manager_state(delegated.get("agent_state"))
             manager_state["active_delegate"] = (
                 "file_management" if _file_manager_state_needs_followup(file_manager_state) else None
             )
+            manager_state["pending_pipeline"] = None
         elif delegate == "data_quality_tables":
             delegated = await chat_data_quality_agent(
                 DataQualityAgentRequest(
@@ -6693,6 +7280,106 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             ),
         }
     ]
+
+    if (
+        delegate == "clickhouse_query"
+        and isinstance(manager_state.get("pending_pipeline"), dict)
+        and manager_state["pending_pipeline"].get("kind") == "clickhouse_to_file"
+        and not manager_state.get("active_delegate")
+    ):
+        pending_pipeline = dict(manager_state["pending_pipeline"])
+        if _manager_pending_pipeline_requires_details(pending_pipeline):
+            pending_pipeline["stage"] = "awaiting_export_details"
+            manager_state["pending_pipeline"] = pending_pipeline
+            manager_steps.append(
+                {
+                    "id": "manager-await-export-details",
+                    "title": "Waiting for export details",
+                    "status": "running",
+                    "details": "The ClickHouse query is complete, but the manager still needs the export format or target path.",
+                }
+            )
+            return {
+                "answer": _manager_compose_chained_answer(
+                    delegated.get("answer") or "",
+                    _manager_export_details_prompt(pending_pipeline),
+                    "File Export",
+                ),
+                "actions": delegated.get("actions"),
+                "chart": delegated.get("chart"),
+                "agent_state": {
+                    "manager": manager_state,
+                    "clickhouse": clickhouse_state,
+                    "fileManager": file_manager_state,
+                    "dataQuality": data_quality_state,
+                },
+                "steps": manager_steps + specialist_steps,
+            }
+
+        try:
+            chained = await _delegate_file_manager(
+                json.dumps(
+                    _build_file_export_payload_from_clickhouse(pending_pipeline, clickhouse_state),
+                    ensure_ascii=False,
+                )
+            )
+            file_manager_state = _normalize_file_manager_state(chained.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "file_management" if _file_manager_state_needs_followup(file_manager_state) else None
+            )
+            manager_state["pending_pipeline"] = None
+            chained_steps = _prefix_agent_steps(chained.get("steps") or [], "file_management")
+            manager_steps.append(
+                {
+                    "id": "manager-chain-file-export",
+                    "title": "Continued to File management",
+                    "status": "running" if manager_state.get("active_delegate") else "success",
+                    "details": "The manager continued the same request by exporting the ClickHouse result through File management.",
+                }
+            )
+            return {
+                "answer": _manager_compose_chained_answer(
+                    delegated.get("answer") or "",
+                    chained.get("answer") or "",
+                    "File Export",
+                ),
+                "actions": chained.get("actions") or delegated.get("actions"),
+                "chart": delegated.get("chart") or chained.get("chart"),
+                "agent_state": {
+                    "manager": manager_state,
+                    "clickhouse": clickhouse_state,
+                    "fileManager": file_manager_state,
+                    "dataQuality": data_quality_state,
+                },
+                "steps": manager_steps + specialist_steps + chained_steps,
+            }
+        except HTTPException as exc:
+            manager_state["pending_pipeline"] = None
+            manager_state["active_delegate"] = None
+            manager_steps.append(
+                {
+                    "id": "manager-chain-file-export-failed",
+                    "title": "File export failed",
+                    "status": "error",
+                    "details": str(exc.detail),
+                }
+            )
+            return {
+                "answer": _manager_compose_chained_answer(
+                    delegated.get("answer") or "",
+                    f"## File Export\nI could not complete the export step.\n\n```text\n{exc.detail}\n```",
+                    "File Export",
+                ),
+                "actions": delegated.get("actions"),
+                "chart": delegated.get("chart"),
+                "agent_state": {
+                    "manager": manager_state,
+                    "clickhouse": clickhouse_state,
+                    "fileManager": file_manager_state,
+                    "dataQuality": data_quality_state,
+                },
+                "steps": manager_steps + specialist_steps,
+            }
 
     return {
         "answer": delegated.get("answer") or "## Answer\nThe delegated agent completed its turn.",
@@ -6804,7 +7491,10 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     reset_clickhouse_chart_state(state)
                     state.stage = "ready"
                     return {
-                        "answer": "## Answer\nUnderstood. I will keep the latest result in text form only.",
+                        "answer": build_clickhouse_response_markdown(
+                            "I kept the latest result in **text format only**. No chart was created.",
+                            [state.last_sql],
+                        ),
                         "agent_state": dump_clickhouse_agent_state(state),
                         "steps": [
                             {
@@ -6940,9 +7630,12 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                         reset_clickhouse_chart_state(state)
                         state.stage = "ready"
                         return {
-                            "answer": (
-                                "## Answer\nI could not build a usable chart from the latest result because "
-                                "the selected axes do not produce enough numeric points."
+                            "answer": build_clickhouse_response_markdown(
+                                (
+                                    "I could not build a usable chart from the latest result because the selected "
+                                    "axes do not produce enough valid numeric data points."
+                                ),
+                                [state.last_sql],
                             ),
                             "agent_state": dump_clickhouse_agent_state(state),
                             "steps": [
@@ -6956,14 +7649,14 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                         }
 
                     chart_type_label = CHART_TYPE_LABELS.get(state.selected_chart_type, "Chart")
-                    answer = (
-                        "## Answer\n"
-                        f"Here is the {chart_type_label.lower()} for `{state.selected_chart_y}` by `{state.selected_chart_x}`.\n\n"
-                        "## SQL\n"
-                        f"```sql\n{state.last_sql}\n```\n\n"
-                        "## Reasoning\n"
-                        f"I reused the latest ClickHouse result and plotted `{state.selected_chart_y}` against "
-                        f"`{state.selected_chart_x}` with a {chart_type_label.lower()}."
+                    answer = build_clickhouse_response_markdown(
+                        (
+                            f"I created a **{chart_type_label.lower()}** based on the latest query result.\n\n"
+                            f"- **X axis:** `{state.selected_chart_x}`\n"
+                            f"- **Y axis:** `{state.selected_chart_y}`\n"
+                            f"- **Purpose:** make the result easier to read and compare visually"
+                        ),
+                        [state.last_sql],
                     )
                     reset_clickhouse_chart_state(state)
                     state.stage = "ready"
@@ -7292,7 +7985,7 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         result = await execute_clickhouse_sql(req.clickhouse, sql)
 
     original_request = state.pending_request
-    answer = await summarize_clickhouse_result(
+    result_summary = await summarize_clickhouse_result(
         original_request,
         sql,
         generated["reasoning"],
@@ -7303,10 +7996,12 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         req.llm_provider,
         req.llm_api_key,
     )
+    answer = build_clickhouse_response_markdown(result_summary, [sql])
 
     state.last_sql = sql
     state.last_result_meta = result.get("meta", [])
-    state.last_result_rows = result.get("data", [])[:200]
+    export_row_cap = max(1, min(int(req.clickhouse.query_limit or 200), 2000))
+    state.last_result_rows = result.get("data", [])[:export_row_cap]
 
     chart_context = infer_chart_options(state.last_result_meta, state.last_result_rows)
     requested_chart = detect_chart_request(original_request)
@@ -7322,11 +8017,16 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
             )
             prompt = next_chart_prompt(state)
             if prompt:
-                answer = append_choice_markdown(
-                    answer,
-                    prompt["title"],
-                    prompt["prompt"],
-                    prompt["options"],
+                answer = build_clickhouse_response_markdown(
+                    result_summary,
+                    [sql],
+                    [
+                        build_choice_markdown(
+                            prompt["title"],
+                            prompt["prompt"],
+                            prompt["options"],
+                        )
+                    ],
                 )
             else:
                 chart = build_chart(
@@ -7337,11 +8037,16 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                 )
                 if chart:
                     state.stage = "ready"
-                    answer = (
-                        f"{answer}\n\n---\n\n"
-                        "## Visualization\n"
-                        f"I also generated a {CHART_TYPE_LABELS.get(state.selected_chart_type, 'chart').lower()} "
-                        f"for `{state.selected_chart_y}` by `{state.selected_chart_x}`."
+                    answer = build_clickhouse_response_markdown(
+                        result_summary,
+                        [sql],
+                        [
+                            (
+                                "## Visualization\n"
+                                f"I also generated a **{CHART_TYPE_LABELS.get(state.selected_chart_type, 'chart').lower()}** "
+                                f"for `{state.selected_chart_y}` by `{state.selected_chart_x}` to make the result easier to interpret."
+                            )
+                        ],
                     )
                     reset_clickhouse_chart_state(state)
                     return {
@@ -7389,11 +8094,16 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
             state.chart_y_options = chart_context["y_options"]
             state.chart_type_options = chart_context["type_options"]
             state.stage = "awaiting_chart_offer"
-            answer = append_choice_markdown(
-                answer,
-                "Visualization",
-                "This result would work well as a chart. If you want, I can let you choose X, Y, and the chart type.",
-                state.chart_offer_options,
+            answer = build_clickhouse_response_markdown(
+                result_summary,
+                [sql],
+                [
+                    build_choice_markdown(
+                        "Visualization",
+                        "This result would work well as a chart. If you want, I can let you choose X, Y, and the chart type.",
+                        state.chart_offer_options,
+                    )
+                ],
             )
 
     if state.stage not in {"awaiting_chart_offer", "awaiting_chart_x", "awaiting_chart_y", "awaiting_chart_type"}:
