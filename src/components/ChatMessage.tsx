@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, CircleDashed, Loader2, XCircle, BrainCircuit, File, Database, Copy, Check } from "lucide-react";
+import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, CircleDashed, Loader2, XCircle, BrainCircuit, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3 } from "lucide-react";
 import { Message, cn, AgentStep, ChartSpec, ChatAction, preprocessMarkdown } from "../lib/utils";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -7,12 +7,108 @@ import remarkBreaks from 'remark-breaks';
 import rehypeRaw from 'rehype-raw';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import type { LucideIcon } from "lucide-react";
 
 interface ChatMessageProps {
   message: Message;
   onCheckboxToggle?: (messageId: string, text: string, checked: boolean) => void;
   onAction?: (action: ChatAction, message: Message) => void;
   showSteps?: boolean;
+}
+
+const AGENT_INTRO_CARD_CONFIG: Record<string, {
+  marker: string;
+  title: string;
+  icon: LucideIcon;
+  containerClass: string;
+  iconClass: string;
+  titleClass: string;
+  bodyClass: string;
+  subtleClass: string;
+}> = {
+  manager: {
+    marker: "<!-- agent-intro:manager -->",
+    title: "Agent Manager",
+    icon: Star,
+    containerClass: "bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200/60 dark:from-amber-900/20 dark:to-orange-900/20 dark:border-amber-700/40",
+    iconClass: "text-amber-500",
+    titleClass: "text-amber-900 dark:text-amber-200",
+    bodyClass: "text-amber-800/90 dark:text-amber-300/90",
+    subtleClass: "text-amber-700/75 dark:text-amber-300/75",
+  },
+  clickhouse_query: {
+    marker: "<!-- agent-intro:clickhouse_query -->",
+    title: "Clickhouse SQL Agent",
+    icon: Database,
+    containerClass: "bg-gradient-to-br from-cyan-50 to-sky-50 border border-cyan-200/60 dark:from-cyan-900/20 dark:to-sky-900/20 dark:border-cyan-700/40",
+    iconClass: "text-cyan-500",
+    titleClass: "text-cyan-900 dark:text-cyan-200",
+    bodyClass: "text-cyan-800/90 dark:text-cyan-300/90",
+    subtleClass: "text-cyan-700/75 dark:text-cyan-300/75",
+  },
+  data_analyst: {
+    marker: "<!-- agent-intro:data_analyst -->",
+    title: "Data Analyst Agent",
+    icon: Cpu,
+    containerClass: "bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200/60 dark:from-violet-900/20 dark:to-indigo-900/20 dark:border-violet-700/40",
+    iconClass: "text-violet-500",
+    titleClass: "text-violet-900 dark:text-violet-200",
+    bodyClass: "text-violet-800/90 dark:text-violet-300/90",
+    subtleClass: "text-violet-700/75 dark:text-violet-300/75",
+  },
+  file_management: {
+    marker: "<!-- agent-intro:file_management -->",
+    title: "File Management Agent",
+    icon: FolderOpen,
+    containerClass: "bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200/60 dark:from-emerald-900/20 dark:to-teal-900/20 dark:border-emerald-700/40",
+    iconClass: "text-emerald-500",
+    titleClass: "text-emerald-900 dark:text-emerald-200",
+    bodyClass: "text-emerald-800/90 dark:text-emerald-300/90",
+    subtleClass: "text-emerald-700/75 dark:text-emerald-300/75",
+  },
+  pdf_creator: {
+    marker: "<!-- agent-intro:pdf_creator -->",
+    title: "PDF Creator Agent",
+    icon: File,
+    containerClass: "bg-gradient-to-br from-slate-50 to-gray-50 border border-slate-200/60 dark:from-slate-900/30 dark:to-gray-900/20 dark:border-slate-700/40",
+    iconClass: "text-slate-500",
+    titleClass: "text-slate-900 dark:text-slate-200",
+    bodyClass: "text-slate-800/90 dark:text-slate-300/90",
+    subtleClass: "text-slate-700/75 dark:text-slate-300/75",
+  },
+  oracle_analyst: {
+    marker: "<!-- agent-intro:oracle_analyst -->",
+    title: "Oracle SQL Agent",
+    icon: Database,
+    containerClass: "bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200/60 dark:from-orange-900/20 dark:to-amber-900/20 dark:border-orange-700/40",
+    iconClass: "text-orange-500",
+    titleClass: "text-orange-900 dark:text-orange-200",
+    bodyClass: "text-orange-800/90 dark:text-orange-300/90",
+    subtleClass: "text-orange-700/75 dark:text-orange-300/75",
+  },
+  data_quality_tables: {
+    marker: "<!-- agent-intro:data_quality_tables -->",
+    title: "Data Quality - Tables Agent",
+    icon: BarChart3,
+    containerClass: "bg-gradient-to-br from-fuchsia-50 to-pink-50 border border-fuchsia-200/60 dark:from-fuchsia-900/20 dark:to-pink-900/20 dark:border-fuchsia-700/40",
+    iconClass: "text-fuchsia-500",
+    titleClass: "text-fuchsia-900 dark:text-fuchsia-200",
+    bodyClass: "text-fuchsia-800/90 dark:text-fuchsia-300/90",
+    subtleClass: "text-fuchsia-700/75 dark:text-fuchsia-300/75",
+  },
+};
+
+function getAgentIntroCardData(content: string) {
+  const entry = Object.values(AGENT_INTRO_CARD_CONFIG).find((config) => content.includes(config.marker));
+  if (!entry) return null;
+  const body = content
+    .replace(entry.marker, "")
+    .replace(/^##\s+.+?\n+/m, "")
+    .trim();
+  return {
+    ...entry,
+    body,
+  };
 }
 
 function extractNodeText(node: React.ReactNode): string {
@@ -296,6 +392,36 @@ function ChartPreview({ chart }: { chart: ChartSpec }) {
   );
 }
 
+function buildAgentIntroComponents(bodyClass: string, subtleClass: string) {
+  return {
+    p: ({ children, ...props }: any) => (
+      <p className={`text-[11px] leading-relaxed mb-1.5 last:mb-0 ${bodyClass}`} {...props}>
+        {children}
+      </p>
+    ),
+    ul: ({ children, ...props }: any) => (
+      <ul className={`list-disc pl-4 space-y-0.5 ${bodyClass}`} {...props}>
+        {children}
+      </ul>
+    ),
+    li: ({ children, ...props }: any) => (
+      <li className="text-[11px] leading-relaxed" {...props}>
+        {children}
+      </li>
+    ),
+    strong: ({ children, ...props }: any) => (
+      <strong className={`font-semibold ${subtleClass}`} {...props}>
+        {children}
+      </strong>
+    ),
+    em: ({ children, ...props }: any) => (
+      <em className={`italic ${subtleClass}`} {...props}>
+        {children}
+      </em>
+    ),
+  };
+}
+
 // ── Markdown components ───────────────────────────────────────────────────────
 
 function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text: string, checked: boolean) => void) {
@@ -507,6 +633,29 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
   const content = message.content;
   const htmlMode = !isUser && isHtmlContent(content);
   const renderedContent = !isUser && !htmlMode ? preprocessMarkdown(content) : content;
+  const agentIntroCard = !isUser ? getAgentIntroCardData(content) : null;
+
+  if (agentIntroCard) {
+    const Icon = agentIntroCard.icon;
+    return (
+      <div className={cn("max-w-[77rem] mx-auto mb-4 p-3 rounded-xl shadow-sm animate-fade-in-up", agentIntroCard.containerClass)}>
+        <div className="flex items-center gap-2 mb-1.5">
+          <Icon className={cn("w-4 h-4", agentIntroCard.iconClass)} />
+          <h3 className={cn("font-semibold text-[13px]", agentIntroCard.titleClass)}>
+            {agentIntroCard.title}
+          </h3>
+        </div>
+        <div className="space-y-1">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkBreaks]}
+            components={buildAgentIntroComponents(agentIntroCard.bodyClass, agentIntroCard.subtleClass) as any}
+          >
+            {agentIntroCard.body}
+          </ReactMarkdown>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("flex gap-3 w-full max-w-[77rem] mx-auto mb-5 animate-fade-in-up", isUser ? "flex-row-reverse" : "flex-row")}>

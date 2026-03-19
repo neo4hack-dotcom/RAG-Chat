@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal } from "lucide-react";
 import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
@@ -422,6 +422,7 @@ export function ChatInterface({
   // Refs for DOM elements
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const chatScrollContainerRef = useRef<HTMLElement>(null);
   const lastAssistantMessageRef = useRef<HTMLDivElement>(null);
   const zoomControlRef = useRef<HTMLDivElement>(null);
   const agentIntroBootstrapRef = useRef<string | null>(null);
@@ -461,9 +462,13 @@ export function ChatInterface({
   const visibleMessages = shouldHideIntroductoryMessages
     ? messages.filter((message) => !isIntroductoryAssistantMessage(message))
     : messages;
-  const lastAssistantMessageId = [...visibleMessages]
+  const lastAssistantMessage = [...visibleMessages]
     .reverse()
-    .find((message) => message.role === 'assistant')?.id ?? null;
+    .find((message) => message.role === 'assistant') ?? null;
+  const lastAssistantMessageId = lastAssistantMessage?.id ?? null;
+  const lastAssistantMessageAnchorKey = lastAssistantMessage
+    ? `${lastAssistantMessage.id}:${lastAssistantMessage.timestamp}`
+    : "";
   const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
   const [isPlanningMonitorOpen, setIsPlanningMonitorOpen] = useState(false);
   const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
@@ -471,6 +476,8 @@ export function ChatInterface({
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
   const [planningBusy, setPlanningBusy] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
+  const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
+  const [isMcpMenuExpanded, setIsMcpMenuExpanded] = useState(workflow === 'MCP');
   const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
   const [isDataQualityModalOpen, setIsDataQualityModalOpen] = useState(false);
@@ -504,20 +511,45 @@ export function ChatInterface({
   };
 
   const handleWorkflowSelection = (nextWorkflow: WorkflowMode) => {
-    if (workflow === nextWorkflow) return;
+    if (workflow === nextWorkflow) {
+      if (nextWorkflow === 'AGENT') {
+        setIsAgentMenuExpanded((open) => !open);
+        if (isAgentMenuExpanded) {
+          setIsOtherAgentsOpen(false);
+        }
+      } else if (nextWorkflow === 'MCP') {
+        setIsMcpMenuExpanded((open) => !open);
+      }
+      return;
+    }
     resetChatShell();
+    setIsAgentMenuExpanded(nextWorkflow === 'AGENT');
+    setIsMcpMenuExpanded(nextWorkflow === 'MCP');
+    if (nextWorkflow !== 'AGENT') {
+      setIsOtherAgentsOpen(false);
+    }
     onWorkflowChange(nextWorkflow);
   };
 
   const handleAgentRoleSelection = (nextRole: AgentRole) => {
-    if (workflow === 'AGENT' && agentRole === nextRole) return;
+    if (workflow === 'AGENT' && agentRole === nextRole) {
+      setIsAgentMenuExpanded(false);
+      setIsOtherAgentsOpen(false);
+      return;
+    }
     resetChatShell();
+    setIsAgentMenuExpanded(false);
+    setIsOtherAgentsOpen(false);
     onAgentRoleChange(nextRole);
   };
 
   const handleMcpToolSelection = (nextToolId: string) => {
-    if (mcpToolId === nextToolId) return;
+    if (mcpToolId === nextToolId) {
+      setIsMcpMenuExpanded(false);
+      return;
+    }
     resetChatShell();
+    setIsMcpMenuExpanded(false);
     onMcpToolIdChange(nextToolId);
   };
 
@@ -555,13 +587,24 @@ export function ChatInterface({
     }
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isLoading || !lastAssistantMessageId) return;
     const frame = window.requestAnimationFrame(() => {
-      lastAssistantMessageRef.current?.scrollIntoView({ behavior: "smooth", block: "start", inline: "nearest" });
+      const container = chatScrollContainerRef.current;
+      const target = lastAssistantMessageRef.current;
+      if (!container || !target) return;
+
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const nextTop = container.scrollTop + (targetRect.top - containerRect.top) - 8;
+
+      container.scrollTo({
+        top: Math.max(0, nextTop),
+        behavior: "smooth",
+      });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [lastAssistantMessageId, isLoading]);
+  }, [lastAssistantMessageAnchorKey, isLoading]);
 
   useEffect(() => {
     if (!isZoomControlOpen) return;
@@ -645,10 +688,20 @@ export function ChatInterface({
   }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen]);
 
   useEffect(() => {
-    if (workflow === 'AGENT' && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables')) {
+    if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables')) {
       setIsOtherAgentsOpen(true);
     }
-  }, [workflow, agentRole]);
+  }, [workflow, agentRole, isAgentMenuExpanded]);
+
+  useEffect(() => {
+    if (workflow !== 'AGENT') {
+      setIsAgentMenuExpanded(false);
+      setIsOtherAgentsOpen(false);
+    }
+    if (workflow !== 'MCP') {
+      setIsMcpMenuExpanded(false);
+    }
+  }, [workflow]);
 
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
@@ -1990,6 +2043,9 @@ export function ChatInterface({
   const workflowRailButtonBase = "w-full flex items-center justify-start gap-2 px-3 py-2.5 rounded-2xl text-[11px] font-medium leading-tight transition-all text-left whitespace-nowrap";
   const workflowRailSubButtonBase = "w-full flex items-center justify-start gap-1.5 px-2.5 py-2.5 rounded-2xl text-[11px] font-medium leading-tight transition-all text-left whitespace-nowrap";
   const workflowRailNestedPanelBase = "rounded-[1.5rem] border bg-white/78 dark:bg-black/18 backdrop-blur-xl p-2.5 flex flex-col gap-2.5 shadow-[0_18px_40px_rgba(15,23,42,0.08)]";
+  const isSecondLevelMenuExpanded = (workflow === 'AGENT' && isAgentMenuExpanded) || (workflow === 'MCP' && isMcpMenuExpanded);
+  const workflowRailWidthClass = isSecondLevelMenuExpanded ? 'xl:w-[276px]' : 'xl:w-[208px]';
+  const floatingUtilityButtonClass = "group flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-white/65 text-gray-800 shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02] hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55";
   const formattedSystemPrompt = withBeautifulResponsePrompt(config.systemPrompt);
   const formattedOracleSystemPrompt = withBeautifulResponsePrompt(config.oracleAnalystConfig.systemPrompt);
   const formattedFileManagerSystemPrompt = withBeautifulResponsePrompt(config.fileManagerConfig.systemPrompt);
@@ -2114,7 +2170,7 @@ export function ChatInterface({
       >
         <div className="flex-1 min-h-0 px-4 md:px-8 pb-4">
           <div className="h-full max-w-[98rem] mx-auto flex flex-col xl:flex-row gap-4 xl:gap-6">
-            <aside className="xl:w-[208px] xl:flex-shrink-0 xl:flex xl:items-center xl:justify-center">
+            <aside className={`${workflowRailWidthClass} xl:flex-shrink-0 xl:flex xl:items-center xl:justify-center transition-[width] duration-300 ease-out`}>
               <div className="glass-panel w-full rounded-[2rem] p-3 xl:p-3.5 flex flex-col gap-3">
                 <div className="px-1">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
@@ -2155,7 +2211,7 @@ export function ChatInterface({
                   </button>
                 </div>
 
-                {workflow === 'MCP' && (
+                {workflow === 'MCP' && isMcpMenuExpanded && (
                   <div className="relative ml-3 pl-3">
                     <div className="absolute left-0 top-3 bottom-3 w-px rounded-full bg-gradient-to-b from-teal-300/80 via-teal-200/50 to-transparent dark:from-teal-700/80 dark:via-teal-900/40 dark:to-transparent" />
                     <div className="absolute -left-[4px] top-4 h-2.5 w-2.5 rounded-full border border-teal-300 bg-white shadow-sm dark:border-teal-700 dark:bg-teal-950/70" />
@@ -2185,7 +2241,7 @@ export function ChatInterface({
                   </div>
                 )}
 
-                {workflow === 'AGENT' && (
+                {workflow === 'AGENT' && isAgentMenuExpanded && (
                   <div className="relative ml-3 pl-3">
                     <div className="absolute left-0 top-3 bottom-3 w-px rounded-full bg-gradient-to-b from-purple-300/80 via-purple-200/50 to-transparent dark:from-purple-700/80 dark:via-purple-900/40 dark:to-transparent" />
                     <div className="absolute -left-[4px] top-4 h-2.5 w-2.5 rounded-full border border-purple-300 bg-white shadow-sm dark:border-purple-700 dark:bg-purple-950/70" />
@@ -2289,7 +2345,7 @@ export function ChatInterface({
 
             <div className="flex-1 min-w-0 flex flex-col min-h-0">
               {/* Chat Area */}
-              <main className="flex-1 overflow-y-auto z-10 scroll-smooth">
+              <main ref={chatScrollContainerRef} className="flex-1 overflow-y-auto z-10 scroll-smooth">
                 <div className="max-w-[77rem] mx-auto pb-16">
                   {visibleMessages.map((msg) => (
                     <div
@@ -2521,29 +2577,35 @@ export function ChatInterface({
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={() => setIsZoomControlOpen((open) => !open)}
-          className="group flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-white/65 text-gray-800 shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02] hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55"
-          title="Chat zoom"
-        >
-          <div className="flex flex-col items-center gap-0.5">
-            <ZoomIn className="h-4.5 w-4.5" />
-            <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
-              {chatZoomPercent}
-            </span>
-          </div>
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setIsConsoleOpen(true)}
+            className={floatingUtilityButtonClass}
+            title="Agent Console"
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <Terminal className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                LOG
+              </span>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsZoomControlOpen((open) => !open)}
+            className={floatingUtilityButtonClass}
+            title="Chat zoom"
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <ZoomIn className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                {chatZoomPercent}
+              </span>
+            </div>
+          </button>
+        </div>
       </div>
-
-      <button
-        type="button"
-        onClick={() => setIsConsoleOpen(true)}
-        className="absolute bottom-5 right-5 z-30 inline-flex h-10 w-10 items-center justify-center rounded-full border border-gray-200/70 bg-white/55 text-gray-400 shadow-sm backdrop-blur-xl transition-all hover:border-indigo-200 hover:bg-white/75 hover:text-indigo-500 dark:border-gray-700/70 dark:bg-black/30 dark:text-gray-500 dark:hover:border-indigo-900/60 dark:hover:bg-black/45 dark:hover:text-indigo-300"
-        title="Agent Console"
-      >
-        <Terminal className="h-4 w-4" />
-      </button>
       </div>
 
       <PlanningModal
