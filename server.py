@@ -67,6 +67,13 @@ app.add_middleware(
 )
 
 
+class UpstreamServiceError(Exception):
+    def __init__(self, detail: str, status_code: int = 400):
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
 # ── Agent Observability Log Bus ───────────────────────────────────────────────
 
 import collections
@@ -78,6 +85,11 @@ _LOG_BUS_MAX_AGE_S = 600       # 10 minutes
 _LOG_BUS_MAX_EVENTS = 500      # max retained events
 _log_buffer: collections.deque = collections.deque(maxlen=_LOG_BUS_MAX_EVENTS)
 _log_subscribers: list[asyncio.Queue] = []
+
+
+@app.exception_handler(UpstreamServiceError)
+async def handle_upstream_service_error(_request: Request, exc: UpstreamServiceError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 def _emit_log(kind: str, agent: str, message: str, data: dict | None = None) -> None:
     """
@@ -2675,15 +2687,91 @@ async def get_embedding(
         ) as client:
             resp = await client.post(url, json={"model": model, "input": text}, headers=headers)
             resp.raise_for_status()
-            return resp.json()["data"][0]["embedding"]
+            data = _parse_http_json_response(
+                resp,
+                service_label="Embedding endpoint",
+                endpoint=url,
+            )
+            try:
+                return data["data"][0]["embedding"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise UpstreamServiceError(
+                    f"Embedding endpoint returned an unexpected JSON payload at `{url}`."
+                ) from exc
     except httpx.HTTPError as exc:
-        raise RuntimeError(
+        raise UpstreamServiceError(
             f"Embedding endpoint error at `{url}`: {exc}. "
             "Check that the embedding service is running and reachable from `server.py`."
         ) from exc
 
 
 # ── LLM helper ────────────────────────────────────────────────────────────────
+
+def _truncate_body_preview(value: str, limit: int = 260) -> str:
+    compact = re.sub(r"\s+", " ", (value or "")).strip()
+    if not compact:
+        return "<empty body>"
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _parse_http_json_response(
+    response: httpx.Response,
+    *,
+    service_label: str,
+    endpoint: str,
+) -> Any:
+    try:
+        return response.json()
+    except json.JSONDecodeError as exc:
+        content_type = response.headers.get("content-type", "unknown")
+        preview = _truncate_body_preview(response.text)
+        raise UpstreamServiceError(
+            (
+                f"{service_label} returned a non-JSON response at `{endpoint}` "
+                f"(HTTP {response.status_code}, content-type `{content_type}`). "
+                f"Body preview: {preview}. Check the configured Base URL and make sure "
+                "the local service exposes an OpenAI/Ollama-compatible JSON API."
+            )
+        ) from exc
+
+
+def _extract_ollama_message_content(payload: Any, endpoint: str) -> str:
+    if not isinstance(payload, dict):
+        raise UpstreamServiceError(
+            f"Ollama endpoint returned an unexpected JSON payload at `{endpoint}`."
+        )
+    content = payload.get("message", {}).get("content", "")
+    if isinstance(content, str):
+        return content
+    raise UpstreamServiceError(
+        f"Ollama endpoint returned a JSON payload without `message.content` at `{endpoint}`."
+    )
+
+
+def _extract_openai_message_content(payload: Any, endpoint: str) -> str:
+    if not isinstance(payload, dict):
+        raise UpstreamServiceError(
+            f"OpenAI-compatible LLM endpoint returned an unexpected JSON payload at `{endpoint}`."
+        )
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise UpstreamServiceError(
+            (
+                f"OpenAI-compatible LLM endpoint returned a JSON payload without "
+                f"`choices[0].message.content` at `{endpoint}`."
+            )
+        ) from exc
+    if isinstance(content, str):
+        return content
+    raise UpstreamServiceError(
+        (
+            f"OpenAI-compatible LLM endpoint returned a non-text "
+            f"`choices[0].message.content` at `{endpoint}`."
+        )
+    )
 
 async def llm_chat(
     messages: list[dict],
@@ -2717,14 +2805,19 @@ async def llm_chat(
             ) as client:
                 resp = await client.post(endpoint, json=payload, headers=headers)
                 resp.raise_for_status()
-                return resp.json().get("message", {}).get("content", "")
+                data = _parse_http_json_response(
+                    resp,
+                    service_label="Ollama endpoint",
+                    endpoint=endpoint,
+                )
+                return _extract_ollama_message_content(data, endpoint)
         except httpx.HTTPError as exc:
-            raise RuntimeError(
+            raise UpstreamServiceError(
                 f"Ollama endpoint error at `{endpoint}`: {exc}. "
                 "Check the Base URL, the selected model, and that the local LLM server is running."
             ) from exc
     else:
-        payload = {"model": model, "messages": messages}
+        payload = {"model": model, "messages": messages, "stream": False}
         if response_format == "json":
             payload["response_format"] = {"type": "json_object"}
         endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
@@ -2734,9 +2827,14 @@ async def llm_chat(
             ) as client:
                 resp = await client.post(endpoint, json=payload, headers=headers)
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
+                data = _parse_http_json_response(
+                    resp,
+                    service_label="OpenAI-compatible LLM endpoint",
+                    endpoint=endpoint,
+                )
+                return _extract_openai_message_content(data, endpoint)
         except httpx.HTTPError as exc:
-            raise RuntimeError(
+            raise UpstreamServiceError(
                 f"OpenAI-compatible LLM endpoint error at `{endpoint}`: {exc}. "
                 "Check the Base URL, API key, and that the model server is reachable from `server.py`."
             ) from exc
