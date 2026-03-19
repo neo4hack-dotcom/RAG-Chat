@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from contextlib import asynccontextmanager
 import httpx
+import ipaddress
 import json
 import re
 import uuid
@@ -102,6 +103,11 @@ def _emit_log(kind: str, agent: str, message: str, data: dict | None = None) -> 
 async def _get_live_logs() -> list[dict]:
     cutoff = _time.time() - _LOG_BUS_MAX_AGE_S
     return [e for e in _log_buffer if e["ts_epoch"] >= cutoff]
+
+
+@app.get("/api/logs")
+async def get_logs():
+    return {"logs": await _get_live_logs()}
 
 
 @app.delete("/api/logs/clear")
@@ -579,6 +585,72 @@ def get_os_client(url: str, username: str = None, password: str = None) -> OpenS
 
 # ── ClickHouse helpers ────────────────────────────────────────────────────────
 
+def _is_local_service_host(host: Optional[str]) -> bool:
+    if not host:
+        return False
+    cleaned = str(host).strip().strip("[]").lower()
+    if cleaned == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
+
+
+def _normalize_local_service_host(host: Optional[str]) -> str:
+    cleaned = str(host or "").strip().strip("[]")
+    if not cleaned:
+        return "127.0.0.1"
+    return "127.0.0.1" if _is_local_service_host(cleaned) else cleaned
+
+
+def _normalize_local_service_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+        return raw.rstrip("/")
+    if not _is_local_service_host(parsed.hostname):
+        return raw.rstrip("/")
+
+    normalized_host = _normalize_local_service_host(parsed.hostname)
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth += f":{parsed.password}"
+        auth += "@"
+    port = f":{parsed.port}" if parsed.port else ""
+    normalized = parsed._replace(netloc=f"{auth}{normalized_host}{port}")
+    return normalized.geturl().rstrip("/")
+
+
+def _httpx_async_client_kwargs(
+    target: str,
+    *,
+    timeout: float,
+    verify: Optional[bool] = None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"timeout": timeout}
+    if verify is not None:
+        kwargs["verify"] = verify
+
+    hostname: Optional[str]
+    if "://" in str(target or ""):
+        hostname = urlparse(str(target)).hostname
+    else:
+        hostname = str(target or "").strip()
+
+    if _is_local_service_host(hostname):
+        # Ignore OS-level proxy variables for loopback calls. This avoids a
+        # class of Windows issues where local backend-to-local-service traffic
+        # is unexpectedly routed through a proxy and every agent fails.
+        kwargs["trust_env"] = False
+
+    return kwargs
+
 def quote_clickhouse_literal(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
     return f"'{escaped}'"
@@ -721,7 +793,8 @@ def resolve_user_choice(user_text: str, options: list[str]) -> Optional[str]:
 
 def clickhouse_url(config: "ClickHouseConfig") -> str:
     scheme = "https" if config.secure else "http"
-    base = f"{scheme}://{config.host}:{config.port}"
+    host = _normalize_local_service_host(config.host)
+    base = f"{scheme}://{host}:{config.port}"
     path = config.http_path.strip("/")
     return f"{base}/{path}" if path else base
 
@@ -750,18 +823,30 @@ async def execute_clickhouse_sql(
     }
     auth = (config.username, config.password) if config.username else None
 
-    async with httpx.AsyncClient(timeout=60.0, verify=config.verify_ssl) as client:
-        response = await client.post(
-            clickhouse_url(config),
-            params=params,
-            content=final_query.encode("utf-8"),
-            auth=auth,
-            headers={"Content-Type": "text/plain; charset=utf-8"},
-        )
-        response.raise_for_status()
-        if json_format:
-            return response.json()
-        return {"raw": response.text}
+    endpoint = clickhouse_url(config)
+    try:
+        async with httpx.AsyncClient(
+            **_httpx_async_client_kwargs(endpoint, timeout=60.0, verify=config.verify_ssl)
+        ) as client:
+            response = await client.post(
+                endpoint,
+                params=params,
+                content=final_query.encode("utf-8"),
+                auth=auth,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+            )
+            response.raise_for_status()
+            if json_format:
+                return response.json()
+            return {"raw": response.text}
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"ClickHouse connection error for `{endpoint}`: {exc}. "
+                "Check the host/port and avoid using `0.0.0.0` as a client URL."
+            ),
+        ) from exc
 
 
 async def list_clickhouse_tables(config: "ClickHouseConfig") -> list[str]:
@@ -2537,15 +2622,23 @@ async def get_embedding(
     appended automatically — or the full endpoint URL already ending with
     ``/embeddings`` (e.g. ``http://host/v1/openai/embeddings``), used as-is.
     """
-    stripped = base_url.rstrip("/")
+    stripped = _normalize_local_service_url(base_url)
     url = stripped if stripped.endswith("/embeddings") else stripped + "/embeddings"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    async with httpx.AsyncClient(timeout=60.0, verify=verify_ssl) as client:
-        resp = await client.post(url, json={"model": model, "input": text}, headers=headers)
-        resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
+    try:
+        async with httpx.AsyncClient(
+            **_httpx_async_client_kwargs(url, timeout=60.0, verify=verify_ssl)
+        ) as client:
+            resp = await client.post(url, json={"model": model, "input": text}, headers=headers)
+            resp.raise_for_status()
+            return resp.json()["data"][0]["embedding"]
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            f"Embedding endpoint error at `{url}`: {exc}. "
+            "Check that the embedding service is running and reachable from `server.py`."
+        ) from exc
 
 
 # ── LLM helper ────────────────────────────────────────────────────────────────
@@ -2561,25 +2654,42 @@ async def llm_chat(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    normalized_base_url = _normalize_local_service_url(base_url)
 
     if provider == "ollama":
         payload: dict = {"model": model, "messages": messages, "stream": False}
         if response_format == "json":
             payload["format"] = "json"
-        endpoint = base_url.rstrip("/") + "/api/chat"
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(endpoint, json=payload, headers=headers)
-            resp.raise_for_status()
-            return resp.json().get("message", {}).get("content", "")
+        endpoint = normalized_base_url.rstrip("/") + "/api/chat"
+        try:
+            async with httpx.AsyncClient(
+                **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+            ) as client:
+                resp = await client.post(endpoint, json=payload, headers=headers)
+                resp.raise_for_status()
+                return resp.json().get("message", {}).get("content", "")
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"Ollama endpoint error at `{endpoint}`: {exc}. "
+                "Check the Base URL, the selected model, and that the local LLM server is running."
+            ) from exc
     else:
         payload = {"model": model, "messages": messages}
         if response_format == "json":
             payload["response_format"] = {"type": "json_object"}
-        endpoint = base_url.rstrip("/") + "/chat/completions"
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(endpoint, json=payload, headers=headers)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+        endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
+        try:
+            async with httpx.AsyncClient(
+                **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+            ) as client:
+                resp = await client.post(endpoint, json=payload, headers=headers)
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"OpenAI-compatible LLM endpoint error at `{endpoint}`: {exc}. "
+                "Check the Base URL, API key, and that the model server is reachable from `server.py`."
+            ) from exc
 
 
 # ── File Management agent helpers ────────────────────────────────────────────
@@ -12396,16 +12506,19 @@ async def chat_mcp(req: MCPChatRequest):
                     headers = {"Content-Type": "application/json"}
                     if req.llm_api_key:
                         headers["Authorization"] = f"Bearer {req.llm_api_key}"
+                    normalized_base_url = _normalize_local_service_url(req.llm_base_url)
 
                     if req.llm_provider == "ollama":
-                        endpoint = req.llm_base_url.rstrip("/") + "/api/chat"
+                        endpoint = normalized_base_url.rstrip("/") + "/api/chat"
                         payload: dict = {
                             "model": req.llm_model,
                             "messages": messages,
                             "stream": False,
                             "tools": openai_tools,
                         }
-                        async with httpx.AsyncClient(timeout=120.0) as client:
+                        async with httpx.AsyncClient(
+                            **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+                        ) as client:
                             resp = await client.post(endpoint, json=payload, headers=headers)
                             resp.raise_for_status()
                         data = resp.json()
@@ -12413,13 +12526,15 @@ async def chat_mcp(req: MCPChatRequest):
                         content = llm_msg.get("content", "")
                         raw_tool_calls = llm_msg.get("tool_calls", [])
                     else:
-                        endpoint = req.llm_base_url.rstrip("/") + "/chat/completions"
+                        endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
                         payload = {
                             "model": req.llm_model,
                             "messages": messages,
                             "tools": openai_tools,
                         }
-                        async with httpx.AsyncClient(timeout=120.0) as client:
+                        async with httpx.AsyncClient(
+                            **_httpx_async_client_kwargs(endpoint, timeout=120.0)
+                        ) as client:
                             resp = await client.post(endpoint, json=payload, headers=headers)
                             resp.raise_for_status()
                         data = resp.json()

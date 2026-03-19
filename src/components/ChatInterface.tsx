@@ -2507,6 +2507,11 @@ export function ChatInterface({
         }}
         onSubmit={handleDataQualityRun}
       />
+      <AgentConsoleModal
+        isOpen={isConsoleOpen}
+        onClose={() => setIsConsoleOpen(false)}
+        isDark={isDark}
+      />
     </div>
   );
 }
