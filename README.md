@@ -14,9 +14,9 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - [State Persistence & Backup](#state-persistence--backup)
 - [CrewAI Planning](#crewai-planning)
 - [RAG Pipeline](#rag-pipeline)
-- [ClickHouse Query Agent](#clickhouse-query-agent)
+- [Clickhouse SQL Agent](#clickhouse-sql-agent)
 - [Data Analyst Agent](#data-analyst-agent)
-- [Oracle Analyst Agent](#oracle-analyst-agent)
+- [Oracle SQL Agent](#oracle-sql-agent)
 - [File Management Agent](#file-management-agent)
 - [PDF Creator Agent](#pdf-creator-agent)
 - [Data Quality - Tables Agent](#data-quality---tables-agent)
@@ -33,7 +33,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | Category | Details |
 |----------|---------|
 | **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, CrewAI - Planning |
-| **7 agent roles** | Agent Manager, ClickHouse Query, Data Analyst, Oracle Analyst, File management, PDF creator, Data quality - Tables |
+| **7 agent roles** | Agent Manager, Clickhouse SQL, Data Analyst, Oracle SQL, File management, PDF creator, Data quality - Tables |
 | **Manager orchestration** | Agent Manager can delegate to every specialist agent and keep follow-up context across clarifications and confirmations |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
@@ -119,7 +119,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, MCP client, OpenSearch management.
 - **Vector store** — OpenSearch with `opensearch-py` and `mcp` Python packages.
 - **Analytics store** — ClickHouse over HTTP for the SQL agent.
-- **Oracle store** — Oracle via Python `oracledb` for the Oracle Analyst agent.
+- **Oracle store** — Oracle via Python `oracledb` for the Oracle SQL agent.
 - **LLM / Embeddings** — Ollama (local) or any OpenAI-compatible API.
 
 ---
@@ -132,8 +132,8 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - **Node.js 18+**
 - **[Ollama](https://ollama.com)** (or any OpenAI-compatible server)
 - **[OpenSearch](https://opensearch.org)** running locally or remotely (for RAG mode)
-- **[ClickHouse](https://clickhouse.com)** running locally or remotely (optional, for the ClickHouse Query agent)
-- **Oracle Database** reachable from the backend (optional, for the Oracle Analyst agent)
+- **[ClickHouse](https://clickhouse.com)** running locally or remotely (optional, for the Clickhouse SQL agent)
+- **Oracle Database** reachable from the backend (optional, for the Oracle SQL agent)
 
 ### Ollama models
 
@@ -210,17 +210,17 @@ Multi-agent orchestration with seven roles:
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
-| **ClickHouse Query** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
+| **Clickhouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
 | **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, and can export the latest dataset to CSV |
-| **Oracle Analyst** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries and answers in business-facing Markdown |
+| **Oracle SQL** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries and answers in business-facing Markdown |
 | **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations |
 | **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
 | **Data quality - Tables** | Profiles ClickHouse tables and generates an English Markdown quality report from a dedicated overlay form |
 
-#### ClickHouse Query agent quick flow
+#### Clickhouse SQL agent quick flow
 
-1. Configure ClickHouse in **Settings → RAG & OpenSearch → ClickHouse Query Agent**.
-2. Switch to **Agents** mode and select **ClickHouse Query**.
+1. Configure ClickHouse in **Settings → RAG & OpenSearch → Clickhouse SQL Agent**.
+2. Switch to **Agents** mode and select **Clickhouse SQL**.
 3. Ask the analytical question directly — the agent tries to infer the best table automatically.
 4. If multiple tables, fields or date columns are plausible, it asks the user to choose with clickable task-tile options.
 5. It generates a read-only ClickHouse query, validates it, executes it, and returns:
@@ -233,7 +233,7 @@ The ClickHouse agent uses the backend only and always relies on the configured l
 
 #### Data Analyst quick flow
 
-1. Configure ClickHouse in **Settings → RAG & OpenSearch → ClickHouse Query Agent**.
+1. Configure ClickHouse in **Settings → RAG & OpenSearch → Clickhouse SQL Agent**.
 2. Optionally configure OpenSearch + embeddings if you want the agent to use knowledge-base lookups as part of the analysis.
 3. Switch to **Agents** mode and select **Data Analyst**.
 4. Ask a deeper analytical question, for example:
@@ -250,11 +250,11 @@ The ClickHouse agent uses the backend only and always relies on the configured l
    - export the latest dataset to CSV when explicitly requested,
    - and return a business-facing Markdown answer with visible analytical steps in the chat.
 
-#### Oracle Analyst quick flow
+#### Oracle SQL quick flow
 
-1. Configure Oracle in **Settings → Oracle Analyst**.
+1. Configure Oracle in **Settings → Oracle SQL**.
 2. Add one or more Oracle connections and use **Test Oracle** to verify access and preview tables.
-3. Switch to **Agents** mode and select **Oracle Analyst**.
+3. Switch to **Agents** mode and select **Oracle SQL**.
 4. Ask a business question in English.
 5. The backend agent can:
    - list accessible Oracle tables,
@@ -283,7 +283,7 @@ The ClickHouse agent uses the backend only and always relies on the configured l
 
 #### Data quality quick flow
 
-1. Configure ClickHouse once in **Settings → RAG & OpenSearch → ClickHouse Query Agent**.
+1. Configure ClickHouse once in **Settings → RAG & OpenSearch → Clickhouse SQL Agent**.
 2. Switch to **Agents** mode and select **Data quality - Tables**.
 3. A dedicated form opens above the chat.
 4. Select:
@@ -380,9 +380,9 @@ Response + sources + confidence score
 
 ---
 
-## ClickHouse Query Agent
+## Clickhouse SQL Agent
 
-The ClickHouse Query agent is designed to follow a conservative analytics workflow instead of guessing columns blindly.
+The Clickhouse SQL agent is designed to follow a conservative analytics workflow instead of guessing columns blindly.
 
 ### Workflow
 
@@ -473,9 +473,9 @@ When enough evidence is gathered, the agent writes the final answer in English
 
 ---
 
-## Oracle Analyst Agent
+## Oracle SQL Agent
 
-The Oracle Analyst agent is designed for Oracle-specific natural-language analytics with a narrative business-facing answer.
+The Oracle SQL agent is designed for Oracle-specific natural-language analytics with a narrative business-facing answer.
 
 ### Workflow
 
@@ -512,7 +512,7 @@ Local LLM writes final Markdown answer in English
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/oracle/test` | Test Oracle connectivity and preview accessible tables |
-| `POST /api/chat/oracle-analyst-agent` | Oracle Analyst workflow: discover tables, inspect schema, validate SQL, execute query, summarize result |
+| `POST /api/chat/oracle-analyst-agent` | Oracle SQL workflow: discover tables, inspect schema, validate SQL, execute query, summarize result |
 
 ---
 
@@ -692,7 +692,7 @@ All settings are available in-app (no `.env` file needed).
 | Chunk Overlap | `50` | Sentence overlap between chunks |
 | KNN Neighbors | `50` | Nearest neighbours to retrieve |
 
-### Oracle Analyst Settings
+### Oracle SQL Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -706,9 +706,9 @@ All settings are available in-app (no `.env` file needed).
 | Max retries | `3` | Compatibility retry setting for Oracle workflows |
 | Max iterations | `8` | UI-configurable compatibility field, runtime stays capped for safety |
 | Toolkit ID | empty | Optional toolkit selector for future extension |
-| System Prompt | built-in | Customises the Oracle Analyst behaviour |
+| System Prompt | built-in | Customises the Oracle SQL behaviour |
 
-### ClickHouse Query Agent Settings
+### Clickhouse SQL Agent Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
