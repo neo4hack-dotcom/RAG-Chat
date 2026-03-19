@@ -2103,18 +2103,18 @@ export function ChatInterface({
     toolsIslandLevel === 2
       ? workflow === 'AGENT'
         ? isOtherAgentsOpen
-          ? 'h-[24.5rem] md:h-[20rem]'
-          : 'h-[14.75rem] md:h-[11.5rem]'
-        : 'h-[10.75rem] md:h-[8.5rem]'
+          ? 'h-[22rem] md:h-[17.5rem]'
+          : 'h-[13.5rem] md:h-[10.5rem]'
+        : 'h-[10rem] md:h-[7.75rem]'
       : toolsIslandLevel === 1
-        ? 'h-[6.4rem] md:h-[5rem]'
-        : 'h-[2.8rem]';
+        ? 'h-[8.1rem] md:h-[6.4rem]'
+        : 'h-[2.9rem]';
   const toolsIslandWidthClass =
     toolsIslandLevel === 2
-      ? 'max-w-[42rem]'
+      ? 'max-w-[46rem]'
       : toolsIslandLevel === 1
-        ? 'max-w-[34rem]'
-        : 'max-w-[12rem]';
+        ? 'max-w-[46rem]'
+        : 'max-w-[12.5rem]';
   const activeMcpToolLabel = (config.mcpTools ?? []).find((tool: McpTool) => tool.id === mcpToolId)?.label ?? 'MCP';
   const activeToolsSummary =
     workflow === 'AGENT'
@@ -2426,10 +2426,10 @@ export function ChatInterface({
                   </div>
                 </div>
 
-                <div className={`relative mt-2 flex justify-center overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${toolsIslandHeightClass}`}>
+                <div className={`relative -mt-1 flex justify-center overflow-hidden pt-1 transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${toolsIslandHeightClass}`}>
                   <div
                     ref={toolsIslandRef}
-                    className={`w-full ${toolsIslandWidthClass} translate-y-1 rounded-[2.35rem] border border-white/65 bg-white/72 p-3 shadow-[0_28px_70px_rgba(15,23,42,0.16)] backdrop-blur-3xl transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] dark:border-white/10 dark:bg-black/48`}
+                    className={`w-full ${toolsIslandWidthClass} -translate-y-2 rounded-[2.35rem] border border-white/65 bg-white/72 p-3 shadow-[0_28px_70px_rgba(15,23,42,0.16)] backdrop-blur-3xl transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] dark:border-white/10 dark:bg-black/48`}
                   >
                     <button
                       type="button"
