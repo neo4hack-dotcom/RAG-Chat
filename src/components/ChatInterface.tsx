@@ -681,7 +681,8 @@ export function ChatInterface({
 
       const containerRect = container.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
-      const nextTop = container.scrollTop + (targetRect.top - containerRect.top) - 8;
+      const scale = chatZoom || 1;
+      const nextTop = container.scrollTop + ((targetRect.top - containerRect.top) / scale) - 8;
 
       container.scrollTo({
         top: Math.max(0, nextTop),
@@ -689,7 +690,7 @@ export function ChatInterface({
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [lastAssistantMessageAnchorKey, isLoading]);
+  }, [chatZoom, lastAssistantMessageAnchorKey, isLoading]);
 
   useEffect(() => {
     if (!isZoomControlOpen && !isThinkingPanelOpen) return;
@@ -2178,6 +2179,16 @@ export function ChatInterface({
           ? "Message your MCP tool..."
           : "Message your AI agent...";
   const chatZoomPercent = Math.round(chatZoom * 100);
+  const chatScaledStyle: React.CSSProperties | undefined =
+    Math.abs(chatZoom - 1) < 0.001
+      ? undefined
+      : {
+          transform: `scale(${chatZoom})`,
+          transformOrigin: 'top center',
+          width: `${100 / chatZoom}%`,
+          height: `${100 / chatZoom}%`,
+          margin: '0 auto',
+        };
   const toolsPrimaryButtonBase = "inline-flex min-h-[2.65rem] items-center justify-center gap-2 rounded-full px-4 py-2 text-[11px] font-medium leading-tight transition-all whitespace-nowrap";
   const toolsSecondaryButtonBase = "inline-flex min-h-[2.55rem] items-center justify-center gap-1.5 rounded-full px-3.5 py-2 text-[11px] font-medium leading-tight transition-all whitespace-nowrap";
   const toolsNestedPanelBase = "rounded-[1.7rem] border bg-white/72 dark:bg-black/22 backdrop-blur-2xl p-3 flex flex-col gap-2.5 shadow-[0_20px_45px_rgba(15,23,42,0.10)]";
@@ -2332,10 +2343,8 @@ export function ChatInterface({
         </div>
       </header>
 
-      <div
-        className="flex-1 flex flex-col min-h-0"
-        style={{ zoom: chatZoom }}
-      >
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <div className="flex-1 flex flex-col min-h-0" style={chatScaledStyle}>
         <div className="flex-1 min-h-0 px-4 md:px-8 pb-4">
           <div className="h-full max-w-[82rem] mx-auto flex flex-col">
             <div className="flex-1 min-w-0 flex flex-col min-h-0">
@@ -2505,6 +2514,7 @@ export function ChatInterface({
             </div>
           </div>
         </div>
+      </div>
       </div>
 
       {isToolsIslandOpen && (
