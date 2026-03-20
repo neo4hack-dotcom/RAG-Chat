@@ -565,6 +565,33 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
       return <input type={type} {...props} />;
     },
 
+    button({ children, ...props }: any) {
+      const rawText = extractNodeText(children).trim();
+      const label = normalizeChoiceLabel(rawText);
+      return (
+        <button
+          type="button"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (label) {
+              onCheckboxToggle?.(messageId, label, true);
+            }
+          }}
+          className="group pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-md border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-left text-[11px] font-medium text-cyan-700 shadow-sm transition-all hover:bg-cyan-100 hover:border-cyan-300 dark:border-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 dark:hover:bg-cyan-900/45 dark:hover:border-cyan-500"
+          aria-label={label || rawText}
+          {...props}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 dark:bg-cyan-300 flex-shrink-0" />
+          <span className="truncate">{label || rawText || children}</span>
+        </button>
+      );
+    },
+
     // Blockquote
     blockquote: ({ children, ...props }: any) => (
       <blockquote className="relative overflow-hidden rounded-[1.4rem] border border-sky-200/80 bg-gradient-to-br from-sky-50 to-white px-4 py-3 my-4 text-gray-700 dark:border-sky-800/60 dark:from-sky-950/30 dark:to-transparent dark:text-gray-200 shadow-sm" {...props}>
@@ -579,7 +606,11 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
       </details>
     ),
     summary: ({ children, ...props }: any) => (
-      <summary className="pointer-events-auto cursor-pointer list-none px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-100 transition-colors hover:bg-black/5 dark:hover:bg-white/5 [&::-webkit-details-marker]:hidden" {...props}>
+      <summary
+        className="pointer-events-auto cursor-pointer list-none px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-100 transition-colors hover:bg-black/5 dark:hover:bg-white/5 [&::-webkit-details-marker]:hidden"
+        onMouseDown={(event: React.MouseEvent<HTMLElement>) => event.stopPropagation()}
+        {...props}
+      >
         {children}
       </summary>
     ),
