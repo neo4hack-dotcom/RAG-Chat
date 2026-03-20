@@ -35,6 +35,7 @@ const AGENT_INTRO_CARD_CONFIG: Record<string, {
   title: string;
   icon: LucideIcon;
   containerClass: string;
+  iconWrapClass: string;
   iconClass: string;
   titleClass: string;
   bodyClass: string;
@@ -44,71 +45,78 @@ const AGENT_INTRO_CARD_CONFIG: Record<string, {
     marker: "<!-- agent-intro:manager -->",
     title: "Agent Manager",
     icon: Star,
-    containerClass: "bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200/60 dark:from-amber-900/20 dark:to-orange-900/20 dark:border-amber-700/40",
-    iconClass: "text-amber-500",
-    titleClass: "text-amber-900 dark:text-amber-200",
-    bodyClass: "text-amber-800/90 dark:text-amber-300/90",
-    subtleClass: "text-amber-700/75 dark:text-amber-300/75",
+    containerClass: "border border-amber-200 bg-white/98 shadow-[0_18px_48px_rgba(245,158,11,0.08)] dark:border-amber-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-amber-50 ring-1 ring-amber-200 dark:bg-amber-900/25 dark:ring-amber-800/80",
+    iconClass: "text-amber-600 dark:text-amber-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-amber-700 dark:text-amber-300",
   },
   clickhouse_query: {
     marker: "<!-- agent-intro:clickhouse_query -->",
     title: "Clickhouse SQL Agent",
     icon: Database,
-    containerClass: "bg-gradient-to-br from-cyan-50 to-sky-50 border border-cyan-200/60 dark:from-cyan-900/20 dark:to-sky-900/20 dark:border-cyan-700/40",
-    iconClass: "text-cyan-500",
-    titleClass: "text-cyan-900 dark:text-cyan-200",
-    bodyClass: "text-cyan-800/90 dark:text-cyan-300/90",
-    subtleClass: "text-cyan-700/75 dark:text-cyan-300/75",
+    containerClass: "border border-cyan-200 bg-white/98 shadow-[0_18px_48px_rgba(6,182,212,0.08)] dark:border-cyan-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-cyan-50 ring-1 ring-cyan-200 dark:bg-cyan-900/25 dark:ring-cyan-800/80",
+    iconClass: "text-cyan-600 dark:text-cyan-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-cyan-700 dark:text-cyan-300",
   },
   data_analyst: {
     marker: "<!-- agent-intro:data_analyst -->",
     title: "Data Analyst Agent",
     icon: Cpu,
-    containerClass: "bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200/60 dark:from-violet-900/20 dark:to-indigo-900/20 dark:border-violet-700/40",
-    iconClass: "text-violet-500",
-    titleClass: "text-violet-900 dark:text-violet-200",
-    bodyClass: "text-violet-800/90 dark:text-violet-300/90",
-    subtleClass: "text-violet-700/75 dark:text-violet-300/75",
+    containerClass: "border border-violet-200 bg-white/98 shadow-[0_18px_48px_rgba(139,92,246,0.08)] dark:border-violet-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-violet-50 ring-1 ring-violet-200 dark:bg-violet-900/25 dark:ring-violet-800/80",
+    iconClass: "text-violet-600 dark:text-violet-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-violet-700 dark:text-violet-300",
   },
   file_management: {
     marker: "<!-- agent-intro:file_management -->",
     title: "File Management Agent",
     icon: FolderOpen,
-    containerClass: "bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200/60 dark:from-emerald-900/20 dark:to-teal-900/20 dark:border-emerald-700/40",
-    iconClass: "text-emerald-500",
-    titleClass: "text-emerald-900 dark:text-emerald-200",
-    bodyClass: "text-emerald-800/90 dark:text-emerald-300/90",
-    subtleClass: "text-emerald-700/75 dark:text-emerald-300/75",
+    containerClass: "border border-emerald-200 bg-white/98 shadow-[0_18px_48px_rgba(16,185,129,0.08)] dark:border-emerald-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-emerald-50 ring-1 ring-emerald-200 dark:bg-emerald-900/25 dark:ring-emerald-800/80",
+    iconClass: "text-emerald-600 dark:text-emerald-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-emerald-700 dark:text-emerald-300",
   },
   pdf_creator: {
     marker: "<!-- agent-intro:pdf_creator -->",
     title: "PDF Creator Agent",
     icon: File,
-    containerClass: "bg-gradient-to-br from-slate-50 to-gray-50 border border-slate-200/60 dark:from-slate-900/30 dark:to-gray-900/20 dark:border-slate-700/40",
-    iconClass: "text-slate-500",
-    titleClass: "text-slate-900 dark:text-slate-200",
-    bodyClass: "text-slate-800/90 dark:text-slate-300/90",
-    subtleClass: "text-slate-700/75 dark:text-slate-300/75",
+    containerClass: "border border-slate-200 bg-white/98 shadow-[0_18px_48px_rgba(71,85,105,0.08)] dark:border-slate-700/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-slate-100 ring-1 ring-slate-200 dark:bg-slate-800/60 dark:ring-slate-700/80",
+    iconClass: "text-slate-700 dark:text-slate-200",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-slate-700 dark:text-slate-300",
   },
   oracle_analyst: {
     marker: "<!-- agent-intro:oracle_analyst -->",
     title: "Oracle SQL Agent",
     icon: Database,
-    containerClass: "bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200/60 dark:from-orange-900/20 dark:to-amber-900/20 dark:border-orange-700/40",
-    iconClass: "text-orange-500",
-    titleClass: "text-orange-900 dark:text-orange-200",
-    bodyClass: "text-orange-800/90 dark:text-orange-300/90",
-    subtleClass: "text-orange-700/75 dark:text-orange-300/75",
+    containerClass: "border border-orange-200 bg-white/98 shadow-[0_18px_48px_rgba(249,115,22,0.08)] dark:border-orange-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-orange-50 ring-1 ring-orange-200 dark:bg-orange-900/25 dark:ring-orange-800/80",
+    iconClass: "text-orange-600 dark:text-orange-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-orange-700 dark:text-orange-300",
   },
   data_quality_tables: {
     marker: "<!-- agent-intro:data_quality_tables -->",
     title: "Data Quality - Tables Agent",
     icon: BarChart3,
-    containerClass: "bg-gradient-to-br from-fuchsia-50 to-pink-50 border border-fuchsia-200/60 dark:from-fuchsia-900/20 dark:to-pink-900/20 dark:border-fuchsia-700/40",
-    iconClass: "text-fuchsia-500",
-    titleClass: "text-fuchsia-900 dark:text-fuchsia-200",
-    bodyClass: "text-fuchsia-800/90 dark:text-fuchsia-300/90",
-    subtleClass: "text-fuchsia-700/75 dark:text-fuchsia-300/75",
+    containerClass: "border border-fuchsia-200 bg-white/98 shadow-[0_18px_48px_rgba(217,70,239,0.08)] dark:border-fuchsia-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-fuchsia-50 ring-1 ring-fuchsia-200 dark:bg-fuchsia-900/25 dark:ring-fuchsia-800/80",
+    iconClass: "text-fuchsia-600 dark:text-fuchsia-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-fuchsia-700 dark:text-fuchsia-300",
   },
 };
 
@@ -402,17 +410,17 @@ function ChartPreview({ chart }: { chart: ChartSpec }) {
 function buildAgentIntroComponents(bodyClass: string, subtleClass: string) {
   return {
     p: ({ children, ...props }: any) => (
-      <p className={`text-[11px] leading-relaxed mb-1.5 last:mb-0 ${bodyClass}`} {...props}>
+      <p className={`text-[13px] leading-[1.7] mb-2 last:mb-0 ${bodyClass}`} {...props}>
         {children}
       </p>
     ),
     ul: ({ children, ...props }: any) => (
-      <ul className={`list-disc pl-4 space-y-0.5 ${bodyClass}`} {...props}>
+      <ul className={`list-disc pl-5 space-y-1.5 ${bodyClass}`} {...props}>
         {children}
       </ul>
     ),
     li: ({ children, ...props }: any) => (
-      <li className="text-[11px] leading-relaxed" {...props}>
+      <li className="text-[13px] leading-[1.65]" {...props}>
         {children}
       </li>
     ),
@@ -867,14 +875,16 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
   if (agentIntroCard) {
     const Icon = agentIntroCard.icon;
     return (
-      <div className={cn("max-w-[77rem] mx-auto mb-4 p-3 rounded-xl shadow-sm animate-fade-in-up", agentIntroCard.containerClass)}>
-        <div className="flex items-center gap-2 mb-1.5">
-          <Icon className={cn("w-4 h-4", agentIntroCard.iconClass)} />
-          <h3 className={cn("font-semibold text-[13px]", agentIntroCard.titleClass)}>
+      <div className={cn("max-w-[77rem] mx-auto mb-4 rounded-2xl p-4 shadow-sm animate-fade-in-up", agentIntroCard.containerClass)}>
+        <div className="mb-3 flex items-center gap-3">
+          <div className={cn("flex h-10 w-10 items-center justify-center rounded-2xl shadow-sm", agentIntroCard.iconWrapClass)}>
+            <Icon className={cn("h-4.5 w-4.5", agentIntroCard.iconClass)} />
+          </div>
+          <h3 className={cn("font-semibold text-[18px] leading-tight tracking-tight", agentIntroCard.titleClass)}>
             {agentIntroCard.title}
           </h3>
         </div>
-        <div className="space-y-1">
+        <div className="space-y-2">
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkBreaks]}
             components={buildAgentIntroComponents(agentIntroCard.bodyClass, agentIntroCard.subtleClass) as any}
