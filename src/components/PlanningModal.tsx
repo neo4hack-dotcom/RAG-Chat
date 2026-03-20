@@ -1,13 +1,17 @@
 import React, { useEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   Bot,
-  CheckCircle2,
+  CalendarClock,
   Database,
   FolderOpen,
   Pause,
   Play,
   RefreshCw,
+  ShieldCheck,
+  Sparkles,
   Trash2,
+  Workflow,
   X,
 } from "lucide-react";
 import {
@@ -68,31 +72,37 @@ const TRIGGER_OPTIONS = [
     kind: "once",
     title: "One time",
     description: "Run once on a specific date and time.",
+    icon: CalendarClock,
   },
   {
     kind: "daily",
     title: "Daily",
     description: "Run every day at a fixed time.",
+    icon: CalendarClock,
   },
   {
     kind: "weekly",
     title: "Weekly",
     description: "Run on selected weekdays.",
+    icon: CalendarClock,
   },
   {
     kind: "interval",
     title: "Interval",
     description: "Run every N minutes.",
+    icon: RefreshCw,
   },
   {
     kind: "clickhouse_watch",
     title: "ClickHouse watch",
     description: "Run when a ClickHouse result changes or returns rows.",
+    icon: Database,
   },
   {
     kind: "file_watch",
     title: "File watch",
     description: "Run when new files appear in a directory.",
+    icon: FolderOpen,
   },
 ] as const;
 
@@ -125,6 +135,10 @@ function triggerSummary(trigger: CrewPlanDraft["trigger"]) {
   return trigger.directory.trim() ? `Watching ${trigger.directory}` : "Set a directory to watch";
 }
 
+function agentLabel(role: AgentRole) {
+  return AGENT_OPTIONS.find((agent) => agent.role === role)?.label || role;
+}
+
 export function PlanningModal({
   isOpen,
   onClose,
@@ -155,7 +169,7 @@ export function PlanningModal({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isOpen, onClose]);
 
-  if (!isOpen) return null;
+  if (!isOpen || typeof document === "undefined") return null;
 
   const updateDraft = (next: Partial<CrewPlanDraft>) => {
     onDraftChange({
@@ -196,32 +210,50 @@ export function PlanningModal({
     await onSavePlan(draft, editingPlanId);
   };
 
-  return (
-    <div className="fixed inset-0 z-[110]">
+  const selectedAgents = AGENT_OPTIONS.filter((agent) => draft.agents.includes(agent.role));
+  const activeTrigger = TRIGGER_OPTIONS.find((option) => option.kind === draft.trigger.kind) ?? TRIGGER_OPTIONS[0];
+  const readinessChecks = [
+    { label: "Objective", ok: draft.prompt.trim().length > 0 },
+    { label: "Agents", ok: draft.agents.length > 0 },
+    { label: "Trigger", ok: Boolean(triggerSummary(draft.trigger)) },
+  ];
+
+  return createPortal(
+    <>
       <div
-        className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+        className="fixed inset-0 z-[110] bg-black/45 backdrop-blur-sm"
         onClick={onClose}
       />
 
-      <div className="relative flex h-full items-center justify-center p-4">
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="CrewAI planning"
-          className="relative flex h-[min(94vh,980px)] w-full max-w-[1380px] flex-col overflow-hidden rounded-[2rem] border border-white/30 bg-[#f7f7f4] shadow-[0_30px_80px_rgba(15,23,42,0.35)] dark:border-white/10 dark:bg-[#101115]"
-        >
-          <div className="flex items-start justify-between gap-4 border-b border-gray-200/80 bg-white/75 px-6 py-5 backdrop-blur-xl dark:border-gray-800/80 dark:bg-black/20">
+      <div className="pointer-events-none fixed inset-0 z-[111] overflow-y-auto p-4">
+        <div className="flex min-h-full items-center justify-center py-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="LangGraph planning"
+            className="pointer-events-auto relative flex h-[min(94vh,980px)] w-full max-w-[1420px] flex-col overflow-hidden rounded-[2.1rem] border border-white/30 bg-[#f7f7f4] shadow-[0_30px_80px_rgba(15,23,42,0.35)] dark:border-white/10 dark:bg-[#101115]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-gray-200/80 bg-white/75 px-6 py-5 backdrop-blur-xl dark:border-gray-800/80 dark:bg-black/20">
             <div>
               <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-emerald-600 dark:text-emerald-300">
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                CrewAI - Planning
+                <Workflow className="h-3.5 w-3.5" />
+                LangGraph Planning
               </div>
               <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
                 Schedule existing agents with fixed time or event triggers
               </h2>
               <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Simple planner form with direct editing, agent selection, and trigger configuration.
+                Native controls for Windows reliability, plus LangGraph orchestration for draft parsing and scheduled execution.
               </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-gray-600 dark:text-gray-300">
+                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 dark:border-emerald-800/70 dark:bg-emerald-900/30">
+                  {selectedAgents.length} agent{selectedAgents.length === 1 ? "" : "s"} selected
+                </span>
+                <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 dark:border-sky-800/70 dark:bg-sky-900/30">
+                  Trigger: {activeTrigger.title}
+                </span>
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -262,11 +294,15 @@ export function PlanningModal({
                 <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
+                      <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-emerald-700 dark:border-emerald-800/60 dark:bg-emerald-900/20 dark:text-emerald-200">
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Step 1
+                      </div>
                       <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
                         Planning job
                       </h3>
                       <p className="text-sm text-gray-500 dark:text-gray-400">
-                        Name the automation and describe what the agents should do.
+                        Name the automation and describe the recurring objective in plain English.
                       </p>
                     </div>
                     <button
@@ -335,11 +371,15 @@ export function PlanningModal({
                 </section>
 
                 <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-violet-700 dark:border-violet-800/60 dark:bg-violet-900/20 dark:text-violet-200">
+                    <Bot className="h-3.5 w-3.5" />
+                    Step 2
+                  </div>
                   <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
                     Agents to run
                   </h3>
                   <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    Select one or more existing agents.
+                    Select one or more existing agents. The scheduler keeps their current capabilities unchanged.
                   </p>
 
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -378,15 +418,21 @@ export function PlanningModal({
                 </section>
 
                 <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-sky-700 dark:border-sky-800/60 dark:bg-sky-900/20 dark:text-sky-200">
+                    <CalendarClock className="h-3.5 w-3.5" />
+                    Step 3
+                  </div>
                   <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
                     Trigger configuration
                   </h3>
                   <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    Choose how the automation starts, then fill the matching parameters.
+                    Choose how the automation starts, then fill the matching parameters using native browser inputs only.
                   </p>
 
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
-                    {TRIGGER_OPTIONS.map((option) => (
+                    {TRIGGER_OPTIONS.map((option) => {
+                      const Icon = option.icon;
+                      return (
                       <label
                         key={option.kind}
                         className={cn(
@@ -404,7 +450,8 @@ export function PlanningModal({
                           className="mt-1 h-4 w-4 border-gray-300 text-sky-600 focus:ring-sky-500"
                         />
                         <div>
-                          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                          <div className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            <Icon className="h-4 w-4 text-sky-600 dark:text-sky-300" />
                             {option.title}
                           </div>
                           <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
@@ -412,7 +459,7 @@ export function PlanningModal({
                           </p>
                         </div>
                       </label>
-                    ))}
+                    )})}
                   </div>
 
                   <div className="mt-5 grid gap-4 md:grid-cols-2">
@@ -610,30 +657,59 @@ export function PlanningModal({
             <aside className="min-h-0 overflow-y-auto bg-[linear-gradient(180deg,rgba(255,255,255,0.62),rgba(246,248,250,0.90))] px-6 py-6 dark:bg-[linear-gradient(180deg,rgba(18,20,26,0.85),rgba(10,12,17,0.92))]">
               <div className="space-y-6">
                 <section className="rounded-[1.6rem] border border-white/70 bg-white/80 p-5 shadow-sm dark:border-gray-800/80 dark:bg-gray-900/65">
+                  <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-amber-700 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-200">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Review
+                  </div>
                   <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                    Current summary
+                    Launch summary
                   </h3>
                   <div className="mt-4 space-y-3 text-sm">
                     <div>
                       <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Selected agents</div>
-                      <div className="mt-1 text-gray-900 dark:text-gray-100">
-                        {draft.agents.length > 0
-                          ? draft.agents.join(", ")
-                          : "No agent selected yet"}
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {selectedAgents.length > 0 ? selectedAgents.map((agent) => (
+                          <span
+                            key={agent.role}
+                            className="rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs text-violet-800 dark:border-violet-800/70 dark:bg-violet-900/25 dark:text-violet-200"
+                          >
+                            {agent.label}
+                          </span>
+                        )) : (
+                          <span className="text-gray-500 dark:text-gray-400">No agent selected yet</span>
+                        )}
                       </div>
                     </div>
                     <div>
                       <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Trigger</div>
                       <div className="mt-1 text-gray-900 dark:text-gray-100">
-                        {triggerSummary(draft.trigger)}
+                        {activeTrigger.title} · {triggerSummary(draft.trigger)}
                       </div>
                     </div>
                     <div>
                       <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Status</div>
                       <div className="mt-1 text-gray-900 dark:text-gray-100">{draft.status}</div>
                     </div>
+                    <div>
+                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Readiness</div>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                        {readinessChecks.map((item) => (
+                          <div
+                            key={item.label}
+                            className={cn(
+                              "rounded-2xl border px-3 py-3 text-xs font-medium",
+                              item.ok
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800/60 dark:bg-emerald-900/20 dark:text-emerald-200"
+                                : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-200"
+                            )}
+                          >
+                            {item.label}: {item.ok ? "ready" : "missing"}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                     <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-900/20 dark:text-emerald-100">
-                      The planner uses the local LLM configured in RAGnarok. This form now relies on standard browser inputs and direct handlers only.
+                      LangGraph handles draft understanding and execution orchestration, while this form stays fully native for better Windows compatibility.
                     </div>
                   </div>
                 </section>
@@ -670,10 +746,10 @@ export function PlanningModal({
                             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                               {plan.name || "Untitled plan"}
                             </div>
-                            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                              {plan.agents.join(", ") || "No agents"} · {plan.trigger.kind}
-                            </div>
+                          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                              {plan.agents.map(agentLabel).join(", ") || "No agents"} · {plan.trigger.kind}
                           </div>
+                        </div>
                           <span className={cn("rounded-full border px-2.5 py-1 text-[11px] font-medium", statusTone(plan.status))}>
                             {plan.status}
                           </span>
@@ -790,12 +866,14 @@ export function PlanningModal({
                 disabled={isBusy}
                 className="rounded-2xl bg-black px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-60"
               >
-                {editingPlanId ? "Save changes" : "Save planning job"}
+                {editingPlanId ? "Save changes" : "Save LangGraph job"}
               </button>
             </div>
           </div>
         </div>
       </div>
     </div>
+    </>,
+    document.body
   );
 }
