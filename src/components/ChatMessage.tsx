@@ -16,6 +16,20 @@ interface ChatMessageProps {
   showSteps?: boolean;
 }
 
+type AssistantContentBlock =
+  | { type: "markdown"; id: string; content: string }
+  | { type: "choices"; id: string; options: string[] }
+  | { type: "details"; id: string; summary: string; content: string };
+
+const CHOICE_TASK_PATTERN = /^\s*[-*+]\s+\[(?: |x|X)\]\s+(.+?)\s*$/;
+const COLLAPSIBLE_HEADING_RULES: Array<{ pattern: RegExp; summary: string }> = [
+  { pattern: /^(executed sql|sql used|sql queries?|queries executed|query log)$/i, summary: "Expand SQL" },
+  { pattern: /^(technical details?|technical notes?|implementation notes?|appendix|appendices)$/i, summary: "Expand details" },
+  { pattern: /^(reasoning|reasoning summary|analysis reasoning|method|approach)$/i, summary: "Expand reasoning" },
+  { pattern: /^(data preview|result preview|sample rows?|raw results?)$/i, summary: "Expand data preview" },
+  { pattern: /^(knowledge signals|sources?|reference notes?|evidence trail|confidence|action log)$/i, summary: "Expand details" },
+];
+
 const AGENT_INTRO_CARD_CONFIG: Record<string, {
   marker: string;
   title: string;
@@ -124,6 +138,7 @@ function extractNodeText(node: React.ReactNode): string {
 function normalizeChoiceLabel(text: string): string {
   return text
     .replace(/^\s*\[(?: |x|X)\]\s*/, "")
+    .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -414,6 +429,188 @@ function buildAgentIntroComponents(bodyClass: string, subtleClass: string) {
   };
 }
 
+function getCollapsibleSummary(title: string): string | null {
+  const normalized = title.trim();
+  if (!normalized) return null;
+  for (const rule of COLLAPSIBLE_HEADING_RULES) {
+    if (rule.pattern.test(normalized)) return rule.summary;
+  }
+  return null;
+}
+
+function parseHtmlDetailsBlock(rawBlock: string): { summary: string; content: string } | null {
+  const summaryMatch = rawBlock.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
+  if (!summaryMatch) return null;
+  const summary = normalizeChoiceLabel(summaryMatch[1]);
+  const body = rawBlock
+    .replace(/<details[^>]*>/i, "")
+    .replace(/<\/details>/i, "")
+    .replace(/<summary[^>]*>[\s\S]*?<\/summary>/i, "")
+    .trim();
+  if (!summary || !body) return null;
+  return { summary, content: body };
+}
+
+function splitAssistantContent(content: string): AssistantContentBlock[] {
+  const lines = content.split("\n");
+  const blocks: AssistantContentBlock[] = [];
+  const markdownBuffer: string[] = [];
+  let inCodeFence = false;
+  let sequence = 0;
+
+  const nextId = () => `block-${sequence += 1}`;
+  const flushMarkdown = () => {
+    const text = markdownBuffer.join("\n").trim();
+    markdownBuffer.length = 0;
+    if (text) {
+      blocks.push({ type: "markdown", id: nextId(), content: text });
+    }
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+      markdownBuffer.push(line);
+      continue;
+    }
+
+    if (!inCodeFence) {
+      if (/^\s*<details(?:\s|>)/i.test(line.trim())) {
+        flushMarkdown();
+        const detailLines = [line];
+        let cursor = index + 1;
+        while (cursor < lines.length) {
+          detailLines.push(lines[cursor]);
+          if (/<\/details>/i.test(lines[cursor])) {
+            break;
+          }
+          cursor += 1;
+        }
+        index = cursor;
+        const parsed = parseHtmlDetailsBlock(detailLines.join("\n"));
+        if (parsed) {
+          blocks.push({ type: "details", id: nextId(), summary: parsed.summary, content: parsed.content });
+          continue;
+        }
+        markdownBuffer.push(...detailLines);
+        continue;
+      }
+
+      const headingMatch = line.match(/^(#{2,4})\s+(.+?)\s*$/);
+      const collapsibleSummary = headingMatch ? getCollapsibleSummary(headingMatch[2]) : null;
+      if (headingMatch && collapsibleSummary) {
+        flushMarkdown();
+        const sectionLines: string[] = [];
+        let sectionInCodeFence = false;
+        let cursor = index + 1;
+        while (cursor < lines.length) {
+          const current = lines[cursor];
+          if (/^\s*```/.test(current)) {
+            sectionInCodeFence = !sectionInCodeFence;
+          }
+          if (!sectionInCodeFence && /^(#{2,4})\s+.+$/.test(current)) {
+            break;
+          }
+          sectionLines.push(current);
+          cursor += 1;
+        }
+        const sectionBody = sectionLines.join("\n").trim();
+        if (sectionBody) {
+          blocks.push({ type: "details", id: nextId(), summary: collapsibleSummary, content: sectionBody });
+          index = cursor - 1;
+          continue;
+        }
+        markdownBuffer.push(line);
+        continue;
+      }
+
+      if (CHOICE_TASK_PATTERN.test(line)) {
+        flushMarkdown();
+        const options: string[] = [];
+        let cursor = index;
+        while (cursor < lines.length) {
+          const optionMatch = lines[cursor].match(CHOICE_TASK_PATTERN);
+          if (!optionMatch) break;
+          const label = normalizeChoiceLabel(optionMatch[1]);
+          if (label) options.push(label);
+          cursor += 1;
+        }
+        if (options.length > 0) {
+          blocks.push({ type: "choices", id: nextId(), options });
+          index = cursor - 1;
+          continue;
+        }
+      }
+    }
+
+    markdownBuffer.push(line);
+  }
+
+  flushMarkdown();
+  return blocks;
+}
+
+function ChoiceTiles({
+  options,
+  onSelect,
+}: {
+  options: string[];
+  onSelect?: (text: string) => void;
+}) {
+  return (
+    <div className="my-4 flex flex-wrap gap-2.5">
+      {options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          onClick={() => onSelect?.(option)}
+          className="inline-flex max-w-full items-center gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-left text-[13px] font-semibold text-cyan-700 shadow-[0_6px_18px_rgba(8,145,178,0.16)] transition-all hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-100/90 dark:border-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 dark:hover:border-cyan-500 dark:hover:bg-cyan-900/45"
+        >
+          <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full bg-cyan-400 dark:bg-cyan-300" />
+          <span className="break-words">{option}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CollapsibleMessageBlock({
+  summary,
+  content,
+  markdownComponents,
+}: {
+  summary: string;
+  content: string;
+  markdownComponents: ReturnType<typeof buildComponents>;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="my-4 overflow-hidden rounded-[1.35rem] border border-gray-200/80 bg-white/80 shadow-sm dark:border-gray-700/80 dark:bg-gray-900/45">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-gray-900 transition-colors hover:bg-black/5 dark:text-gray-100 dark:hover:bg-white/5"
+      >
+        <span>{summary}</span>
+        {open ? <ChevronDown className="h-4 w-4 text-gray-400" /> : <ChevronRight className="h-4 w-4 text-gray-400" />}
+      </button>
+      {open && (
+        <div className="border-t border-gray-200/70 px-4 pb-4 pt-3 dark:border-gray-700/70">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkBreaks]}
+            rehypePlugins={[rehypeRaw]}
+            components={markdownComponents as any}
+          >
+            {content}
+          </ReactMarkdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Markdown components ───────────────────────────────────────────────────────
 
 function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text: string, checked: boolean) => void) {
@@ -664,6 +861,8 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
   const content = message.content;
   const renderedContent = !isUser ? preprocessMarkdown(content) : content;
   const agentIntroCard = !isUser ? getAgentIntroCardData(content) : null;
+  const markdownComponents = buildComponents(message.id, onCheckboxToggle);
+  const assistantBlocks = !isUser ? splitAssistantContent(renderedContent) : [];
 
   if (agentIntroCard) {
     const Icon = agentIntroCard.icon;
@@ -808,13 +1007,39 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
           <div className="whitespace-pre-wrap text-[14px] leading-[1.65]">{content}</div>
         ) : (
           <div className="markdown-body pointer-events-auto">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm, remarkBreaks]}
-              rehypePlugins={[rehypeRaw]}
-              components={buildComponents(message.id, onCheckboxToggle) as any}
-            >
-              {renderedContent}
-            </ReactMarkdown>
+            {assistantBlocks.map((block) => {
+              if (block.type === "choices") {
+                return (
+                  <ChoiceTiles
+                    key={block.id}
+                    options={block.options}
+                    onSelect={(text) => onCheckboxToggle?.(message.id, text, true)}
+                  />
+                );
+              }
+
+              if (block.type === "details") {
+                return (
+                  <CollapsibleMessageBlock
+                    key={block.id}
+                    summary={block.summary}
+                    content={block.content}
+                    markdownComponents={markdownComponents}
+                  />
+                );
+              }
+
+              return (
+                <ReactMarkdown
+                  key={block.id}
+                  remarkPlugins={[remarkGfm, remarkBreaks]}
+                  rehypePlugins={[rehypeRaw]}
+                  components={markdownComponents as any}
+                >
+                  {block.content}
+                </ReactMarkdown>
+              );
+            })}
           </div>
         )}
 
