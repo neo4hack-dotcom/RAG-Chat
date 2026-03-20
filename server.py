@@ -32,8 +32,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from opensearchpy import OpenSearch
 from urllib.parse import urlparse
+from typing_extensions import Literal, TypedDict
 from fastmcp import Client as FastMCPClient
 from fastmcp.client.transports import SSETransport, StreamableHttpTransport
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
 
 
 @asynccontextmanager
@@ -7452,7 +7455,9 @@ def build_oracle_response_markdown(
     )
     return "\n".join(sections)
 
-# ── CrewAI planning helpers ───────────────────────────────────────────────────
+# ── LangGraph planning helpers ────────────────────────────────────────────────
+
+PLANNING_PRODUCT_NAME = "LangGraph Planning"
 
 PLANNING_ROLE_PROMPTS = {
     "manager": (
@@ -7771,6 +7776,184 @@ def _planning_summary_markdown(draft: dict, missing_fields: list[str]) -> str:
     return "\n".join(lines)
 
 
+PLANNING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            (
+                "You are helping a user configure a LangGraph-based automation planner for existing agents. "
+                "Return JSON only with the keys: draft, clarification_question, should_open_form, and reasoning.\n"
+                "Inside draft, use these keys only: name, prompt, agents, status, and trigger.\n"
+                "Inside trigger, use these keys only: kind, timezone, oneTimeAt, timeOfDay, weekdays, "
+                "intervalMinutes, pollMinutes, watchSql, watchMode, directory, pattern, recursive.\n"
+                "Allowed agents: manager, clickhouse_query, file_management.\n"
+                "Allowed trigger kinds: once, daily, weekly, interval, clickhouse_watch, file_watch.\n"
+                "Allowed watch modes: returns_rows, count_increases, result_changes.\n"
+                "Allowed weekdays: mon, tue, wed, thu, fri, sat, sun.\n"
+                "Keep the answer in English.\n"
+                "If the user explicitly asks to open the form, set should_open_form to true.\n"
+                "Do not invent unsupported trigger kinds or agent names.\n"
+                "Only fill fields when the user clearly implies them or they already exist in the current draft."
+            ),
+        ),
+        (
+            "human",
+            (
+                "Current draft:\n{current_draft_json}\n\n"
+                "Recent conversation memory:\n{history_markdown}\n\n"
+                "User message:\n{user_message}"
+            ),
+        ),
+    ]
+)
+
+PLANNING_RUN_SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            (
+                "You are summarizing the result of a LangGraph-orchestrated automation. "
+                "Write the answer in English with exactly these markdown sections:\n"
+                "## Summary\nOne concise summary.\n\n"
+                "## Trigger\nOne concise explanation of why it ran.\n\n"
+                "## Agent Outputs\nOne-line summary per agent."
+            ),
+        ),
+        (
+            "human",
+            (
+                "Automation name: {plan_name}\n"
+                "Objective:\n{plan_prompt}\n\n"
+                "Trigger context:\n{trigger_markdown}\n\n"
+                "Outputs:\n{outputs_json}"
+            ),
+        ),
+    ]
+)
+
+
+class PlanningChatGraphState(TypedDict, total=False):
+    user_message: str
+    history: list[dict[str, Any]]
+    current_draft: dict[str, Any]
+    timezone_name: str
+    planning_state: dict[str, Any]
+    llm_config: dict[str, Any]
+    mode: Literal["empty", "reset", "list", "open_form", "analyze"]
+    analysis: dict[str, Any]
+    response: dict[str, Any]
+
+
+class PlanningExecutionGraphState(TypedDict, total=False):
+    plan: dict[str, Any]
+    trigger_context: dict[str, Any]
+    app_config: dict[str, Any]
+    pending_agents: list[str]
+    outputs: list[dict[str, Any]]
+    overall_status: str
+    summary: str
+
+
+_planning_chat_graph: Optional[Any] = None
+_planning_execution_graph: Optional[Any] = None
+
+
+def _prompt_content_as_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        fragments: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                fragments.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                fragments.append(str(item))
+        return "\n".join(fragment for fragment in fragments if fragment).strip()
+    return str(content or "")
+
+
+def _prompt_messages_from_template(
+    template: ChatPromptTemplate,
+    **values: Any,
+) -> list[dict[str, str]]:
+    prompt_value = template.invoke(values)
+    rendered_messages: list[dict[str, str]] = []
+    for message in prompt_value.to_messages():
+        message_type = getattr(message, "type", "human")
+        role = "user"
+        if message_type == "system":
+            role = "system"
+        elif message_type == "ai":
+            role = "assistant"
+        rendered_messages.append(
+            {
+                "role": role,
+                "content": _prompt_content_as_text(getattr(message, "content", "")),
+            }
+        )
+    return rendered_messages
+
+
+async def _llm_chat_from_prompt_template(
+    template: ChatPromptTemplate,
+    *,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+    response_format: Optional[str] = None,
+    disable_ssl_verification: Optional[bool] = None,
+    **values: Any,
+) -> str:
+    return await llm_chat(
+        _prompt_messages_from_template(template, **values),
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format=response_format,
+        disable_ssl_verification=disable_ssl_verification,
+    )
+
+
+def _planning_open_form_action() -> dict[str, str]:
+    return {
+        "id": "open-planning-form",
+        "label": "Open planning form",
+        "actionType": "open_planning_form",
+        "variant": "primary",
+    }
+
+
+def _planning_agent_state_payload(
+    draft: dict[str, Any],
+    missing_fields: list[str],
+    last_question: str,
+) -> dict[str, Any]:
+    return {
+        "draft": draft,
+        "missing_fields": missing_fields,
+        "last_question": last_question,
+        "ready_to_review": len(missing_fields) == 0,
+    }
+
+
+def _planning_response_payload(
+    draft: dict[str, Any],
+    missing_fields: list[str],
+    answer: str,
+    steps: list[dict[str, Any]],
+    *,
+    last_question: str = "",
+) -> dict[str, Any]:
+    return {
+        "answer": answer,
+        "agent_state": _planning_agent_state_payload(draft, missing_fields, last_question),
+        "actions": [_planning_open_form_action()],
+        "steps": steps,
+    }
+
+
 async def analyze_planning_request(
     user_message: str,
     history: list[dict[str, Any]],
@@ -7779,62 +7962,19 @@ async def analyze_planning_request(
     llm_model: str,
     llm_provider: str,
     llm_api_key: Optional[str] = None,
+    disable_ssl_verification: bool = False,
 ) -> dict[str, Any]:
-    prompt = f"""
-You are helping a user configure an automation planner for existing agents.
-Return JSON only with this exact shape:
-{{
-  "draft": {{
-    "name": "Morning anomaly check",
-    "prompt": "Analyze new sales anomalies and write a short operational summary.",
-    "agents": ["manager", "clickhouse_query"],
-    "status": "active",
-    "trigger": {{
-      "kind": "daily",
-      "timezone": "Europe/Paris",
-      "oneTimeAt": "",
-      "timeOfDay": "09:00",
-      "weekdays": ["mon"],
-      "intervalMinutes": 60,
-      "pollMinutes": 5,
-      "watchSql": "",
-      "watchMode": "result_changes",
-      "directory": "",
-      "pattern": "*",
-      "recursive": false
-    }}
-  }},
-  "clarification_question": "short English question if something important is missing",
-  "should_open_form": false,
-  "reasoning": "short explanation"
-}}
-
-Allowed agents: manager, clickhouse_query, file_management.
-Allowed trigger kinds: once, daily, weekly, interval, clickhouse_watch, file_watch.
-Allowed watch modes: returns_rows, count_increases, result_changes.
-Allowed weekdays: mon, tue, wed, thu, fri, sat, sun.
-Keep the answer in English.
-If the user explicitly asks to open the form, set should_open_form to true.
-Do not invent unsupported trigger kinds or agent names.
-Only fill fields when the user clearly implies them or they already exist in the current draft.
-
-Current draft:
-{json.dumps(current_draft, ensure_ascii=False, indent=2)}
-
-Recent conversation memory:
-{_conversation_memory_markdown(history, current_message=user_message)}
-
-User message:
-{user_message}
-""".strip()
-
-    raw = await llm_chat(
-        [{"role": "user", "content": prompt}],
-        llm_base_url,
-        llm_model,
-        llm_provider,
-        llm_api_key,
+    raw = await _llm_chat_from_prompt_template(
+        PLANNING_ANALYSIS_PROMPT,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
         response_format="json",
+        disable_ssl_verification=disable_ssl_verification,
+        current_draft_json=json.dumps(current_draft, ensure_ascii=False, indent=2),
+        history_markdown=_conversation_memory_markdown(history, current_message=user_message),
+        user_message=user_message,
     )
     parsed = extract_json_object(raw)
     return {
@@ -7845,13 +7985,208 @@ User message:
     }
 
 
+def _planning_detect_mode(user_message: str) -> Literal["empty", "reset", "list", "open_form", "analyze"]:
+    message = (user_message or "").strip()
+    if not message:
+        return "empty"
+
+    lowered = message.lower()
+    if any(token in lowered for token in ["reset", "start over", "clear draft"]):
+        return "reset"
+    if any(token in lowered for token in ["list plans", "show plans", "existing plans", "what plans"]):
+        return "list"
+    if any(token in lowered for token in ["open form", "open planner", "planner form", "show form"]):
+        return "open_form"
+    return "analyze"
+
+
+def _planning_detect_mode_node(state: PlanningChatGraphState) -> PlanningChatGraphState:
+    return {"mode": _planning_detect_mode(str(state.get("user_message") or ""))}
+
+
+def _planning_chat_route(state: PlanningChatGraphState) -> str:
+    return "analysis" if state.get("mode") == "analyze" else "direct"
+
+
+def _planning_direct_response_node(state: PlanningChatGraphState) -> PlanningChatGraphState:
+    mode = state.get("mode") or "empty"
+    timezone_name = str(state.get("timezone_name") or "UTC")
+    current_draft = _merge_planning_draft(state.get("current_draft"), None, timezone_name)
+    planning_state = state.get("planning_state") or {"plans": [], "runs": []}
+    missing_fields = _validate_planning_draft(current_draft)
+
+    if mode == "reset":
+        fresh_draft = _default_planning_draft(timezone_name)
+        response = _planning_response_payload(
+            fresh_draft,
+            _validate_planning_draft(fresh_draft),
+            (
+                f"## {PLANNING_PRODUCT_NAME}\n"
+                "The planning draft has been reset. Tell me what you want to automate, or open the form."
+            ),
+            [
+                {
+                    "id": "planning-reset",
+                    "title": "Reset planning draft",
+                    "status": "success",
+                    "details": "The previous draft was cleared.",
+                }
+            ],
+        )
+        return {"response": response}
+
+    if mode == "list":
+        response = _planning_response_payload(
+            current_draft,
+            missing_fields,
+            _planning_state_markdown(planning_state),
+            [
+                {
+                    "id": "planning-list",
+                    "title": "Loaded existing plans",
+                    "status": "success",
+                    "details": f"Found {len((planning_state or {}).get('plans', []))} saved planning job(s).",
+                }
+            ],
+        )
+        return {"response": response}
+
+    if mode == "open_form":
+        response = _planning_response_payload(
+            current_draft,
+            missing_fields,
+            _planning_summary_markdown(current_draft, missing_fields),
+            [
+                {
+                    "id": "planning-open-form",
+                    "title": "Prepared planner form",
+                    "status": "success",
+                    "details": "The current draft is ready to be reviewed in the planning form.",
+                }
+            ],
+        )
+        return {"response": response}
+
+    response = _planning_response_payload(
+        current_draft,
+        missing_fields,
+        (
+            f"## {PLANNING_PRODUCT_NAME}\n"
+            "Describe the automation you want in natural language, or open the planning form "
+            "to configure triggers, existing agents, and monitoring rules step by step."
+        ),
+        [
+            {
+                "id": "planning-ready",
+                "title": "Planner ready",
+                "status": "success",
+                "details": "The planner can work from natural language or from the full-screen form.",
+            }
+        ],
+    )
+    return {"response": response}
+
+
+async def _planning_analysis_node(state: PlanningChatGraphState) -> PlanningChatGraphState:
+    llm_config = state.get("llm_config") or {}
+    analysis = await analyze_planning_request(
+        str(state.get("user_message") or ""),
+        list(state.get("history") or []),
+        dict(state.get("current_draft") or {}),
+        str(llm_config.get("llm_base_url") or "http://localhost:11434"),
+        str(llm_config.get("llm_model") or "llama3"),
+        str(llm_config.get("llm_provider") or "ollama"),
+        llm_config.get("llm_api_key") or None,
+        bool(llm_config.get("disable_ssl_verification", False)),
+    )
+    return {"analysis": analysis}
+
+
+def _planning_finalize_response_node(state: PlanningChatGraphState) -> PlanningChatGraphState:
+    timezone_name = str(state.get("timezone_name") or "UTC")
+    current_draft = dict(state.get("current_draft") or {})
+    analysis = state.get("analysis") or {}
+    merged_draft = _merge_planning_draft(current_draft, analysis.get("draft"), timezone_name)
+    missing_fields = _validate_planning_draft(merged_draft)
+    ready_to_review = len(missing_fields) == 0
+    clarification_question = (
+        str(analysis.get("clarification_question") or "").strip()
+        or (
+            f"Please tell me { _planning_missing_prompt(missing_fields) }."
+            if missing_fields
+            else "The draft is ready. Open the planning form to review and save it."
+        )
+    )
+    answer = (
+        f"{_planning_summary_markdown(merged_draft, missing_fields)}\n\n"
+        "## Guidance\n"
+        f"{clarification_question}"
+    )
+    response = _planning_response_payload(
+        merged_draft,
+        missing_fields,
+        answer,
+        [
+            {
+                "id": "planning-parse",
+                "title": "Parsed planning request",
+                "status": "success",
+                "details": (
+                    analysis.get("reasoning")
+                    or "The local LLM extracted the planning intent into a structured draft through LangGraph."
+                ),
+            },
+            {
+                "id": "planning-review",
+                "title": "Draft readiness",
+                "status": "success" if ready_to_review else "running",
+                "details": (
+                    "The draft is complete and ready for form review."
+                    if ready_to_review
+                    else f"Still missing { _planning_missing_prompt(missing_fields) }."
+                ),
+            },
+        ],
+        last_question=clarification_question,
+    )
+    return {"response": response}
+
+
+def _build_planning_chat_graph():
+    graph = StateGraph(PlanningChatGraphState)
+    graph.add_node("detect_mode", _planning_detect_mode_node)
+    graph.add_node("direct_response", _planning_direct_response_node)
+    graph.add_node("llm_analysis", _planning_analysis_node)
+    graph.add_node("finalize_response", _planning_finalize_response_node)
+    graph.add_edge(START, "detect_mode")
+    graph.add_conditional_edges(
+        "detect_mode",
+        _planning_chat_route,
+        {
+            "direct": "direct_response",
+            "analysis": "llm_analysis",
+        },
+    )
+    graph.add_edge("direct_response", END)
+    graph.add_edge("llm_analysis", "finalize_response")
+    graph.add_edge("finalize_response", END)
+    return graph.compile()
+
+
+def _get_planning_chat_graph():
+    global _planning_chat_graph
+    if _planning_chat_graph is None:
+        _planning_chat_graph = _build_planning_chat_graph()
+    return _planning_chat_graph
+
+
 def _planning_state_markdown(planning_state: dict) -> str:
     plans = planning_state.get("plans", [])
     if not plans:
         return (
-            "## CrewAI Planning\n"
+            f"## {PLANNING_PRODUCT_NAME}\n"
             "No automation has been saved yet.\n\n"
-            "Use natural language to describe a schedule or open the planner form."
+            "Use natural language to describe a schedule or open the planning form."
         )
 
     lines = [
@@ -8194,35 +8529,17 @@ async def _summarize_planning_outputs(
     app_config: dict,
 ) -> str:
     llm_config = _app_llm_config(app_config)
-    prompt = f"""
-You are summarizing the result of a scheduled automation.
-Write the answer in English with exactly these markdown sections:
-## Summary
-One concise summary.
-
-## Trigger
-One concise explanation of why it ran.
-
-## Agent Outputs
-One-line summary per agent.
-
-Automation name: {plan.get("name") or "Untitled plan"}
-Objective:
-{plan.get("prompt") or ""}
-
-Trigger context:
-{_build_trigger_context_markdown(trigger_context)}
-
-Outputs:
-{_truncate_json(outputs, max_chars=5000)}
-""".strip()
-
-    return await llm_chat(
-        [{"role": "user", "content": prompt}],
-        llm_config["llm_base_url"],
-        llm_config["llm_model"],
-        llm_config["llm_provider"],
-        llm_config["llm_api_key"],
+    return await _llm_chat_from_prompt_template(
+        PLANNING_RUN_SUMMARY_PROMPT,
+        llm_base_url=llm_config["llm_base_url"],
+        llm_model=llm_config["llm_model"],
+        llm_provider=llm_config["llm_provider"],
+        llm_api_key=llm_config["llm_api_key"],
+        disable_ssl_verification=bool(llm_config.get("disable_ssl_verification", False)),
+        plan_name=plan.get("name") or "Untitled plan",
+        plan_prompt=plan.get("prompt") or "",
+        trigger_markdown=_build_trigger_context_markdown(trigger_context),
+        outputs_json=_truncate_json(outputs, max_chars=5000),
     )
 
 
@@ -8349,6 +8666,145 @@ async def _due_trigger_context(plan: dict, app_config: dict, now_dt: datetime) -
     return None
 
 
+def _planning_execution_route(state: PlanningExecutionGraphState) -> str:
+    pending_agents = state.get("pending_agents") or []
+    return "run_agent" if pending_agents else "summarize"
+
+
+def _planning_execution_init_node(state: PlanningExecutionGraphState) -> PlanningExecutionGraphState:
+    return {
+        "pending_agents": list((state.get("plan") or {}).get("agents") or []),
+        "outputs": [],
+        "overall_status": "success",
+    }
+
+
+async def _planning_execution_run_agent_node(
+    state: PlanningExecutionGraphState,
+) -> PlanningExecutionGraphState:
+    pending_agents = list(state.get("pending_agents") or [])
+    outputs = list(state.get("outputs") or [])
+    overall_status = str(state.get("overall_status") or "success")
+    if not pending_agents:
+        return {
+            "pending_agents": pending_agents,
+            "outputs": outputs,
+            "overall_status": overall_status,
+        }
+
+    agent = pending_agents.pop(0)
+    plan = dict(state.get("plan") or {})
+    trigger_context = dict(state.get("trigger_context") or {"kind": "manual"})
+    app_config = dict(state.get("app_config") or {})
+
+    try:
+        if agent == "clickhouse_query":
+            output = await _run_clickhouse_planning_agent(plan, trigger_context, app_config)
+        elif agent == "file_management":
+            output = await _run_file_management_planning_agent(plan, trigger_context, app_config)
+        else:
+            output = await _run_local_role_agent(agent, plan, trigger_context, app_config)
+    except Exception as agent_error:
+        output = {
+            "agent": agent,
+            "status": "error",
+            "content": f"Agent execution failed: {agent_error}",
+        }
+        overall_status = "error"
+
+    outputs.append(output)
+    if output.get("status") == "error":
+        overall_status = "error"
+
+    return {
+        "pending_agents": pending_agents,
+        "outputs": outputs,
+        "overall_status": overall_status,
+    }
+
+
+async def _planning_execution_summarize_node(
+    state: PlanningExecutionGraphState,
+) -> PlanningExecutionGraphState:
+    plan = dict(state.get("plan") or {})
+    trigger_context = dict(state.get("trigger_context") or {"kind": "manual"})
+    app_config = dict(state.get("app_config") or {})
+    outputs = list(state.get("outputs") or [])
+    overall_status = str(state.get("overall_status") or "success")
+
+    try:
+        summary = await _summarize_planning_outputs(plan, outputs, trigger_context, app_config)
+    except Exception as summary_error:
+        fallback_lines = [
+            "## Summary",
+            "The automation finished, but the final narrative summary could not be generated.",
+            "",
+            "## Trigger",
+            _planning_trigger_label(trigger_context),
+            "",
+            "## Agent Outputs",
+        ]
+        if outputs:
+            fallback_lines.extend(
+                f"- **{output.get('agent') or 'agent'}** · {output.get('status') or 'unknown'}"
+                for output in outputs
+            )
+        else:
+            fallback_lines.append("- No agent output was captured.")
+            overall_status = "error"
+        fallback_lines.extend(
+            [
+                "",
+                "<details><summary>Expand technical details</summary>",
+                "",
+                "```text",
+                str(summary_error),
+                "```",
+                "",
+                "</details>",
+            ]
+        )
+        summary = "\n".join(fallback_lines)
+
+    return {
+        "summary": summary,
+        "overall_status": overall_status,
+    }
+
+
+def _build_planning_execution_graph():
+    graph = StateGraph(PlanningExecutionGraphState)
+    graph.add_node("initialize", _planning_execution_init_node)
+    graph.add_node("run_agent", _planning_execution_run_agent_node)
+    graph.add_node("summarize", _planning_execution_summarize_node)
+    graph.add_edge(START, "initialize")
+    graph.add_conditional_edges(
+        "initialize",
+        _planning_execution_route,
+        {
+            "run_agent": "run_agent",
+            "summarize": "summarize",
+        },
+    )
+    graph.add_conditional_edges(
+        "run_agent",
+        _planning_execution_route,
+        {
+            "run_agent": "run_agent",
+            "summarize": "summarize",
+        },
+    )
+    graph.add_edge("summarize", END)
+    return graph.compile()
+
+
+def _get_planning_execution_graph():
+    global _planning_execution_graph
+    if _planning_execution_graph is None:
+        _planning_execution_graph = _build_planning_execution_graph()
+    return _planning_execution_graph
+
+
 async def execute_planning_run(
     plan_id: str,
     trigger_context: Optional[dict[str, Any]] = None,
@@ -8387,28 +8843,29 @@ async def execute_planning_run(
 
     outputs: list[dict[str, Any]] = []
     overall_status = "success"
+    summary = ""
     try:
-        for agent in plan.get("agents") or []:
-            try:
-                if agent == "clickhouse_query":
-                    output = await _run_clickhouse_planning_agent(plan, context, app_config)
-                elif agent == "file_management":
-                    output = await _run_file_management_planning_agent(plan, context, app_config)
-                else:
-                    output = await _run_local_role_agent(agent, plan, context, app_config)
-            except Exception as agent_error:
-                output = {
-                    "agent": agent,
-                    "status": "error",
-                    "content": f"Agent execution failed: {agent_error}",
-                }
-                overall_status = "error"
-            outputs.append(output)
-
-        summary = await _summarize_planning_outputs(plan, outputs, context, app_config)
+        graph_result = await _get_planning_execution_graph().ainvoke(
+            {
+                "plan": plan,
+                "trigger_context": context,
+                "app_config": app_config,
+            }
+        )
+        outputs = list(graph_result.get("outputs") or [])
+        overall_status = str(graph_result.get("overall_status") or "success")
+        summary = str(graph_result.get("summary") or "").strip()
+        if not summary:
+            summary = await _summarize_planning_outputs(plan, outputs, context, app_config)
     except Exception as execution_error:
         overall_status = "error"
-        summary = f"## Summary\nThe automation failed.\n\n## Trigger\n{_planning_trigger_label(context)}\n\n## Agent Outputs\n{execution_error}"
+        summary = (
+            "## Summary\n"
+            "The automation failed.\n\n"
+            f"## Trigger\n{_planning_trigger_label(context)}\n\n"
+            "## Agent Outputs\n"
+            f"{execution_error}"
+        )
 
     latest_state = await read_db_state()
     latest_planning = _planning_state_from_db(latest_state)
@@ -9038,155 +9495,35 @@ async def chat_crewai_planning(req: PlanningChatRequest):
     )
     current_draft = _merge_planning_draft(req.agent_state.draft, None, timezone_name)
     planning_state = _planning_state_from_db(await read_db_state())
-    open_form_action = {
-        "id": "open-planning-form",
-        "label": "Open planning form",
-        "actionType": "open_planning_form",
-        "variant": "primary",
-    }
-
-    if not user_message:
-        missing_fields = _validate_planning_draft(current_draft)
-        return {
-            "answer": (
-                "## CrewAI Planning\n"
-                "Describe the automation you want in natural language, or open the planner form "
-                "to configure triggers, existing agents, and monitoring rules step by step."
-            ),
-            "agent_state": {
-                "draft": current_draft,
-                "missing_fields": missing_fields,
-                "last_question": "",
-                "ready_to_review": len(missing_fields) == 0,
+    result = await _get_planning_chat_graph().ainvoke(
+        {
+            "user_message": user_message,
+            "history": req.history,
+            "current_draft": current_draft,
+            "timezone_name": timezone_name,
+            "planning_state": planning_state,
+            "llm_config": {
+                "llm_base_url": req.llm_base_url,
+                "llm_model": req.llm_model,
+                "llm_provider": req.llm_provider,
+                "llm_api_key": req.llm_api_key,
+                "disable_ssl_verification": req.disable_ssl_verification,
             },
-            "actions": [open_form_action],
-            "steps": [
-                {
-                    "id": "planning-ready",
-                    "title": "Planner ready",
-                    "status": "success",
-                    "details": "The planner can work from natural language or from the full-screen form.",
-                }
-            ],
         }
-
-    lowered = user_message.lower()
-    if any(token in lowered for token in ["reset", "start over", "clear draft"]):
-        fresh_draft = _default_planning_draft(timezone_name)
-        return {
-            "answer": "## CrewAI Planning\nThe planning draft has been reset. Tell me what you want to automate, or open the form.",
-            "agent_state": {
-                "draft": fresh_draft,
-                "missing_fields": _validate_planning_draft(fresh_draft),
-                "last_question": "",
-                "ready_to_review": False,
-            },
-            "actions": [open_form_action],
-            "steps": [
-                {
-                    "id": "planning-reset",
-                    "title": "Reset planning draft",
-                    "status": "success",
-                    "details": "The previous draft was cleared.",
-                }
-            ],
-        }
-
-    if any(token in lowered for token in ["list plans", "show plans", "existing plans", "what plans"]):
-        return {
-            "answer": _planning_state_markdown(planning_state),
-            "agent_state": {
-                "draft": current_draft,
-                "missing_fields": _validate_planning_draft(current_draft),
-                "last_question": "",
-                "ready_to_review": len(_validate_planning_draft(current_draft)) == 0,
-            },
-            "actions": [open_form_action],
-            "steps": [
-                {
-                    "id": "planning-list",
-                    "title": "Loaded existing plans",
-                    "status": "success",
-                    "details": f"Found {len(planning_state.get('plans', []))} saved planning job(s).",
-                }
-            ],
-        }
-
-    if any(token in lowered for token in ["open form", "open planner", "planner form", "show form"]):
-        missing_fields = _validate_planning_draft(current_draft)
-        return {
-            "answer": _planning_summary_markdown(current_draft, missing_fields),
-            "agent_state": {
-                "draft": current_draft,
-                "missing_fields": missing_fields,
-                "last_question": "",
-                "ready_to_review": len(missing_fields) == 0,
-            },
-            "actions": [open_form_action],
-            "steps": [
-                {
-                    "id": "planning-open-form",
-                    "title": "Prepared planner form",
-                    "status": "success",
-                    "details": "The current draft is ready to be reviewed in the planner form.",
-                }
-            ],
-        }
-
-    analysis = await analyze_planning_request(
-        user_message,
-        req.history,
+    )
+    return result.get("response") or _planning_response_payload(
         current_draft,
-        req.llm_base_url,
-        req.llm_model,
-        req.llm_provider,
-        req.llm_api_key,
-    )
-    merged_draft = _merge_planning_draft(current_draft, analysis.get("draft"), timezone_name)
-    missing_fields = _validate_planning_draft(merged_draft)
-    ready_to_review = len(missing_fields) == 0
-    clarification_question = (
-        analysis.get("clarification_question")
-        or (
-            f"Please tell me { _planning_missing_prompt(missing_fields) }."
-            if missing_fields else
-            "The draft is ready. Open the planner form to review and save it."
-        )
-    )
-    answer = (
-        f"{_planning_summary_markdown(merged_draft, missing_fields)}\n\n"
-        "## Guidance\n"
-        f"{clarification_question}"
-    )
-
-    return {
-        "answer": answer,
-        "agent_state": {
-            "draft": merged_draft,
-            "missing_fields": missing_fields,
-            "last_question": clarification_question,
-            "ready_to_review": ready_to_review,
-        },
-        "actions": [open_form_action],
-        "steps": [
+        _validate_planning_draft(current_draft),
+        f"## {PLANNING_PRODUCT_NAME}\nThe planner could not build a response.",
+        [
             {
-                "id": "planning-parse",
-                "title": "Parsed planning request",
-                "status": "success",
-                "details": analysis.get("reasoning") or "The local LLM extracted the planning intent into a structured draft.",
-            },
-            {
-                "id": "planning-review",
-                "title": "Draft readiness",
-                "status": "success" if ready_to_review else "running",
-                "details": (
-                    "The draft is complete and ready for form review."
-                    if ready_to_review
-                    else f"Still missing { _planning_missing_prompt(missing_fields) }."
-                ),
-            },
+                "id": "planning-fallback",
+                "title": "Fallback response",
+                "status": "error",
+                "details": "The planning graph returned an empty response.",
+            }
         ],
-    }
+    )
 
 
 @app.post("/api/chat/file-manager-agent")

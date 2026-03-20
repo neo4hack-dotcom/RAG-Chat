@@ -86,7 +86,7 @@ export function PlanningMonitorModal({
             <div>
               <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">
                 <Activity className="h-3.5 w-3.5" />
-                CrewAI - Planning Monitor
+                LangGraph Planning Monitor
               </div>
               <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
                 Execution tracking, scheduling health, and recent agent activity
