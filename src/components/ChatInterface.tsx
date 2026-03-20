@@ -2509,7 +2509,7 @@ export function ChatInterface({
 
       {isToolsIslandOpen && (
         <div className="absolute inset-0 z-40 flex items-center justify-center px-4 py-8 md:px-8 pointer-events-none">
-          <div className="absolute inset-0 bg-slate-950/10 backdrop-blur-[2px] pointer-events-auto dark:bg-black/30" aria-hidden="true" />
+          <div className="absolute inset-0 bg-slate-950/10 backdrop-blur-[2px] pointer-events-none dark:bg-black/30" aria-hidden="true" />
           <div
             ref={toolsIslandRef}
             className={`pointer-events-auto relative w-full ${toolsIslandWidthClass} animate-scale-in rounded-[2.35rem] border border-white/70 bg-white/82 p-4 shadow-[0_30px_90px_rgba(15,23,42,0.20)] backdrop-blur-3xl dark:border-white/10 dark:bg-black/55`}
