@@ -209,14 +209,6 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-// ── Detect if content is predominantly HTML ───────────────────────────────────
-
-function isHtmlContent(content: string): boolean {
-  const stripped = content.trim();
-  // If it starts with an HTML tag and contains closing tags, treat as HTML
-  return /^<[a-zA-Z][\s\S]*>[\s\S]*<\/[a-zA-Z]>/.test(stripped);
-}
-
 function ChartPreview({ chart }: { chart: ChartSpec }) {
   const width = 760;
   const height = 280;
@@ -539,8 +531,16 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
           <li className="list-none inline-block mr-2 mb-2 align-top" {...props}>
             <button
               type="button"
-              onClick={() => onCheckboxToggle?.(messageId, choiceLabel || rawText, true)}
-              className="group inline-flex max-w-full items-center gap-2 rounded-md border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-left text-[11px] font-medium text-cyan-700 shadow-sm transition-all hover:bg-cyan-100 hover:border-cyan-300 dark:border-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 dark:hover:bg-cyan-900/45 dark:hover:border-cyan-500"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onCheckboxToggle?.(messageId, choiceLabel || rawText, true);
+              }}
+              className="group pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-md border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-left text-[11px] font-medium text-cyan-700 shadow-sm transition-all hover:bg-cyan-100 hover:border-cyan-300 dark:border-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 dark:hover:bg-cyan-900/45 dark:hover:border-cyan-500"
               aria-label={choiceLabel || rawText}
             >
               <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 dark:bg-cyan-300 flex-shrink-0" />
@@ -574,12 +574,12 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
     ),
 
     details: ({ children, ...props }: any) => (
-      <details className="my-4 overflow-hidden rounded-[1.35rem] border border-gray-200/80 bg-white/75 shadow-sm dark:border-gray-700/80 dark:bg-gray-900/45" {...props}>
+      <details className="pointer-events-auto my-4 overflow-hidden rounded-[1.35rem] border border-gray-200/80 bg-white/75 shadow-sm dark:border-gray-700/80 dark:bg-gray-900/45" {...props}>
         {children}
       </details>
     ),
     summary: ({ children, ...props }: any) => (
-      <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-100 transition-colors hover:bg-black/5 dark:hover:bg-white/5 [&::-webkit-details-marker]:hidden" {...props}>
+      <summary className="pointer-events-auto cursor-pointer list-none px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-100 transition-colors hover:bg-black/5 dark:hover:bg-white/5 [&::-webkit-details-marker]:hidden" {...props}>
         {children}
       </summary>
     ),
@@ -631,8 +631,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
   };
 
   const content = message.content;
-  const htmlMode = !isUser && isHtmlContent(content);
-  const renderedContent = !isUser && !htmlMode ? preprocessMarkdown(content) : content;
+  const renderedContent = !isUser ? preprocessMarkdown(content) : content;
   const agentIntroCard = !isUser ? getAgentIntroCardData(content) : null;
 
   if (agentIntroCard) {
@@ -669,7 +668,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
       </div>
 
       <div className={cn(
-        "group relative px-5 py-3 rounded-[1.7rem]",
+        "group pointer-events-auto relative px-5 py-3 rounded-[1.7rem]",
         isUser
           ? "max-w-[88%] bg-blue-500 text-white rounded-tr-sm shadow-md shadow-blue-500/10"
           : "glass-panel rounded-tl-sm w-full"
@@ -776,14 +775,8 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
         {/* Message Content */}
         {isUser ? (
           <div className="whitespace-pre-wrap text-[14px] leading-[1.65]">{content}</div>
-        ) : htmlMode ? (
-          // Raw HTML content (e.g. some local LLMs output HTML directly)
-          <div
-            className="markdown-body llm-html max-w-none"
-            dangerouslySetInnerHTML={{ __html: content }}
-          />
         ) : (
-          <div className="markdown-body">
+          <div className="markdown-body pointer-events-auto">
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkBreaks]}
               rehypePlugins={[rehypeRaw]}
