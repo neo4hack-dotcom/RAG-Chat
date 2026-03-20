@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit } from "lucide-react";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -71,7 +71,7 @@ This agent works in English and handles deeper ClickHouse investigations through
 - It can run several targeted queries before answering, instead of stopping after a single SQL execution.
 - It keeps one primary table in focus, asks you to choose only when the table stays ambiguous, and preserves the latest analytical context in the same conversation.
 - It can look into the knowledge base when configured, repair failed SQL automatically with a simpler fallback, and export the latest dataset to CSV when you explicitly ask for it.
-- It returns a business-facing markdown answer while exposing the analytical steps performed in the chat.`;
+- It returns a business-facing markdown answer while keeping analytical steps available from the thinking panel.`;
   }
 
   if (agentRole === 'file_management') {
@@ -181,6 +181,43 @@ function isAgentIntroMessage(message: Message): boolean {
 
 function isIntroductoryAssistantMessage(message: Message): boolean {
   return isDefaultWelcomeMessage(message) || isAgentIntroMessage(message);
+}
+
+function stepBadgeLabel(step: AgentStep): string {
+  const rawType = ((step as any).type ?? '').toString().trim();
+  return rawType ? rawType.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()) : '';
+}
+
+function stepReasoning(step: AgentStep): string {
+  return ((step as any).reasoning ?? '').toString().trim();
+}
+
+function stepResultSummary(step: AgentStep): string {
+  return (((step as any).result_summary ?? (step as any).resultSummary) ?? '').toString().trim();
+}
+
+function stepSql(step: AgentStep): string {
+  return ((step as any).sql ?? '').toString().trim();
+}
+
+function stepRowCount(step: AgentStep): number | null {
+  const raw = (step as any).row_count ?? (step as any).rowCount;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+}
+
+function stepSuggestedPath(step: AgentStep): string {
+  return (((step as any).suggested_path ?? (step as any).suggestedPath) ?? '').toString().trim();
+}
+
+function compactMessagePreview(content: string, maxLength = 132): string {
+  const plain = String(content || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/[`#>*_-]/g, ' ')
+    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!plain) return 'Assistant response';
+  return plain.length > maxLength ? `${plain.slice(0, maxLength - 1)}…` : plain;
 }
 
 function clampChatZoom(value: number): number {
@@ -417,6 +454,7 @@ export function ChatInterface({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [chatZoom, setChatZoom] = useState(CHAT_ZOOM_DEFAULT);
   const [isZoomControlOpen, setIsZoomControlOpen] = useState(false);
+  const [isThinkingPanelOpen, setIsThinkingPanelOpen] = useState(false);
   const [isInputCopied, setIsInputCopied] = useState(false);
   
   // Refs for DOM elements
@@ -463,6 +501,14 @@ export function ChatInterface({
   const visibleMessages = shouldHideIntroductoryMessages
     ? messages.filter((message) => !isIntroductoryAssistantMessage(message))
     : messages;
+  const thinkingMessages = messages.filter(
+    (message) =>
+      message.role === 'assistant' &&
+      !isDefaultWelcomeMessage(message) &&
+      !isAgentIntroMessage(message) &&
+      Array.isArray(message.steps) &&
+      message.steps.length > 0
+  );
   const lastAssistantMessage = [...visibleMessages]
     .reverse()
     .find((message) => message.role === 'assistant') ?? null;
@@ -506,6 +552,7 @@ export function ChatInterface({
     setInput("");
     setAttachments([]);
     setIsLoading(false);
+    setIsThinkingPanelOpen(false);
     setIsPlanningModalOpen(false);
     setIsPlanningMonitorOpen(false);
     setIsFileManagerConfigOpen(false);
@@ -521,8 +568,8 @@ export function ChatInterface({
 
   const handleWorkflowSelection = (nextWorkflow: WorkflowMode) => {
     if (workflow === nextWorkflow) {
+      setIsToolsIslandOpen(true);
       if (nextWorkflow === 'AGENT') {
-        setIsToolsIslandOpen(true);
         const nextExpanded = !isAgentMenuExpanded;
         setIsAgentMenuExpanded(nextExpanded);
         setIsMcpMenuExpanded(false);
@@ -532,49 +579,60 @@ export function ChatInterface({
           setIsOtherAgentsOpen(true);
         }
       } else if (nextWorkflow === 'MCP') {
-        setIsToolsIslandOpen(true);
         setIsMcpMenuExpanded((open) => !open);
         setIsAgentMenuExpanded(false);
         setIsOtherAgentsOpen(false);
       } else {
-        collapseToolsIsland();
+        setIsAgentMenuExpanded(false);
+        setIsMcpMenuExpanded(false);
+        setIsOtherAgentsOpen(false);
       }
       return;
     }
     resetChatShell();
+    setIsToolsIslandOpen(true);
     if (nextWorkflow === 'AGENT') {
-      setIsToolsIslandOpen(true);
       setIsAgentMenuExpanded(true);
       setIsMcpMenuExpanded(false);
       setIsOtherAgentsOpen(agentRole !== 'manager');
     } else if (nextWorkflow === 'MCP') {
-      setIsToolsIslandOpen(true);
       setIsAgentMenuExpanded(false);
       setIsMcpMenuExpanded(true);
       setIsOtherAgentsOpen(false);
     } else {
-      collapseToolsIsland();
+      setIsAgentMenuExpanded(false);
+      setIsMcpMenuExpanded(false);
+      setIsOtherAgentsOpen(false);
     }
     onWorkflowChange(nextWorkflow);
   };
 
   const handleAgentRoleSelection = (nextRole: AgentRole) => {
     if (workflow === 'AGENT' && agentRole === nextRole) {
-      collapseToolsIsland();
+      setIsToolsIslandOpen(true);
+      setIsAgentMenuExpanded(true);
+      setIsOtherAgentsOpen(nextRole !== 'manager');
       return;
     }
     resetChatShell();
-    collapseToolsIsland();
+    setIsToolsIslandOpen(true);
+    setIsAgentMenuExpanded(true);
+    setIsMcpMenuExpanded(false);
+    setIsOtherAgentsOpen(nextRole !== 'manager');
     onAgentRoleChange(nextRole);
   };
 
   const handleMcpToolSelection = (nextToolId: string) => {
     if (mcpToolId === nextToolId) {
-      collapseToolsIsland();
+      setIsToolsIslandOpen(true);
+      setIsMcpMenuExpanded(true);
       return;
     }
     resetChatShell();
-    collapseToolsIsland();
+    setIsToolsIslandOpen(true);
+    setIsAgentMenuExpanded(false);
+    setIsMcpMenuExpanded(true);
+    setIsOtherAgentsOpen(false);
     onMcpToolIdChange(nextToolId);
   };
 
@@ -632,17 +690,19 @@ export function ChatInterface({
   }, [lastAssistantMessageAnchorKey, isLoading]);
 
   useEffect(() => {
-    if (!isZoomControlOpen) return;
+    if (!isZoomControlOpen && !isThinkingPanelOpen) return;
 
     const handlePointerDown = (event: MouseEvent) => {
       if (!zoomControlRef.current?.contains(event.target as Node)) {
         setIsZoomControlOpen(false);
+        setIsThinkingPanelOpen(false);
       }
     };
 
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsZoomControlOpen(false);
+        setIsThinkingPanelOpen(false);
       }
     };
 
@@ -652,30 +712,7 @@ export function ChatInterface({
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleEscape);
     };
-  }, [isZoomControlOpen]);
-
-  useEffect(() => {
-    if (!isToolsIslandOpen) return;
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!toolsIslandRef.current?.contains(event.target as Node)) {
-        collapseToolsIsland();
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        collapseToolsIsland();
-      }
-    };
-
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleEscape);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleEscape);
-    };
-  }, [isToolsIslandOpen]);
+  }, [isThinkingPanelOpen, isZoomControlOpen]);
 
   useEffect(() => {
     if ((config.mcpTools ?? []).length === 0) {
@@ -2264,7 +2301,7 @@ export function ChatInterface({
                         message={msg}
                         onCheckboxToggle={handleCheckboxToggle}
                         onAction={handleChatAction}
-                        showSteps={workflow === 'AGENT' || workflow === 'CREWAI'}
+                        showSteps={false}
                       />
                     </div>
                   ))}
@@ -2422,12 +2459,7 @@ export function ChatInterface({
 
       {isToolsIslandOpen && (
         <div className="absolute inset-0 z-40 flex items-center justify-center px-4 py-8 md:px-8 pointer-events-none">
-          <button
-            type="button"
-            aria-label="Close tools menu"
-            onClick={collapseToolsIsland}
-            className="absolute inset-0 bg-slate-950/10 backdrop-blur-[2px] pointer-events-auto dark:bg-black/30"
-          />
+          <div className="absolute inset-0 bg-slate-950/10 backdrop-blur-[2px] pointer-events-auto dark:bg-black/30" aria-hidden="true" />
           <div
             ref={toolsIslandRef}
             className={`pointer-events-auto relative w-full ${toolsIslandWidthClass} animate-scale-in rounded-[2.35rem] border border-white/70 bg-white/82 p-4 shadow-[0_30px_90px_rgba(15,23,42,0.20)] backdrop-blur-3xl dark:border-white/10 dark:bg-black/55`}
@@ -2703,13 +2735,143 @@ export function ChatInterface({
           </div>
         )}
 
-        <div className="flex items-center gap-3">
+        {isThinkingPanelOpen && (
+          <div className="glass-panel w-[28rem] max-w-[calc(100vw-5.5rem)] overflow-hidden rounded-[1.9rem] p-3 shadow-[0_22px_55px_rgba(15,23,42,0.2)] animate-scale-in">
+            <div className="flex items-start justify-between gap-3 px-1 pb-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                  Thinking Trace
+                </div>
+                <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
+                  {thinkingMessages.length} response{thinkingMessages.length > 1 ? 's' : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsThinkingPanelOpen(false)}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+                title="Close thinking trace"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="max-h-[min(34rem,calc(100vh-8rem))] space-y-3 overflow-y-auto pr-1">
+              {thinkingMessages.length === 0 ? (
+                <div className="rounded-[1.45rem] border border-dashed border-gray-200/80 bg-white/60 px-4 py-5 text-sm text-gray-500 dark:border-gray-700/80 dark:bg-white/5 dark:text-gray-400">
+                  No thinking steps available for this conversation yet.
+                </div>
+              ) : (
+                [...thinkingMessages].reverse().map((message) => (
+                  <div
+                    key={`thinking-${message.id}`}
+                    className="rounded-[1.5rem] border border-white/70 bg-white/65 p-3 shadow-sm dark:border-white/10 dark:bg-white/5"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-500 dark:text-gray-400">
+                          {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">
+                          {compactMessagePreview(message.content)}
+                        </div>
+                      </div>
+                      <div className="rounded-full bg-black/5 px-2.5 py-1 text-[10px] font-semibold text-gray-600 dark:bg-white/10 dark:text-gray-300">
+                        {message.steps?.length ?? 0} step{(message.steps?.length ?? 0) > 1 ? 's' : ''}
+                      </div>
+                    </div>
+
+                    <div className="mt-3 space-y-2.5">
+                      {(message.steps ?? []).map((step, index) => (
+                        <div
+                          key={`${message.id}-${step.id ?? index}`}
+                          className="rounded-[1.2rem] border border-gray-200/70 bg-white/75 px-3 py-3 dark:border-gray-700/70 dark:bg-black/20"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                                {step.title}
+                              </div>
+                              <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px]">
+                                {stepBadgeLabel(step) && (
+                                  <span className="rounded-full bg-purple-100 px-2 py-0.5 font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-200">
+                                    {stepBadgeLabel(step)}
+                                  </span>
+                                )}
+                                {stepRowCount(step) !== null && (
+                                  <span className="text-gray-500 dark:text-gray-400">
+                                    {stepRowCount(step)} row(s)
+                                  </span>
+                                )}
+                                {(step as any).retried && (
+                                  <span className="text-amber-600 dark:text-amber-300">
+                                    Auto-retried
+                                  </span>
+                                )}
+                                {stepSuggestedPath(step) && (
+                                  <span className="text-gray-500 dark:text-gray-400">
+                                    {stepSuggestedPath(step)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <span
+                              className={`mt-0.5 h-2.5 w-2.5 flex-shrink-0 rounded-full ${
+                                step.status === 'success'
+                                  ? 'bg-emerald-500'
+                                  : step.status === 'error'
+                                    ? 'bg-red-500'
+                                    : step.status === 'running'
+                                      ? 'bg-blue-500'
+                                      : 'bg-gray-300 dark:bg-gray-600'
+                              }`}
+                            />
+                          </div>
+
+                          {stepReasoning(step) && (
+                            <p className="mt-2 text-[12px] leading-relaxed text-gray-700 dark:text-gray-200">
+                              {stepReasoning(step)}
+                            </p>
+                          )}
+                          {stepResultSummary(step) && (
+                            <p className="mt-1 text-[12px] leading-relaxed text-gray-500 dark:text-gray-400 whitespace-pre-wrap">
+                              {stepResultSummary(step)}
+                            </p>
+                          )}
+                          {stepSql(step) && (
+                            <div className="mt-2 overflow-hidden rounded-xl border border-gray-200 bg-gray-950/95 dark:border-gray-700">
+                              <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+                                <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400">SQL</span>
+                              </div>
+                              <pre className="overflow-x-auto px-3 py-3 text-[11px] leading-relaxed text-gray-100">
+                                <code>{stepSql(step)}</code>
+                              </pre>
+                            </div>
+                          )}
+                          {step.details && !stepReasoning(step) && !stepResultSummary(step) && !stepSql(step) && (
+                            <p className="mt-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
+                              {step.details}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-col items-end gap-3">
           <button
             type="button"
             onClick={() => {
               if (isToolsIslandOpen) {
                 collapseToolsIsland();
               } else {
+                setIsZoomControlOpen(false);
+                setIsThinkingPanelOpen(false);
                 setIsToolsIslandOpen(true);
                 setIsAgentMenuExpanded(false);
                 setIsMcpMenuExpanded(false);
@@ -2736,7 +2898,26 @@ export function ChatInterface({
           </button>
           <button
             type="button"
-            onClick={() => setIsZoomControlOpen((open) => !open)}
+            onClick={() => {
+              setIsThinkingPanelOpen((open) => !open);
+              setIsZoomControlOpen(false);
+            }}
+            className={`${floatingUtilityButtonClass} ${isThinkingPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            title="Thinking trace"
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <BrainCircuit className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                THINK
+              </span>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setIsZoomControlOpen((open) => !open);
+              setIsThinkingPanelOpen(false);
+            }}
             className={floatingUtilityButtonClass}
             title="Chat zoom"
           >
