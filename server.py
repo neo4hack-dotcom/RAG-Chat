@@ -4690,6 +4690,8 @@ Rules:
 - For overwrite, delete, and move actions, call the tool with confirmed=false first.
 - Prefer short answers.
 - If the task is already complete, return action="final".
+- If a successful tool call already completed the requested filesystem change, stop and return action="final" instead of exploring again.
+- Do not perform extra verification or follow-up tool calls unless the user explicitly asked for them or the task still has unfinished steps.
 - The configured sandbox base_path is: {base_path or "not set"}.
 - If you need to inspect files before acting, do that first.
 
@@ -4726,6 +4728,119 @@ Current user request:
         "tool_input": parsed.get("tool_input") if isinstance(parsed.get("tool_input"), dict) else {},
         "final_answer": str(parsed.get("final_answer", "") or "").strip(),
     }
+
+
+FILE_MANAGER_COMPLETION_FALLBACK_TOOLS = {
+    "create_file",
+    "create_excel_file",
+    "write_file",
+    "write_excel_sheet",
+    "edit_excel_cells",
+    "append_excel_rows",
+    "delete_file",
+    "delete_directory",
+    "delete_excel_sheet",
+    "move_file",
+    "add_excel_sheet",
+    "rename_excel_sheet",
+}
+
+
+def _file_manager_completion_answer_from_result(result: dict[str, Any]) -> str:
+    summary = str(result.get("summary") or "The file-management task is complete.").strip()
+    preview = str(result.get("preview") or "").strip()
+    answer = f"## Answer\n{summary}"
+    if preview:
+        answer += f"\n\n## Preview\n{preview}"
+    return answer
+
+
+async def _evaluate_file_manager_completion(
+    user_message: str,
+    history: list[dict[str, Any]],
+    scratchpad: list[dict[str, Any]],
+    tool_name: str,
+    tool_input: dict[str, Any],
+    result: dict[str, Any],
+    system_prompt: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+    disable_ssl_verification: bool = False,
+) -> dict[str, Any]:
+    trimmed_history = _normalized_history_messages(
+        history,
+        current_message=user_message,
+        max_steps=CHAT_MEMORY_MAX_STEPS,
+    )
+    recent_scratchpad = scratchpad[-6:]
+    prompt = f"""
+You are a completion checker for a file-management agent.
+Reply in English.
+
+Return JSON only with this exact shape:
+{{
+  "is_complete": true,
+  "reasoning": "why the task is or is not complete",
+  "final_answer": "final user-facing answer when is_complete=true"
+}}
+
+Rules:
+- Set `is_complete=true` only when the user's request has already been fully satisfied.
+- Set `is_complete=false` if another filesystem action is still required.
+- After a successful create/write/move/delete/edit/export action, prefer `is_complete=true` unless the user explicitly asked for verification or for additional pending steps.
+- Do not ask for extra verification unless the user explicitly requested it.
+- Base the decision on actual tool results only.
+
+System prompt:
+{system_prompt}
+
+Recent conversation:
+{json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
+
+Scratchpad for this request:
+{json.dumps(recent_scratchpad, ensure_ascii=False, indent=2)}
+
+Latest successful tool:
+{json.dumps({"tool_name": tool_name, "tool_input": tool_input, "result": result}, ensure_ascii=False, indent=2)}
+
+Current user request:
+{user_message}
+""".strip()
+
+    try:
+        raw = await llm_chat(
+            [{"role": "user", "content": prompt}],
+            llm_base_url,
+            llm_model,
+            llm_provider,
+            llm_api_key,
+            response_format="json",
+            disable_ssl_verification=disable_ssl_verification,
+        )
+        parsed = extract_json_object(raw)
+        is_complete = bool(parsed.get("is_complete"))
+        final_answer = str(parsed.get("final_answer") or "").strip()
+        if is_complete and not final_answer:
+            final_answer = _file_manager_completion_answer_from_result(result)
+        return {
+            "is_complete": is_complete,
+            "reasoning": str(parsed.get("reasoning") or "").strip(),
+            "final_answer": final_answer,
+        }
+    except Exception as exc:
+        if tool_name in FILE_MANAGER_COMPLETION_FALLBACK_TOOLS:
+            return {
+                "is_complete": True,
+                "reasoning": f"Fallback completion after `{tool_name}` because the completion checker failed: {exc}",
+                "final_answer": _file_manager_completion_answer_from_result(result),
+            }
+        return {
+            "is_complete": False,
+            "reasoning": f"Completion checker failed after `{tool_name}`: {exc}",
+            "final_answer": "",
+        }
 
 
 def _default_file_manager_state() -> dict[str, Any]:
@@ -9855,6 +9970,37 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
             return {
                 "answer": answer,
                 "actions": actions,
+                "agent_state": state,
+                "steps": steps,
+            }
+
+        completion = await _evaluate_file_manager_completion(
+            user_message,
+            req.history,
+            scratchpad,
+            tool_name,
+            tool_input,
+            result,
+            config["systemPrompt"],
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+            req.disable_ssl_verification,
+        )
+        if completion.get("is_complete"):
+            final_answer = str(completion.get("final_answer") or "").strip() or _file_manager_completion_answer_from_result(result)
+            steps.append(
+                {
+                    "id": f"fm-complete-{iteration}",
+                    "title": "Stopped after completed task",
+                    "status": "success",
+                    "details": str(completion.get("reasoning") or result["summary"]).strip(),
+                }
+            )
+            state["last_tool_result"] = final_answer
+            return {
+                "answer": final_answer,
                 "agent_state": state,
                 "steps": steps,
             }

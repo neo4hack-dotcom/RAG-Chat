@@ -875,7 +875,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
   if (agentIntroCard) {
     const Icon = agentIntroCard.icon;
     return (
-      <div className={cn("max-w-[77rem] mx-auto mb-4 rounded-2xl p-4 shadow-sm animate-fade-in-up", agentIntroCard.containerClass)}>
+      <div className={cn("max-w-[77rem] mx-auto mb-4 rounded-2xl p-4 shadow-sm", agentIntroCard.containerClass)}>
         <div className="mb-3 flex items-center gap-3">
           <div className={cn("flex h-10 w-10 items-center justify-center rounded-2xl shadow-sm", agentIntroCard.iconWrapClass)}>
             <Icon className={cn("h-4.5 w-4.5", agentIntroCard.iconClass)} />
