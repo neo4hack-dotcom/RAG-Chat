@@ -2110,16 +2110,6 @@ export function ChatInterface({
     : isToolsIslandOpen
       ? 1
       : 0;
-  const toolsIslandHeightClass =
-    toolsIslandLevel === 2
-      ? workflow === 'AGENT'
-        ? isOtherAgentsOpen
-          ? 'max-h-[24rem] md:max-h-[19rem]'
-          : 'max-h-[15.5rem] md:max-h-[12rem]'
-        : 'max-h-[12rem] md:max-h-[9.5rem]'
-      : toolsIslandLevel === 1
-        ? 'max-h-[10rem] md:max-h-[8rem]'
-        : 'max-h-0';
   const toolsIslandWidthClass =
     toolsIslandLevel === 2
       ? 'w-[min(94vw,54rem)]'
@@ -2251,22 +2241,12 @@ export function ChatInterface({
             {isConnected ? 'Active' : 'Offline'}
           </div>
 
-          <div
-            className={`pointer-events-none absolute left-1/2 top-full z-30 mt-3 w-full -translate-x-1/2 overflow-visible transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-              isToolsIslandOpen ? 'opacity-100' : 'opacity-0'
-            }`}
-          >
-            <div
-              className={`absolute left-1/2 top-2 h-16 w-[60%] -translate-x-1/2 rounded-full bg-gradient-to-r from-cyan-400/25 via-sky-400/18 to-violet-400/20 blur-3xl transition-all duration-500 ${
-                isToolsIslandOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-75'
-              }`}
-            />
-            <div
-              className={`pointer-events-auto mx-auto ${toolsIslandWidthClass} overflow-hidden rounded-[2.6rem] border border-white/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.84),rgba(248,250,252,0.74))] shadow-[0_28px_90px_rgba(15,23,42,0.24)] backdrop-blur-3xl transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] dark:border-white/10 dark:bg-[linear-gradient(180deg,rgba(12,14,18,0.88),rgba(8,10,15,0.72))] ${
-                isToolsIslandOpen ? 'translate-y-0 scale-100 px-4 py-3.5' : '-translate-y-4 scale-95 px-0 py-0'
-              }`}
-            >
-              <div className={`overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${toolsIslandHeightClass}`}>
+          {isToolsIslandOpen && (
+            <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-3 w-full -translate-x-1/2 overflow-visible">
+              <div className="absolute left-1/2 top-2 h-16 w-[60%] -translate-x-1/2 rounded-full bg-gradient-to-r from-cyan-400/25 via-sky-400/18 to-violet-400/20 blur-3xl animate-fade-in-up" />
+              <div
+                className={`pointer-events-auto mx-auto ${toolsIslandWidthClass} animate-scale-in rounded-[2.6rem] border border-white/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(248,250,252,0.76))] px-4 py-3.5 shadow-[0_28px_90px_rgba(15,23,42,0.24)] backdrop-blur-3xl dark:border-white/10 dark:bg-[linear-gradient(180deg,rgba(12,14,18,0.9),rgba(8,10,15,0.76))]`}
+              >
                 <div className="flex items-center justify-between gap-3 px-1 pb-3">
                   <div className="min-w-0">
                     <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-gray-400 dark:text-gray-500">
@@ -2455,7 +2435,7 @@ export function ChatInterface({
                 )}
               </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Right: Settings */}
