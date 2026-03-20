@@ -39,7 +39,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
 | **Data Analyst agent** | Multi-step ClickHouse investigations with iterative evidence gathering, optional knowledge-base search, automatic SQL simplification retry, and CSV export on demand |
 | **Oracle agent** | Natural-language Oracle analysis, schema discovery, SQL validation, automatic repair on query errors, narrative Markdown output |
-| **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions |
+| **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions, with early stop once the requested filesystem change is complete |
 | **PDF creator agent** | Backend Python-only PDF export agent to turn the latest useful analysis or pasted content into a polished document |
 | **Data quality agent** | Statistical profiling + LLM scoring for ClickHouse tables, launched from an overlay form above the chat |
 | **Planner / scheduler** | Schedule existing agents on fixed frequency, ClickHouse watch, or file-arrival trigger |
@@ -53,8 +53,9 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **Chat zoom** | Floating Apple-inspired zoom control on the right side of the chat with fine-grained scaling |
 | **Compact answer layout** | Main answer stays visible while SQL, reasoning, previews, and other technical appendices collapse into expandable details blocks |
 | **Reading-first chat scroll** | New assistant responses scroll into view from their top edge instead of snapping to the very bottom of the thread |
-| **Vertical mode rail** | Pure LLM / RAG / Agents / MCP / CrewAI are grouped in a slimmer left-side rail, vertically centered beside the chat |
-| **Discreet console access** | Agent Console is exposed as a minimal floating button in the bottom-right corner |
+| **Stable agent intro cards** | Agent descriptions use higher-contrast cards in the chat and disappear on first typing without the previous visual shimmer |
+| **Floating tools island** | Pure LLM / RAG / Agents / MCP / LangGraph Planning are opened from a compact hammer button in the right-side utility dock |
+| **Discreet console access** | Agent Console is exposed as a minimal floating button in the right-side utility dock |
 | **Apple-inspired landing** | Animated cards, contact modal, page routing |
 | **Dark mode** | Full dark/light toggle persisted through backend state sync |
 | **File attachments** | Images, PDFs, text files alongside messages |
@@ -542,6 +543,7 @@ The File Management agent is a backend Python-only ReAct loop focused on safe fi
 - Path traversal blocked through resolved paths
 - Confirmation flow for destructive or overwrite-style actions
 - Iteration cap to avoid infinite loops
+- After a successful mutating action, the agent now performs a completion check and stops early when the user request is already satisfied
 
 ### Backend endpoint
 
@@ -682,9 +684,10 @@ All settings are available in-app (no `.env` file needed).
 ### Chat UX Notes
 
 - Introductory helper messages such as the default welcome message and agent intro cards disappear as soon as the user starts typing.
+- Agent intro cards now use a more stable high-contrast rendering to avoid the washed-out / shimmering effect seen previously on some machines.
 - Technical sections in many agent / LLM answers are automatically folded into expandable details blocks when possible.
 - When a new assistant answer arrives, the chat scrolls to the **top of that last answer** instead of the bottom of the full thread.
-- The mode selector lives in a slimmer left rail, centered vertically beside the chat area.
+- The mode selector is opened from a compact **Tools** hammer button in the right-side floating utility dock and expands as a centered overlay.
 
 ### LLM Settings
 
