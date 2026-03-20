@@ -521,6 +521,7 @@ export function ChatInterface({
   const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
   const [plannerDraft, setPlannerDraft] = useState<CrewPlanDraft>(() => normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
+  const [isPlanningDraftDirty, setIsPlanningDraftDirty] = useState(false);
   const [planningBusy, setPlanningBusy] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
   const [isToolsIslandOpen, setIsToolsIslandOpen] = useState(false);
@@ -535,6 +536,7 @@ export function ChatInterface({
   const [dataQualityTables, setDataQualityTables] = useState<string[]>(dataQualityAgentState.availableTables);
   const [dataQualitySchema, setDataQualitySchema] = useState<DataQualitySchemaColumn[]>(dataQualityAgentState.schemaInfo);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
+  const persistedPlanningDraftKey = JSON.stringify((currentConversation?.agentState as any)?.planning?.draft ?? null);
 
   // --- ACTIONS ---
 
@@ -728,16 +730,35 @@ export function ChatInterface({
 
   useEffect(() => {
     if (editingPlanningPlanId) return;
+    if (isPlanningModalOpen && isPlanningDraftDirty) return;
     setPlannerDraft(normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
-  }, [planningAgentState.draft, browserTimeZone, editingPlanningPlanId]);
+  }, [persistedPlanningDraftKey, browserTimeZone, editingPlanningPlanId, isPlanningDraftDirty, isPlanningModalOpen]);
 
   const updatePlanningConversationState = (nextPlanningState: unknown) => {
-    if (!currentId) return;
     const normalizedState = normalizePlanningAgentState(nextPlanningState as any, browserTimeZone);
+    const nextTitle = normalizedState.draft.name.trim() || 'LangGraph Planning';
+    if (!currentId) {
+      const conversationId = Date.now().toString();
+      const newConversation: Conversation = {
+        id: conversationId,
+        title: nextTitle,
+        messages: [],
+        memory: buildConversationMemory([]),
+        updatedAt: Date.now(),
+        agentState: {
+          planning: normalizedState,
+        },
+      };
+      onConversationsChange((prev) => [newConversation, ...prev]);
+      onCurrentIdChange(conversationId);
+      return;
+    }
+
     onConversationsChange(prev => prev.map((conversation) =>
       conversation.id === currentId
         ? {
             ...conversation,
+            title: nextTitle || conversation.title,
             agentState: {
               ...(conversation.agentState ?? {}),
               planning: normalizedState,
@@ -747,6 +768,30 @@ export function ChatInterface({
         : conversation
     ));
   };
+
+  useEffect(() => {
+    if (!isPlanningModalOpen || !isPlanningDraftDirty) return;
+
+    const timeoutId = window.setTimeout(() => {
+      updatePlanningConversationState({
+        draft: plannerDraft,
+        missing_fields: planningAgentState.missingFields,
+        last_question: planningAgentState.lastQuestion,
+        ready_to_review: planningAgentState.readyToReview,
+      });
+    }, 220);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    isPlanningModalOpen,
+    isPlanningDraftDirty,
+    plannerDraft,
+    planningAgentState.lastQuestion,
+    planningAgentState.readyToReview,
+    planningAgentState.missingFields,
+  ]);
 
   const loadPlanningState = async () => {
     setPlanningBusy(true);
@@ -1079,6 +1124,7 @@ export function ChatInterface({
       setPlannerDraft(normalizeCrewPlanDraft(nextDraft, browserTimeZone));
       setEditingPlanningPlanId(null);
     }
+    setIsPlanningDraftDirty(false);
     setPlanningError(null);
     setIsPlanningModalOpen(true);
     void loadPlanningState();
@@ -1094,6 +1140,7 @@ export function ChatInterface({
     const emptyDraft = createEmptyCrewPlanDraft(browserTimeZone);
     setEditingPlanningPlanId(null);
     setPlannerDraft(emptyDraft);
+    setIsPlanningDraftDirty(false);
     updatePlanningConversationState({
       draft: emptyDraft,
       missing_fields: [],
@@ -1123,6 +1170,7 @@ export function ChatInterface({
       setPlanningState(normalizePlanningBackendState(data, browserTimeZone));
       setPlanningError(null);
       setEditingPlanningPlanId(null);
+      setIsPlanningDraftDirty(false);
       const emptyDraft = createEmptyCrewPlanDraft(browserTimeZone);
       setPlannerDraft(emptyDraft);
       updatePlanningConversationState({
@@ -1142,6 +1190,7 @@ export function ChatInterface({
   const editPlanningPlan = (plan: CrewPlan) => {
     setEditingPlanningPlanId(plan.id);
     setPlannerDraft(normalizeCrewPlanDraft(plan, browserTimeZone));
+    setIsPlanningDraftDirty(false);
     setPlanningError(null);
     setIsPlanningModalOpen(true);
   };
@@ -1504,6 +1553,7 @@ export function ChatInterface({
         nextPlanningAgentState = normalizePlanningAgentState(data.agent_state, browserTimeZone);
         setIsConnected(true);
         setPlannerDraft(nextPlanningAgentState.draft);
+        setIsPlanningDraftDirty(false);
         setEditingPlanningPlanId(null);
 
         const assistantPlanningMsg: Message = {
@@ -2934,13 +2984,19 @@ export function ChatInterface({
 
       <PlanningModal
         isOpen={isPlanningModalOpen}
-        onClose={() => setIsPlanningModalOpen(false)}
+        onClose={() => {
+          setIsPlanningModalOpen(false);
+          setIsPlanningDraftDirty(false);
+        }}
         draft={plannerDraft}
         editingPlanId={editingPlanningPlanId}
         planningState={planningState}
         isBusy={planningBusy}
         error={planningError}
-        onDraftChange={(draft) => setPlannerDraft(normalizeCrewPlanDraft(draft, browserTimeZone))}
+        onDraftChange={(draft) => {
+          setIsPlanningDraftDirty(true);
+          setPlannerDraft(normalizeCrewPlanDraft(draft, browserTimeZone));
+        }}
         onStartNewDraft={startNewPlanningDraft}
         onSavePlan={savePlanningPlan}
         onEditPlan={editPlanningPlan}
