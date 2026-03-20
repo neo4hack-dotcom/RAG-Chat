@@ -2099,22 +2099,10 @@ export function ChatInterface({
     : isToolsIslandOpen
       ? 1
       : 0;
-  const toolsIslandHeightClass =
-    toolsIslandLevel === 2
-      ? workflow === 'AGENT'
-        ? isOtherAgentsOpen
-          ? 'h-[22rem] md:h-[17.5rem]'
-          : 'h-[13.5rem] md:h-[10.5rem]'
-        : 'h-[10rem] md:h-[7.75rem]'
-      : toolsIslandLevel === 1
-        ? 'h-[8.1rem] md:h-[6.4rem]'
-        : 'h-[2.9rem]';
   const toolsIslandWidthClass =
     toolsIslandLevel === 2
-      ? 'max-w-[46rem]'
-      : toolsIslandLevel === 1
-        ? 'max-w-[46rem]'
-        : 'max-w-[12.5rem]';
+      ? 'max-w-[58rem]'
+      : 'max-w-[50rem]';
   const activeMcpToolLabel = (config.mcpTools ?? []).find((tool: McpTool) => tool.id === mcpToolId)?.label ?? 'MCP';
   const activeToolsSummary =
     workflow === 'AGENT'
@@ -2426,222 +2414,228 @@ export function ChatInterface({
                   </div>
                 </div>
 
-                <div className={`relative -mt-1 flex justify-center overflow-hidden pt-1 transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${toolsIslandHeightClass}`}>
-                  <div
-                    ref={toolsIslandRef}
-                    className={`w-full ${toolsIslandWidthClass} -translate-y-2 rounded-[2.35rem] border border-white/65 bg-white/72 p-3 shadow-[0_28px_70px_rgba(15,23,42,0.16)] backdrop-blur-3xl transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] dark:border-white/10 dark:bg-black/48`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (isToolsIslandOpen) {
-                          collapseToolsIsland();
-                        } else {
-                          setIsToolsIslandOpen(true);
-                        }
-                      }}
-                      className="flex w-full items-center justify-between rounded-[1.55rem] bg-gradient-to-r from-black/[0.04] via-white/70 to-black/[0.04] px-3 py-2.5 text-left transition-colors hover:bg-black/[0.06] dark:from-white/[0.04] dark:via-white/[0.08] dark:to-white/[0.04] dark:hover:bg-white/[0.08]"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-black text-white shadow-sm dark:bg-white dark:text-black">
-                          <Hammer className="h-4 w-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
-                            Tools
-                          </div>
-                          <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">
-                            {activeToolsSummary}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white/80 text-gray-500 shadow-sm dark:bg-white/10 dark:text-gray-300">
-                        <ChevronDown className={`h-4 w-4 transition-transform duration-300 ${isToolsIslandOpen ? 'rotate-180' : 'rotate-0'}`} />
-                      </div>
-                    </button>
-
-                    <div className={`overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${isToolsIslandOpen ? 'mt-3 max-h-[32rem] opacity-100' : 'mt-0 max-h-0 opacity-0'}`}>
-                      <div className="flex flex-wrap items-center justify-center gap-2">
-                        <button
-                          onClick={() => handleWorkflowSelection('LLM')}
-                          className={`${toolsPrimaryButtonBase} ${workflow === 'LLM' ? 'bg-blue-500 text-white shadow-md shadow-blue-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
-                        >
-                          <Cpu className="h-4 w-4" /> Pure LLM
-                        </button>
-                        <button
-                          onClick={() => handleWorkflowSelection('RAG')}
-                          className={`${toolsPrimaryButtonBase} ${workflow === 'RAG' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
-                        >
-                          <Database className="h-4 w-4" /> RAG Knowledge
-                        </button>
-                        <button
-                          onClick={() => handleWorkflowSelection('AGENT')}
-                          className={`${toolsPrimaryButtonBase} ${workflow === 'AGENT' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
-                        >
-                          <Network className="h-4 w-4" /> Agents
-                        </button>
-                        <button
-                          onClick={() => handleWorkflowSelection('MCP')}
-                          className={`${toolsPrimaryButtonBase} ${workflow === 'MCP' ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
-                        >
-                          <Cpu className="h-4 w-4" /> MCP
-                        </button>
-                        <button
-                          onClick={() => handleWorkflowSelection('CREWAI')}
-                          className={`${toolsPrimaryButtonBase} ${workflow === 'CREWAI' ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
-                        >
-                          <CalendarDays className="h-4 w-4" /> LangGraph Planning
-                        </button>
-                      </div>
-
-                      {workflow === 'MCP' && isMcpMenuExpanded && (
-                        <div className={`mt-3 ${toolsNestedPanelBase} border-teal-200/80 dark:border-teal-800/60`}>
-                          <div className="flex items-center justify-between gap-3 px-1">
-                            <div>
-                              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-teal-700 dark:text-teal-300">
-                                MCP Tools
-                              </div>
-                              <div className="mt-1 text-xs text-teal-900/70 dark:text-teal-200/75">
-                                Pick the MCP connector you want to message.
-                              </div>
-                            </div>
-                            <span className="rounded-full border border-teal-200/80 bg-teal-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-teal-600 dark:border-teal-800/70 dark:bg-teal-950/35 dark:text-teal-300">
-                              Level 2
-                            </span>
-                          </div>
-
-                          {(config.mcpTools ?? []).length === 0 ? (
-                            <span className="px-1 text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
-                          ) : (
-                            <div className="flex flex-wrap gap-2">
-                              {(config.mcpTools ?? []).map((tool: McpTool) => (
-                                <button
-                                  key={tool.id}
-                                  onClick={() => handleMcpToolSelection(tool.id)}
-                                  className={`${toolsSecondaryButtonBase} ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/85 text-gray-700 border border-teal-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-teal-800/70 dark:hover:bg-white/10'}`}
-                                >
-                                  <Network className="h-3.5 w-3.5" /> {tool.label}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {workflow === 'AGENT' && isAgentMenuExpanded && (
-                        <div className={`mt-3 ${toolsNestedPanelBase} border-purple-200/80 dark:border-purple-800/60`}>
-                          <div className="flex items-center justify-between gap-3 px-1">
-                            <div>
-                              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-purple-700 dark:text-purple-300">
-                                Agent Selection
-                              </div>
-                              <div className="mt-1 text-xs text-purple-900/70 dark:text-purple-200/75">
-                                Choose a specialist, then the island retracts back into its compact mode.
-                              </div>
-                            </div>
-                            <span className="rounded-full border border-purple-200/80 bg-purple-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-purple-600 dark:border-purple-800/70 dark:bg-purple-950/35 dark:text-purple-300">
-                              Level 2
-                            </span>
-                          </div>
-
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              onClick={() => handleAgentRoleSelection('manager')}
-                              className={`${toolsSecondaryButtonBase} ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/25' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
-                            >
-                              <Star className={`h-3.5 w-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'fill-amber-500 text-amber-500'}`} />
-                              Agent Manager
-                            </button>
-
-                            <button
-                              onClick={() => setIsOtherAgentsOpen((open) => !open)}
-                              className={`${toolsSecondaryButtonBase} ${isOtherAgentsOpen ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
-                            >
-                              {isOtherAgentsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                              Other agents
-                            </button>
-                          </div>
-
-                          <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-[24rem] opacity-100' : 'max-h-0 opacity-0'}`}>
-                            <div className="rounded-[1.4rem] border border-cyan-200/70 bg-cyan-50/70 p-2.5 dark:border-cyan-800/60 dark:bg-cyan-950/20">
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  onClick={() => handleAgentRoleSelection('clickhouse_query')}
-                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/85 text-gray-700 border border-cyan-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-cyan-800/70 dark:hover:bg-white/10'}`}
-                                >
-                                  <Database className="h-3.5 w-3.5" /> Clickhouse SQL
-                                </button>
-                                <button
-                                  onClick={() => handleAgentRoleSelection('data_analyst')}
-                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/85 text-gray-700 border border-violet-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-violet-800/70 dark:hover:bg-white/10'}`}
-                                >
-                                  <Cpu className="h-3.5 w-3.5" /> Data Analyst
-                                </button>
-                                <button
-                                  onClick={() => handleAgentRoleSelection('file_management')}
-                                  onDoubleClick={() => setIsFileManagerConfigOpen(true)}
-                                  title="Double-click to configure"
-                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/85 text-gray-700 border border-emerald-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-emerald-800/70 dark:hover:bg-white/10'}`}
-                                >
-                                  <FolderOpen className="h-3.5 w-3.5" /> File management
-                                </button>
-                                <button
-                                  onClick={() => handleAgentRoleSelection('pdf_creator')}
-                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/85 text-gray-700 border border-slate-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-slate-700 dark:hover:bg-white/10'}`}
-                                >
-                                  <File className="h-3.5 w-3.5" /> PDF creator
-                                </button>
-                                <button
-                                  onClick={() => handleAgentRoleSelection('oracle_analyst')}
-                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/85 text-gray-700 border border-orange-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-orange-800/70 dark:hover:bg-white/10'}`}
-                                >
-                                  <Database className="h-3.5 w-3.5" /> Oracle SQL
-                                </button>
-                                <button
-                                  onClick={() => handleAgentRoleSelection('data_quality_tables')}
-                                  className={`${toolsSecondaryButtonBase} ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20' : 'bg-white/85 text-gray-700 border border-fuchsia-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-fuchsia-800/70 dark:hover:bg-white/10'}`}
-                                >
-                                  <BarChart3 className="h-3.5 w-3.5" /> Data quality - Tables
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-
-                          {(agentRole === 'file_management' || agentRole === 'data_quality_tables') && (
-                            <div className="flex flex-wrap gap-2">
-                              {agentRole === 'file_management' && (
-                                <button
-                                  type="button"
-                                  onClick={() => setIsFileManagerConfigOpen(true)}
-                                  className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
-                                >
-                                  <Settings className="h-3.5 w-3.5" />
-                                  Configure
-                                </button>
-                              )}
-                              {agentRole === 'data_quality_tables' && (
-                                <button
-                                  type="button"
-                                  onClick={openDataQualityModal}
-                                  className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
-                                >
-                                  <BarChart3 className="h-3.5 w-3.5" />
-                                  Open form
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
               </div>
             </div>
           </div>
         </div>
       </div>
+
+      {isToolsIslandOpen && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center px-4 py-8 md:px-8 pointer-events-none">
+          <button
+            type="button"
+            aria-label="Close tools menu"
+            onClick={collapseToolsIsland}
+            className="absolute inset-0 bg-slate-950/10 backdrop-blur-[2px] pointer-events-auto dark:bg-black/30"
+          />
+          <div
+            ref={toolsIslandRef}
+            className={`pointer-events-auto relative w-full ${toolsIslandWidthClass} animate-scale-in rounded-[2.35rem] border border-white/70 bg-white/82 p-4 shadow-[0_30px_90px_rgba(15,23,42,0.20)] backdrop-blur-3xl dark:border-white/10 dark:bg-black/55`}
+          >
+            <div className="flex items-start justify-between gap-4 rounded-[1.7rem] bg-gradient-to-r from-black/[0.04] via-white/80 to-black/[0.04] px-4 py-3 dark:from-white/[0.04] dark:via-white/[0.08] dark:to-white/[0.04]">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-black text-white shadow-sm dark:bg-white dark:text-black">
+                  <Hammer className="h-4.5 w-4.5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
+                    Tools
+                  </div>
+                  <div className="truncate text-base font-semibold text-gray-900 dark:text-gray-100">
+                    {activeToolsSummary}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Open a mode, drill into level 2 when needed, then the island folds back away.
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={collapseToolsIsland}
+                className="inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-white/80 text-gray-500 shadow-sm transition-colors hover:bg-white hover:text-gray-800 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15 dark:hover:text-white"
+                title="Close tools menu"
+              >
+                <X className="h-4.5 w-4.5" />
+              </button>
+            </div>
+
+            <div className="mt-4 max-h-[min(34rem,calc(100vh-11rem))] overflow-y-auto pr-1">
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  onClick={() => handleWorkflowSelection('LLM')}
+                  className={`${toolsPrimaryButtonBase} ${workflow === 'LLM' ? 'bg-blue-500 text-white shadow-md shadow-blue-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                >
+                  <Cpu className="h-4 w-4" /> Pure LLM
+                </button>
+                <button
+                  onClick={() => handleWorkflowSelection('RAG')}
+                  className={`${toolsPrimaryButtonBase} ${workflow === 'RAG' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                >
+                  <Database className="h-4 w-4" /> RAG Knowledge
+                </button>
+                <button
+                  onClick={() => handleWorkflowSelection('AGENT')}
+                  className={`${toolsPrimaryButtonBase} ${workflow === 'AGENT' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                >
+                  <Network className="h-4 w-4" /> Agents
+                </button>
+                <button
+                  onClick={() => handleWorkflowSelection('MCP')}
+                  className={`${toolsPrimaryButtonBase} ${workflow === 'MCP' ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                >
+                  <Cpu className="h-4 w-4" /> MCP
+                </button>
+                <button
+                  onClick={() => handleWorkflowSelection('CREWAI')}
+                  className={`${toolsPrimaryButtonBase} ${workflow === 'CREWAI' ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                >
+                  <CalendarDays className="h-4 w-4" /> LangGraph Planning
+                </button>
+              </div>
+
+              {workflow === 'MCP' && isMcpMenuExpanded && (
+                <div className={`mt-4 ${toolsNestedPanelBase} border-teal-200/80 dark:border-teal-800/60`}>
+                  <div className="flex items-center justify-between gap-3 px-1">
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-teal-700 dark:text-teal-300">
+                        MCP Tools
+                      </div>
+                      <div className="mt-1 text-xs text-teal-900/70 dark:text-teal-200/75">
+                        Pick the MCP connector you want to message.
+                      </div>
+                    </div>
+                    <span className="rounded-full border border-teal-200/80 bg-teal-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-teal-600 dark:border-teal-800/70 dark:bg-teal-950/35 dark:text-teal-300">
+                      Level 2
+                    </span>
+                  </div>
+
+                  {(config.mcpTools ?? []).length === 0 ? (
+                    <span className="px-1 text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {(config.mcpTools ?? []).map((tool: McpTool) => (
+                        <button
+                          key={tool.id}
+                          onClick={() => handleMcpToolSelection(tool.id)}
+                          className={`${toolsSecondaryButtonBase} ${mcpToolId === tool.id ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/85 text-gray-700 border border-teal-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-teal-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <Network className="h-3.5 w-3.5" /> {tool.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {workflow === 'AGENT' && isAgentMenuExpanded && (
+                <div className={`mt-4 ${toolsNestedPanelBase} border-purple-200/80 dark:border-purple-800/60`}>
+                  <div className="flex items-center justify-between gap-3 px-1">
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-purple-700 dark:text-purple-300">
+                        Agent Selection
+                      </div>
+                      <div className="mt-1 text-xs text-purple-900/70 dark:text-purple-200/75">
+                        Choose a specialist, then the island retracts back into its compact mode.
+                      </div>
+                    </div>
+                    <span className="rounded-full border border-purple-200/80 bg-purple-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-purple-600 dark:border-purple-800/70 dark:bg-purple-950/35 dark:text-purple-300">
+                      Level 2
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => handleAgentRoleSelection('manager')}
+                      className={`${toolsSecondaryButtonBase} ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/25' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
+                    >
+                      <Star className={`h-3.5 w-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'fill-amber-500 text-amber-500'}`} />
+                      Agent Manager
+                    </button>
+
+                    <button
+                      onClick={() => setIsOtherAgentsOpen((open) => !open)}
+                      className={`${toolsSecondaryButtonBase} ${isOtherAgentsOpen ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
+                    >
+                      {isOtherAgentsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                      Other agents
+                    </button>
+                  </div>
+
+                  <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-[24rem] opacity-100' : 'max-h-0 opacity-0'}`}>
+                    <div className="rounded-[1.4rem] border border-cyan-200/70 bg-cyan-50/70 p-2.5 dark:border-cyan-800/60 dark:bg-cyan-950/20">
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() => handleAgentRoleSelection('clickhouse_query')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/85 text-gray-700 border border-cyan-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-cyan-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <Database className="h-3.5 w-3.5" /> Clickhouse SQL
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('data_analyst')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/85 text-gray-700 border border-violet-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-violet-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <Cpu className="h-3.5 w-3.5" /> Data Analyst
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('file_management')}
+                          onDoubleClick={() => setIsFileManagerConfigOpen(true)}
+                          title="Double-click to configure"
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/85 text-gray-700 border border-emerald-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-emerald-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" /> File management
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('pdf_creator')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/85 text-gray-700 border border-slate-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-slate-700 dark:hover:bg-white/10'}`}
+                        >
+                          <File className="h-3.5 w-3.5" /> PDF creator
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('oracle_analyst')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/85 text-gray-700 border border-orange-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-orange-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <Database className="h-3.5 w-3.5" /> Oracle SQL
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('data_quality_tables')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20' : 'bg-white/85 text-gray-700 border border-fuchsia-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-fuchsia-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <BarChart3 className="h-3.5 w-3.5" /> Data quality - Tables
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {(agentRole === 'file_management' || agentRole === 'data_quality_tables') && (
+                    <div className="flex flex-wrap gap-2">
+                      {agentRole === 'file_management' && (
+                        <button
+                          type="button"
+                          onClick={() => setIsFileManagerConfigOpen(true)}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
+                        >
+                          <Settings className="h-3.5 w-3.5" />
+                          Configure
+                        </button>
+                      )}
+                      {agentRole === 'data_quality_tables' && (
+                        <button
+                          type="button"
+                          onClick={openDataQualityModal}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
+                        >
+                          <BarChart3 className="h-3.5 w-3.5" />
+                          Open form
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div
         ref={zoomControlRef}
@@ -2710,6 +2704,23 @@ export function ChatInterface({
         )}
 
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (isToolsIslandOpen) {
+                collapseToolsIsland();
+              } else {
+                setIsToolsIslandOpen(true);
+                setIsAgentMenuExpanded(false);
+                setIsMcpMenuExpanded(false);
+                setIsOtherAgentsOpen(false);
+              }
+            }}
+            className={`${floatingUtilityButtonClass} ${isToolsIslandOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            title="Tools"
+          >
+            <Hammer className="h-4.5 w-4.5" />
+          </button>
           <button
             type="button"
             onClick={() => setIsConsoleOpen(true)}
