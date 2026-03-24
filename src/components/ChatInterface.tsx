@@ -2577,7 +2577,9 @@ export function ChatInterface({
               eyebrowClass: 'text-blue-700 dark:text-blue-300',
               buttonClass: 'border-blue-400/60 bg-blue-500 text-white shadow-[0_18px_40px_rgba(59,130,246,0.28)] hover:bg-blue-400 dark:border-blue-300/20 dark:bg-blue-500 dark:hover:bg-blue-400',
             };
-  const floatingUtilityButtonClass = "group flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-white/65 text-gray-800 shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02] hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55";
+  const floatingDockButtonBaseClass = "group flex h-14 w-14 items-center justify-center rounded-full shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02]";
+  const floatingGlassButtonClass = `${floatingDockButtonBaseClass} border border-white/50 bg-white/65 text-gray-800 hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55`;
+  const floatingContextButtonClass = `${floatingDockButtonBaseClass} border text-white`;
   const formattedSystemPrompt = withBeautifulResponsePrompt(config.systemPrompt);
   const formattedOracleSystemPrompt = withBeautifulResponsePrompt(config.oracleAnalystConfig.systemPrompt);
   const formattedFileManagerSystemPrompt = withBeautifulResponsePrompt(config.fileManagerConfig.systemPrompt);
@@ -3322,7 +3324,7 @@ export function ChatInterface({
               setIsThinkingPanelOpen(false);
               setIsToolsIslandOpen(true);
             }}
-            className={`${floatingUtilityButtonClass} ${activeContextBadge.buttonClass}`}
+            className={`${floatingContextButtonClass} ${activeContextBadge.buttonClass}`}
             title={activeContextBadge.label}
           >
             <div className="flex flex-col items-center gap-0.5">
@@ -3335,7 +3337,7 @@ export function ChatInterface({
           <button
             type="button"
             onClick={() => setIsDraftPanelOpen((open) => !open)}
-            className={`${floatingUtilityButtonClass} ${isDraftPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            className={`${floatingGlassButtonClass} ${isDraftPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
             title="Draft zone"
           >
             <div className="flex flex-col items-center gap-0.5">
@@ -3348,7 +3350,7 @@ export function ChatInterface({
           <button
             type="button"
             onClick={() => setIsAgentStatePanelOpen((open) => !open)}
-            className={`${floatingUtilityButtonClass} ${isAgentStatePanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            className={`${floatingGlassButtonClass} ${isAgentStatePanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
             title="Agent state"
           >
             <div className="flex flex-col items-center gap-0.5">
@@ -3741,7 +3743,7 @@ export function ChatInterface({
                 setIsOtherAgentsOpen(false);
               }
             }}
-            className={`${floatingUtilityButtonClass} ${isToolsIslandOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            className={`${floatingGlassButtonClass} ${isToolsIslandOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
             title="Tools"
           >
             <Hammer className="h-4.5 w-4.5" />
@@ -3749,7 +3751,7 @@ export function ChatInterface({
           <button
             type="button"
             onClick={() => setIsConsoleOpen(true)}
-            className={floatingUtilityButtonClass}
+            className={floatingGlassButtonClass}
             title="Agent Console"
           >
             <div className="flex flex-col items-center gap-0.5">
@@ -3765,7 +3767,7 @@ export function ChatInterface({
               setIsThinkingPanelOpen((open) => !open);
               setIsZoomControlOpen(false);
             }}
-            className={`${floatingUtilityButtonClass} ${isThinkingPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            className={`${floatingGlassButtonClass} ${isThinkingPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
             title="Thinking trace"
           >
             <div className="flex flex-col items-center gap-0.5">
@@ -3781,7 +3783,7 @@ export function ChatInterface({
               setIsZoomControlOpen((open) => !open);
               setIsThinkingPanelOpen(false);
             }}
-            className={floatingUtilityButtonClass}
+            className={floatingGlassButtonClass}
             title="Chat zoom"
           >
             <div className="flex flex-col items-center gap-0.5">
