@@ -802,6 +802,67 @@ def _build_mcp_async_client(
     )
 
 
+def _collect_exception_messages(exc: BaseException) -> list[str]:
+    messages: list[str] = []
+    seen: set[int] = set()
+
+    def visit(current: BaseException) -> None:
+        current_id = id(current)
+        if current_id in seen:
+            return
+        seen.add(current_id)
+
+        nested = getattr(current, "exceptions", None)
+        if isinstance(nested, (list, tuple)) and nested:
+            for item in nested:
+                if isinstance(item, BaseException):
+                    visit(item)
+        else:
+            text = str(current).strip()
+            response = getattr(current, "response", None)
+            if response is not None:
+                status_code = getattr(response, "status_code", None)
+                body = ""
+                try:
+                    body = str(getattr(response, "text", "") or "").strip()
+                except Exception:
+                    body = ""
+                if len(body) > 280:
+                    body = body[:280].rstrip() + "..."
+                if status_code and body:
+                    text = f"HTTP {status_code}: {body}"
+                elif status_code:
+                    text = f"HTTP {status_code}"
+            if not text:
+                text = current.__class__.__name__
+            if text not in messages:
+                messages.append(text)
+
+        cause = getattr(current, "__cause__", None)
+        if isinstance(cause, BaseException):
+            visit(cause)
+        context = getattr(current, "__context__", None)
+        if isinstance(context, BaseException):
+            visit(context)
+
+    visit(exc)
+    return messages
+
+
+def _format_mcp_exception(exc: BaseException, target: str) -> str:
+    normalized_target = _normalize_local_service_url(target)
+    parsed = urlparse(normalized_target)
+    path = parsed.path or "/"
+    messages = _collect_exception_messages(exc)
+    detail = " | ".join(messages[:4]) if messages else str(exc)
+    if any("406" in message for message in messages):
+        detail += (
+            f" | The MCP server rejected the request on `{path}`. "
+            "Check whether this endpoint expects streamable HTTP versus SSE, and whether it accepts `application/json, text/event-stream`."
+        )
+    return detail
+
+
 @asynccontextmanager
 async def _mcp_client_session(
     target: str,
@@ -14208,7 +14269,10 @@ async def test_mcp_connection(req: MCPTestRequest):
             "resource_count": len(resource_definitions.resources or []),
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"MCP connection failed: {_format_mcp_exception(e, req.url)}",
+        ) from e
 
 
 def _mcp_tool_to_openai(tool) -> dict:
@@ -14369,7 +14433,10 @@ async def chat_mcp(req: MCPChatRequest):
             return {"answer": final, "tool_calls": tool_calls_log}
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"MCP chat failed: {_format_mcp_exception(e, req.mcp_url)}",
+        ) from e
 
 
 # ── OpenSearch management endpoints ──────────────────────────────────────────
