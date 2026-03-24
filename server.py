@@ -188,6 +188,7 @@ async def stream_logs(request: Request):
 
 DB_PATH = Path(__file__).parent / "DB.json"
 DB_LOCK = asyncio.Lock()
+LEGACY_DB_USER_ID = "__legacy__"
 
 DEFAULT_APP_CONFIG = {
     "provider": "ollama",
@@ -521,13 +522,79 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _default_db_state() -> dict:
+def _normalize_db_user_id(raw_user_id: Optional[str]) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "", str(raw_user_id or "").strip())
+    return cleaned[:64] or "anonymous"
+
+
+def _default_user_db_state() -> dict:
     return {
-        "schemaVersion": 1,
-        "updatedAt": _utc_now_iso(),
-        "config": json.loads(json.dumps(DEFAULT_APP_CONFIG)),
         "conversations": [],
         "preferences": json.loads(json.dumps(DEFAULT_PREFERENCES)),
+        "updatedAt": _utc_now_iso(),
+    }
+
+
+def _normalize_user_db_state(payload: Optional[dict]) -> dict:
+    state = _default_user_db_state()
+    if not isinstance(payload, dict):
+        return state
+
+    incoming_conversations = payload.get("conversations")
+    if isinstance(incoming_conversations, list):
+        state["conversations"] = incoming_conversations
+
+    incoming_preferences = payload.get("preferences")
+    if isinstance(incoming_preferences, dict):
+        state["preferences"].update(incoming_preferences)
+    if state["preferences"].get("agentRole") not in AGENT_ROLES:
+        state["preferences"]["agentRole"] = "manager"
+
+    incoming_updated_at = payload.get("updatedAt")
+    if isinstance(incoming_updated_at, str) and incoming_updated_at:
+        state["updatedAt"] = incoming_updated_at
+
+    return state
+
+
+def _db_state_for_user(full_state: dict, user_id: str) -> dict:
+    users = full_state.get("users") or {}
+    user_bucket = _normalize_user_db_state(users.get(user_id))
+    return {
+        "schemaVersion": full_state.get("schemaVersion", 2),
+        "updatedAt": full_state.get("updatedAt") or _utc_now_iso(),
+        "config": full_state.get("config") or json.loads(json.dumps(DEFAULT_APP_CONFIG)),
+        "conversations": user_bucket.get("conversations") or [],
+        "preferences": user_bucket.get("preferences") or json.loads(json.dumps(DEFAULT_PREFERENCES)),
+        "planning": full_state.get("planning") or _default_planning_state(),
+    }
+
+
+def _ensure_user_db_state(full_state: dict, user_id: str) -> tuple[dict, bool]:
+    normalized = _normalize_db_state(full_state)
+    users = normalized.setdefault("users", {})
+    changed = False
+
+    if user_id not in users:
+        legacy_bucket = users.get(LEGACY_DB_USER_ID)
+        if legacy_bucket:
+            users[user_id] = _normalize_user_db_state(legacy_bucket)
+            users.pop(LEGACY_DB_USER_ID, None)
+            changed = True
+        else:
+            users[user_id] = _default_user_db_state()
+            changed = True
+
+    users[user_id] = _normalize_user_db_state(users.get(user_id))
+    return normalized, changed
+
+
+def _default_db_state() -> dict:
+    return {
+        "schemaVersion": 2,
+        "updatedAt": _utc_now_iso(),
+        "config": json.loads(json.dumps(DEFAULT_APP_CONFIG)),
+        "users": {},
         "planning": _default_planning_state(),
     }
 
@@ -577,15 +644,25 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
                 if isinstance(connection, dict)
             ] or json.loads(json.dumps(DEFAULT_APP_CONFIG["oracleConnections"]))
 
-    incoming_conversations = payload.get("conversations")
-    if isinstance(incoming_conversations, list):
-        state["conversations"] = incoming_conversations
-
-    incoming_preferences = payload.get("preferences")
-    if isinstance(incoming_preferences, dict):
-        state["preferences"].update(incoming_preferences)
-    if state["preferences"].get("agentRole") not in AGENT_ROLES:
-        state["preferences"]["agentRole"] = "manager"
+    normalized_users: dict[str, dict] = {}
+    incoming_users = payload.get("users")
+    if isinstance(incoming_users, dict):
+        for raw_user_id, raw_user_state in incoming_users.items():
+            normalized_users[_normalize_db_user_id(raw_user_id)] = _normalize_user_db_state(raw_user_state)
+    else:
+        # Backward compatibility: migrate the historical single-user payload to
+        # a temporary legacy bucket that can be adopted by the first client.
+        legacy_conversations = payload.get("conversations")
+        legacy_preferences = payload.get("preferences")
+        if isinstance(legacy_conversations, list) or isinstance(legacy_preferences, dict):
+            normalized_users[LEGACY_DB_USER_ID] = _normalize_user_db_state(
+                {
+                    "conversations": legacy_conversations if isinstance(legacy_conversations, list) else [],
+                    "preferences": legacy_preferences if isinstance(legacy_preferences, dict) else {},
+                    "updatedAt": payload.get("updatedAt") if isinstance(payload.get("updatedAt"), str) else _utc_now_iso(),
+                }
+            )
+    state["users"] = normalized_users
 
     state["planning"] = _normalize_planning_state(payload.get("planning"))
 
@@ -10196,26 +10273,44 @@ class PersistedStateRequest(BaseModel):
     config: dict = Field(default_factory=lambda: json.loads(json.dumps(DEFAULT_APP_CONFIG)))
     conversations: list[dict] = Field(default_factory=list)
     preferences: PersistedPreferences = Field(default_factory=PersistedPreferences)
+    include_config: bool = False
 
 
 # ── App state persistence endpoints ───────────────────────────────────────────
 
+def _request_db_user_id(request: Request) -> str:
+    return _normalize_db_user_id(request.headers.get("X-RAGnarok-User-Id"))
+
+
 @app.get("/api/db/state")
-async def get_app_state():
-    return await read_db_state()
+async def get_app_state(request: Request):
+    full_state = await read_db_state()
+    user_id = _request_db_user_id(request)
+    ensured_state, changed = _ensure_user_db_state(full_state, user_id)
+    if changed:
+        ensured_state = await write_db_state(ensured_state)
+    return _db_state_for_user(ensured_state, user_id)
 
 
 @app.put("/api/db/state")
-async def save_app_state(req: PersistedStateRequest):
+async def save_app_state(req: PersistedStateRequest, request: Request):
     existing_state = await read_db_state()
-    payload = {
-        "schemaVersion": existing_state.get("schemaVersion", 1),
-        "config": req.config,
-        "conversations": req.conversations,
-        "preferences": req.preferences.model_dump(),
-        "planning": existing_state.get("planning", _default_planning_state()),
-    }
-    return await write_db_state(payload)
+    user_id = _request_db_user_id(request)
+    payload, _ = _ensure_user_db_state(existing_state, user_id)
+    payload["schemaVersion"] = payload.get("schemaVersion", 2)
+    if req.include_config:
+        payload["config"] = req.config
+    payload.setdefault("users", {})
+    payload["users"][user_id] = _normalize_user_db_state(
+        {
+            "conversations": req.conversations,
+            "preferences": req.preferences.model_dump(),
+            "updatedAt": _utc_now_iso(),
+        }
+    )
+    payload["planning"] = existing_state.get("planning", _default_planning_state())
+    saved = await write_db_state(payload)
+    return _db_state_for_user(saved, user_id)
 
 
 @app.get("/api/db/export")
@@ -10231,10 +10326,15 @@ async def export_app_state():
 
 
 @app.post("/api/db/import")
-async def import_app_state(payload: dict):
+async def import_app_state(payload: dict, request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON payload for DB import.")
-    return await write_db_state(payload)
+    saved = await write_db_state(payload)
+    user_id = _request_db_user_id(request)
+    ensured_state, changed = _ensure_user_db_state(saved, user_id)
+    if changed:
+        ensured_state = await write_db_state(ensured_state)
+    return _db_state_for_user(ensured_state, user_id)
 
 
 @app.get("/api/planning/state")

@@ -27,10 +27,34 @@ const pageTransition = { duration: 0.45, ease: 'easeOut' as const };
 const DB_STATE_URL = '/api/db/state';
 const DB_EXPORT_URL = '/api/db/export';
 const DB_IMPORT_URL = '/api/db/import';
-const APP_STATE_CACHE_KEY = 'ragnarok-app-state-cache';
+const APP_STATE_CACHE_KEY_PREFIX = 'ragnarok-app-state-cache';
+const CLIENT_USER_ID_KEY = 'ragnarok-client-user-id';
 const LEGACY_CONFIG_KEY = 'liquid-ai-config';
 const LEGACY_CONVERSATIONS_KEY = 'ragnarok_conversations';
 const LEGACY_DARK_KEY = 'ragnarok-dark';
+
+function getOrCreateClientUserId(): string {
+  if (typeof window === 'undefined') return 'anonymous';
+  const existing = localStorage.getItem(CLIENT_USER_ID_KEY);
+  if (existing) return existing;
+  const nextId =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? `user_${crypto.randomUUID().replace(/-/g, '')}`
+      : `user_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  localStorage.setItem(CLIENT_USER_ID_KEY, nextId);
+  return nextId;
+}
+
+function appStateCacheKeyForUser(userId: string): string {
+  return `${APP_STATE_CACHE_KEY_PREFIX}:${userId}`;
+}
+
+function buildDbHeaders(userId: string, includeJson = false): HeadersInit {
+  return {
+    ...(includeJson ? { 'Content-Type': 'application/json' } : {}),
+    'X-RAGnarok-User-Id': userId,
+  };
+}
 
 function pickPersistedPayload(state: PersistedAppState) {
   return {
@@ -40,13 +64,13 @@ function pickPersistedPayload(state: PersistedAppState) {
   };
 }
 
-function loadLocalFallbackState(): PersistedAppState {
+function loadLocalFallbackState(userId: string): PersistedAppState {
   if (typeof window === 'undefined') {
     return normalizePersistedAppState(DEFAULT_PERSISTED_STATE);
   }
 
   try {
-    const cached = localStorage.getItem(APP_STATE_CACHE_KEY);
+    const cached = localStorage.getItem(appStateCacheKeyForUser(userId));
     if (cached) {
       return normalizePersistedAppState(JSON.parse(cached));
     }
@@ -86,10 +110,10 @@ function loadLocalFallbackState(): PersistedAppState {
   });
 }
 
-function persistLocalCache(state: PersistedAppState) {
+function persistLocalCache(state: PersistedAppState, userId: string) {
   if (typeof window === 'undefined') return;
 
-  localStorage.setItem(APP_STATE_CACHE_KEY, JSON.stringify(state));
+  localStorage.setItem(appStateCacheKeyForUser(userId), JSON.stringify(state));
   localStorage.setItem(LEGACY_CONFIG_KEY, JSON.stringify(state.config));
   localStorage.setItem(LEGACY_CONVERSATIONS_KEY, JSON.stringify(state.conversations));
   localStorage.setItem(LEGACY_DARK_KEY, String(state.preferences.darkMode));
@@ -120,7 +144,8 @@ function HydrationScreen({ syncError }: { syncError: string | null }) {
  * Main Application Component
  */
 export default function App() {
-  const [appState, setAppState] = useState<PersistedAppState>(() => loadLocalFallbackState());
+  const clientUserIdRef = useRef<string>(getOrCreateClientUserId());
+  const [appState, setAppState] = useState<PersistedAppState>(() => loadLocalFallbackState(clientUserIdRef.current));
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHydrating, setIsHydrating] = useState(true);
   const [isDbBusy, setIsDbBusy] = useState(false);
@@ -128,13 +153,14 @@ export default function App() {
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
 
   const latestStateRef = useRef(appState);
+  const lastSavedConfigFingerprintRef = useRef(JSON.stringify(appState.config));
   const initialSyncCompleteRef = useRef(false);
   const skipNextPersistRef = useRef(false);
   const isSettingsOpenRef = useRef(isSettingsOpen);
 
   useEffect(() => {
     latestStateRef.current = appState;
-    persistLocalCache(appState);
+    persistLocalCache(appState, clientUserIdRef.current);
   }, [appState]);
 
   useEffect(() => {
@@ -171,8 +197,11 @@ export default function App() {
       try {
         const response = await fetch(DB_STATE_URL, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(pickPersistedPayload(snapshot)),
+          headers: buildDbHeaders(clientUserIdRef.current, true),
+          body: JSON.stringify({
+            ...pickPersistedPayload(snapshot),
+            include_config: JSON.stringify(snapshot.config) !== lastSavedConfigFingerprintRef.current,
+          }),
         });
 
         if (!response.ok) {
@@ -186,6 +215,7 @@ export default function App() {
 
         setLastSyncedAt(savedState.updatedAt ?? null);
         setSyncError(null);
+        lastSavedConfigFingerprintRef.current = JSON.stringify(savedState.config);
 
         if (adoptSavedState && requestedFingerprint === currentFingerprint) {
           skipNextPersistRef.current = true;
@@ -209,7 +239,9 @@ export default function App() {
       if (showBusy) setIsDbBusy(true);
 
       try {
-        const response = await fetch(DB_STATE_URL);
+        const response = await fetch(DB_STATE_URL, {
+          headers: buildDbHeaders(clientUserIdRef.current),
+        });
         if (!response.ok) {
           const errorPayload = await response.json().catch(() => ({}));
           throw new Error(errorPayload.detail || `HTTP ${response.status}`);
@@ -239,6 +271,7 @@ export default function App() {
 
         setLastSyncedAt(remoteState.updatedAt ?? null);
         setSyncError(null);
+        lastSavedConfigFingerprintRef.current = JSON.stringify(remoteState.config);
       } catch (error) {
         setSyncError(error instanceof Error ? error.message : 'Unable to sync DB state.');
       } finally {
@@ -285,7 +318,7 @@ export default function App() {
     try {
       const response = await fetch(DB_IMPORT_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildDbHeaders(clientUserIdRef.current, true),
         body: JSON.stringify(snapshot),
       });
 
@@ -300,6 +333,7 @@ export default function App() {
       setAppState(importedState);
       setLastSyncedAt(importedState.updatedAt ?? null);
       setSyncError(null);
+      lastSavedConfigFingerprintRef.current = JSON.stringify(importedState.config);
       setIsHydrating(false);
     } catch (error) {
       setSyncError(error instanceof Error ? error.message : 'Unable to import DB backup.');

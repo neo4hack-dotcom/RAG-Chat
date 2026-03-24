@@ -44,7 +44,8 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **Data quality agent** | Statistical profiling + LLM scoring for ClickHouse tables, launched from an overlay form above the chat |
 | **Planner / scheduler** | Schedule existing agents on fixed frequency, ClickHouse watch, or file-arrival trigger |
 | **MCP tools** | Connect any MCP server via FastMCP, test connection, real agentic tool-call loop over SSE or streamable HTTP |
-| **Backend persistence** | App config, conversations and durable preferences stored in backend-managed `DB.json` |
+| **Backend persistence** | Shared app config plus user-isolated conversations and preferences stored in backend-managed `DB.json` |
+| **Multi-user isolation** | Each browser/client keeps its own conversations and UI state while everyone shares the same server configuration |
 | **Backup workflow** | Export/import DB backups and force a resync from the latest backend state in Settings |
 | **Agents & Tools portal** | Configurable external application tiles managed in Settings and rendered as a glass-style portal page from the landing screen |
 | **Conversation memory** | Current conversation keeps a short backend-synced working memory window (at least 5 recent steps, currently 10 useful messages) |
@@ -123,7 +124,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 ```
 
 - **Frontend** — React 19 + TypeScript + Tailwind CSS, bundled with Vite.
-- **Backend** — Python FastAPI (`server.py`) — state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, FastMCP-based MCP client, OpenSearch management.
+- **Backend** — Python FastAPI (`server.py`) — multi-user state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, MCP client, OpenSearch management.
 - **Vector store** — OpenSearch with `opensearch-py`.
 - **Analytics store** — ClickHouse over HTTP for the SQL agent.
 - **Oracle store** — Oracle via Python `oracledb` for the Oracle SQL agent.
@@ -175,7 +176,7 @@ python server.py
 # Listening on http://localhost:8000
 ```
 
-On first run, the backend also creates a local `DB.json` file at the project root to persist app state, chat history and configuration.
+On first run, the backend also creates a local `DB.json` file at the project root to persist shared application configuration plus user-isolated chat history and preferences.
 
 ### 4. Install frontend dependencies and start dev server
 
@@ -324,9 +325,9 @@ RAGnarok now uses a backend-managed `DB.json` file as its durable source of trut
 
 What is stored there:
 
-- application configuration,
-- conversation history,
-- durable UI preferences such as dark mode, selected workflow and current conversation,
+- shared application configuration,
+- per-user conversation history,
+- per-user durable UI preferences such as dark mode, selected workflow and current conversation,
 - agent state needed for guided workflows,
 - planner state and saved jobs,
 - short conversation memory used to preserve recent context across follow-up turns.
@@ -334,7 +335,10 @@ What is stored there:
 ### Sync behaviour
 
 - On startup, the frontend fetches the latest state from the backend.
+- Each browser/client receives a stable local user identifier and only reads/writes its own conversations and preferences.
+- Application configuration remains shared across all users connected to the same deployment.
 - If the backend DB is empty but the browser still has legacy data, the app migrates that state into `DB.json`.
+- If the backend still contains an older single-user snapshot, it is migrated automatically to the new multi-user structure.
 - The app re-syncs when the window regains focus or becomes visible again.
 - The browser still keeps a lightweight fallback cache, but the backend DB is the source of truth.
 - Each conversation also keeps a short rolling memory window to preserve current context for backend agents.
@@ -815,6 +819,7 @@ ODIN AI Portal is designed to be **100% local**:
 - No telemetry, no analytics, no tracking.
 - Models can run fully on your own hardware via Ollama.
 - Durable application state is stored locally in backend-managed `DB.json`.
+- In shared deployments, conversations and UI preferences are isolated per browser/client while the application configuration remains shared.
 - The browser keeps a fallback cache, but the backend DB is the primary state source.
 - OpenSearch and ClickHouse can run on your own infrastructure.
 - Settings access is protected locally by an application password, configurable from the UI once unlocked.
