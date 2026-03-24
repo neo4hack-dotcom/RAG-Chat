@@ -33,8 +33,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from opensearchpy import OpenSearch
 from urllib.parse import urlparse
 from typing_extensions import Literal, TypedDict
-from fastmcp import Client as FastMCPClient
-from fastmcp.client.transports import SSETransport, StreamableHttpTransport
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 
@@ -75,6 +76,23 @@ class UpstreamServiceError(Exception):
         super().__init__(detail)
         self.detail = detail
         self.status_code = status_code
+
+
+TABLE_OUTPUT_GUIDANCE = (
+    "If the user explicitly asks for a table, rows/columns, a matrix, a grid, a schema list, or a tabular preview, "
+    "return the relevant structured result as a valid Markdown table whenever the data is naturally tabular. "
+    "Keep the table readable and compact, prefer the most relevant columns, and clearly mention when rows or columns are truncated. "
+    "Never invent missing cells or pretend to have columns you did not actually retrieve."
+)
+
+
+def _with_table_output_guidance(base_prompt: str) -> str:
+    text = str(base_prompt or "").strip()
+    if not text:
+        return TABLE_OUTPUT_GUIDANCE
+    if TABLE_OUTPUT_GUIDANCE in text:
+        return text
+    return f"{text}\n\n{TABLE_OUTPUT_GUIDANCE}"
 
 
 # ── Agent Observability Log Bus ───────────────────────────────────────────────
@@ -187,7 +205,9 @@ DEFAULT_APP_CONFIG = {
         "after the main answer and preferably inside <details><summary>Expand details</summary>"
         "...</details> blocks. When offering choices or clarification "
         "options, always use markdown task lists (- [ ] Option) so the UI can present "
-        "clickable replies."
+        "clickable replies. "
+        "If the user explicitly asks for a table, rows/columns, a matrix, a grid, a schema list, or a tabular preview, "
+        "return the relevant structured result as a valid Markdown table whenever the data is naturally tabular."
     ),
     "disableSslVerification": False,
     "elasticsearchUrl": "http://localhost:9200",
@@ -206,6 +226,7 @@ DEFAULT_APP_CONFIG = {
         {"id": "mcp_2", "label": "MCP Tool 2", "url": ""},
     ],
     "documentationUrl": "",
+    "agenticDataVizUrl": "",
     "portalApps": [],
     "settingsAccessPassword": "MM@2026",
     "clickhouseHost": "localhost",
@@ -240,7 +261,8 @@ DEFAULT_APP_CONFIG = {
             "You are the Oracle SQL agent. Reply in English. Use Oracle tools before making assumptions, "
             "generate optimized Oracle SQL with explicit columns, and present final user-facing answers "
             "in polished Markdown with clear sections, concise bullets, and tasteful emphasis. "
-            "Safe semantic HTML fragments are allowed when they improve readability."
+            "Safe semantic HTML fragments are allowed when they improve readability. "
+            "When the user explicitly asks for tabular output, include a readable Markdown table."
         ),
     },
     "fileManagerConfig": {
@@ -251,7 +273,7 @@ DEFAULT_APP_CONFIG = {
             "filesystem tools instead of guessing, keep answers short and factual, "
             "ask for confirmation before destructive or overwrite actions, and present "
             "final user-facing answers in polished Markdown with concise structure and "
-            "tasteful emphasis."
+            "tasteful emphasis. When the user explicitly asks for tabular output, include a Markdown table whenever the result is tabular."
         ),
     },
 }
@@ -510,6 +532,8 @@ def _default_db_state() -> dict:
 
 
 def _normalize_db_state(payload: Optional[dict]) -> dict:
+    # Normalize and backfill persisted state on every read/write so DB.json can
+    # evolve safely even when older snapshots miss newer configuration blocks.
     state = _default_db_state()
     if not isinstance(payload, dict):
         return state
@@ -576,6 +600,8 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
 
 
 def _write_db_state_sync(state: dict) -> dict:
+    # Always rewrite through a temporary file, then atomically replace the main
+    # DB file. This avoids partial writes if the process is interrupted.
     normalized = _normalize_db_state(state)
     normalized["updatedAt"] = _utc_now_iso()
 
@@ -590,6 +616,8 @@ def _write_db_state_sync(state: dict) -> dict:
 
 
 def _read_db_state_sync() -> dict:
+    # Treat DB.json as self-healing storage: malformed or outdated payloads are
+    # normalized immediately so the backend can keep operating predictably.
     if not DB_PATH.exists():
         return _write_db_state_sync(_default_db_state())
 
@@ -723,7 +751,11 @@ def _build_mcp_http_client_factory(
         headers: dict[str, Any] | None = None,
         timeout: httpx.Timeout | None = None,
         auth: httpx.Auth | None = None,
+        **extra_kwargs: Any,
     ) -> httpx.AsyncClient:
+        # This factory is only used by the MCP SDK SSE transport. It keeps the
+        # client setup centralized so SSL and Windows-local-proxy behavior stay
+        # consistent with the rest of the backend.
         kwargs: dict[str, Any] = {
             "follow_redirects": True,
             "timeout": timeout or httpx.Timeout(30.0, read=300.0),
@@ -736,55 +768,82 @@ def _build_mcp_http_client_factory(
             kwargs["verify"] = False
         if _is_local_service_host(hostname):
             kwargs["trust_env"] = False
+        kwargs.update(extra_kwargs)
         return httpx.AsyncClient(**kwargs)
 
     return factory
 
 
-def _build_fastmcp_transport(
+def _mcp_default_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json, text/event-stream",
+    }
+
+
+def _build_mcp_async_client(
     target: str,
     *,
     disable_ssl_verification: bool = False,
-):
+    headers: Optional[dict[str, Any]] = None,
+) -> httpx.AsyncClient:
     normalized_target = _normalize_local_service_url(target)
-    parsed = urlparse(normalized_target)
-    normalized_path = (parsed.path or "").rstrip("/").lower()
-    transport_factory = _build_mcp_http_client_factory(
-        normalized_target,
-        disable_ssl_verification=disable_ssl_verification,
-    )
-
-    if normalized_path.endswith("/sse") or normalized_path == "/sse":
-        return SSETransport(
-            normalized_target,
-            httpx_client_factory=transport_factory,
-        )
-
-    return StreamableHttpTransport(
-        normalized_target,
-        httpx_client_factory=transport_factory,
+    hostname = urlparse(normalized_target).hostname
+    kwargs: dict[str, Any] = {
+        "headers": headers or _mcp_default_headers(),
+        "follow_redirects": True,
+        "timeout": httpx.Timeout(30.0, read=300.0),
+    }
+    if disable_ssl_verification:
+        kwargs["verify"] = False
+    if _is_local_service_host(hostname):
+        kwargs["trust_env"] = False
+    return httpx.AsyncClient(
+        **kwargs,
     )
 
 
 @asynccontextmanager
-async def _fastmcp_client(
+async def _mcp_client_session(
     target: str,
     *,
     disable_ssl_verification: bool = False,
 ):
-    client = FastMCPClient(
-        _build_fastmcp_transport(
-            target,
+    # Prefer the official Python MCP SDK end-to-end:
+    # - `/sse` endpoints use the SSE transport
+    # - all other endpoints use streamable HTTP
+    # This keeps the backend aligned with MCP reference clients and avoids
+    # transport quirks from older wrappers.
+    normalized_target = _normalize_local_service_url(target)
+    parsed = urlparse(normalized_target)
+    normalized_path = (parsed.path or "").rstrip("/").lower()
+
+    if normalized_path.endswith("/sse") or normalized_path == "/sse":
+        transport_factory = _build_mcp_http_client_factory(
+            normalized_target,
             disable_ssl_verification=disable_ssl_verification,
-        ),
-        auto_initialize=True,
-    )
-    try:
-        async with client:
-            yield client
-    finally:
-        with suppress(Exception):
-            await client.close()
+        )
+        async with sse_client(
+            normalized_target,
+            headers=_mcp_default_headers(),
+            httpx_client_factory=transport_factory,
+        ) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                yield session
+        return
+
+    async with _build_mcp_async_client(
+        normalized_target,
+        disable_ssl_verification=disable_ssl_verification,
+        headers=_mcp_default_headers(),
+    ) as http_client:
+        async with streamable_http_client(
+            url=normalized_target,
+            http_client=http_client,
+        ) as (read_stream, write_stream, _get_session_id):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                yield session
 
 
 def _stringify_mcp_content_block(block: Any) -> str:
@@ -1118,6 +1177,160 @@ def classify_clickhouse_column_type(type_name: str) -> str:
     if any(token in lowered for token in ["string", "fixedstring", "uuid", "enum"]):
         return "string"
     return "other"
+
+
+def is_clickhouse_schema_request(user_message: str) -> bool:
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return False
+
+    direct_patterns = [
+        "list the columns",
+        "list columns",
+        "list all columns",
+        "list the fields",
+        "list fields",
+        "show columns",
+        "show the columns",
+        "show fields",
+        "show the fields",
+        "what are the columns",
+        "what are the fields",
+        "table schema",
+        "show schema",
+        "describe table",
+        "describe the table",
+        "liste des champs",
+        "liste les champs",
+        "liste des colonnes",
+        "liste les colonnes",
+        "donne moi la liste des champs",
+        "donne moi les champs",
+        "donne moi la liste des colonnes",
+        "quels sont les champs",
+        "quelles sont les colonnes",
+        "schema de la table",
+        "structure de la table",
+    ]
+    if any(pattern in normalized for pattern in direct_patterns):
+        return True
+
+    has_column_word = any(token in normalized for token in [" champ", " champs", " colonne", " colonnes", " field", " fields", " column", " columns"])
+    has_listing_verb = any(token in normalized for token in ["liste", "donne", "montre", "show", "list", "what are", "describe", "schema", "structure"])
+    has_row_request = any(token in normalized for token in [" ligne", " lignes", " row", " rows", " sample", " preview", " tableau"])
+    return has_column_word and has_listing_verb and not has_row_request
+
+
+def is_clickhouse_sample_rows_request(user_message: str) -> bool:
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return False
+
+    row_tokens = [
+        " rows", " row", " lignes", " ligne", "sample", "preview",
+        "first rows", "first row", "top rows", "top row",
+        "premieres lignes", "premiere ligne", "quelques lignes",
+    ]
+    asks_for_rows = any(token in normalized for token in row_tokens) or bool(
+        re.search(r"\b\d{1,4}\s*(rows?|lines?|lignes?)\b", normalized)
+    )
+    if not asks_for_rows:
+        return False
+
+    sample_verbs = ["show", "give", "display", "return", "donne", "montre", "affiche"]
+    if not any(token in normalized for token in sample_verbs):
+        return False
+
+    return True
+
+
+def extract_clickhouse_requested_row_limit(user_message: str, default: int = 10, max_limit: int = 100) -> int:
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return default
+
+    patterns = [
+        r"\b(\d{1,4})\s*(rows?|lines?|lignes?)\b",
+        r"\b(?:top|first|limit)\s+(\d{1,4})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            try:
+                return max(1, min(int(match.group(1)), max_limit))
+            except Exception:
+                break
+    return max(1, min(default, max_limit))
+
+
+def _clickhouse_markdown_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    text = str(value)
+    text = text.replace("|", "\\|").replace("\n", "<br />")
+    return text
+
+
+def build_clickhouse_markdown_table(rows: list[dict[str, Any]], headers: Optional[list[str]] = None, max_rows: int = 20) -> str:
+    preview_rows = rows[: max(1, max_rows)]
+    if not preview_rows:
+        return ""
+    if not headers:
+        headers = [str(key) for key in preview_rows[0].keys()]
+    if not headers:
+        return ""
+
+    header_line = "| " + " | ".join(headers) + " |"
+    divider_line = "| " + " | ".join(["---"] * len(headers)) + " |"
+    body = [
+        "| " + " | ".join(_clickhouse_markdown_cell(row.get(header)) for header in headers) + " |"
+        for row in preview_rows
+    ]
+    table = "\n".join([header_line, divider_line, *body])
+    if len(rows) > len(preview_rows):
+        table += f"\n\n_Showing the first {len(preview_rows)} rows out of {len(rows)}._"
+    return table
+
+
+def _user_explicitly_requests_table(text: str) -> bool:
+    normalized = str(text or "").lower()
+    return any(
+        token in normalized
+        for token in [
+            "table",
+            "tabular",
+            "markdown table",
+            "show rows",
+            "show row",
+            "schema list",
+            "as a grid",
+            "as grid",
+            "as matrix",
+            "under the form of a table",
+            "sous la forme d'un tableau",
+            "sous forme de tableau",
+            "dans un tableau",
+            "liste des champs",
+            "liste des colonnes",
+            "rows and columns",
+        ]
+    )
+
+
+def build_clickhouse_schema_section(table_name: str, schema: list[dict[str, str]]) -> str:
+    schema_rows = [
+        {
+            "Column": column.get("name", ""),
+            "Type": column.get("type", ""),
+            "Default": column.get("default_expression", "") or column.get("default_kind", "") or "",
+        }
+        for column in schema
+    ]
+    table = build_clickhouse_markdown_table(schema_rows, headers=["Column", "Type", "Default"], max_rows=200)
+    intro = f"## Table Schema\nHere is the column list for `{table_name}`."
+    return f"{intro}\n\n{table}" if table else intro
 
 
 # ── Oracle helpers ────────────────────────────────────────────────────────────
@@ -2800,18 +3013,24 @@ async def get_embedding(
 
     base_url may be a base path (e.g. ``http://host/v1``) — ``/embeddings`` is
     appended automatically — or the full endpoint URL already ending with
-    ``/embeddings`` (e.g. ``http://host/v1/openai/embeddings``), used as-is.
+    ``/embeddings`` or ``:embeddings`` (e.g. ``http://host/v1/openai/embeddings``
+    or ``https://.../v2:embeddings``), used as-is.
     """
     stripped = _normalize_local_service_url(base_url)
-    url = stripped if stripped.endswith("/embeddings") else stripped + "/embeddings"
+    lowered = stripped.lower()
+    is_direct_endpoint = lowered.endswith("/embeddings") or lowered.endswith(":embeddings")
+    url = stripped if is_direct_endpoint else stripped + "/embeddings"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    payload: dict[str, Any] = {"input": text}
+    if str(model or "").strip():
+        payload["model"] = model
     try:
         async with httpx.AsyncClient(
             **_httpx_async_client_kwargs(url, timeout=60.0, verify=verify_ssl)
         ) as client:
-            resp = await client.post(url, json={"model": model, "input": text}, headers=headers)
+            resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = _parse_http_json_response(
                 resp,
@@ -3060,7 +3279,7 @@ def _resolve_agent_path(path_value: str, base_path: str = "") -> Path:
         try:
             resolved.relative_to(sandbox_root)
         except ValueError as exc:
-            raise ValueError("Path escapes the configured base_path sandbox.") from exc
+            raise ValueError("Path escapes the configured access root.") from exc
 
     return resolved
 
@@ -3662,7 +3881,7 @@ def delete_directory_tool(path: str, recursive: bool = False, confirmed: bool = 
     target = _resolve_agent_path(path, base_path)
     sandbox_root = Path(base_path).expanduser().resolve() if base_path else None
     if sandbox_root and target == sandbox_root:
-        raise ValueError("Deleting the configured base_path root is blocked for safety.")
+        raise ValueError("Deleting the configured access root is blocked for safety.")
     if not target.exists() or not target.is_dir():
         raise ValueError(f"Directory `{target}` does not exist.")
     child_count = sum(1 for _ in target.iterdir())
@@ -4692,11 +4911,11 @@ Rules:
 - If the task is already complete, return action="final".
 - If a successful tool call already completed the requested filesystem change, stop and return action="final" instead of exploring again.
 - Do not perform extra verification or follow-up tool calls unless the user explicitly asked for them or the task still has unfinished steps.
-- The configured sandbox base_path is: {base_path or "not set"}.
+- The configured access root is: {base_path or "not set"}.
 - If you need to inspect files before acting, do that first.
 
 System prompt:
-{system_prompt}
+{_with_table_output_guidance(system_prompt)}
 
 Available tools:
 {_file_manager_tool_manifest()}
@@ -4794,7 +5013,7 @@ Rules:
 - Base the decision on actual tool results only.
 
 System prompt:
-{system_prompt}
+{_with_table_output_guidance(system_prompt)}
 
 Recent conversation:
 {json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
@@ -5945,7 +6164,7 @@ async def _run_manager_direct_response(
     system_prompt: str,
 ) -> str:
     manager_system_prompt = (
-        f"{system_prompt}\n\n"
+        f"{_with_table_output_guidance(system_prompt)}\n\n"
         "You are the RAGnarok Agent Manager. Reply in English. Keep answers concise, "
         "use specialist agents only when needed, and explain clearly when you can answer directly."
     ).strip()
@@ -6199,6 +6418,7 @@ Formatting rules:
 - Return Markdown only.
 - Write only the business result section body, with no title.
 - Prefer either one short paragraph or 2 to 4 flat bullet points, depending on what is clearer.
+- If the user explicitly asked for a table or tabular view, include a compact Markdown table in the answer body whenever the result is naturally tabular.
 - Highlight the most important values, entities, dates, or thresholds with **bold**.
 - Focus on what the result means for the user.
 - Do not explain SQL generation, schema inspection, or tool usage.
@@ -6892,6 +7112,9 @@ async def plan_data_analyst_step(
     llm_api_key: Optional[str],
     must_continue: bool = False,
 ) -> dict[str, Any]:
+    # This node is the "thought" step of the ReAct loop: it does not execute
+    # anything itself. It only decides the next evidence-gathering action based
+    # on what is already known and what is still missing.
     target_steps = _data_analyst_target_step_count(user_request, max_steps)
     schema_lines = "\n".join(
         f"- {column.get('name')}: {column.get('type')}"
@@ -7059,27 +7282,33 @@ async def synthesize_data_analyst_answer(
     llm_provider: str,
     llm_api_key: Optional[str],
 ) -> str:
+    # First-pass executive synthesis. A second polishing pass can further
+    # tighten tone and clarity, but this prompt already asks for a COMEX-ready
+    # structure grounded in the collected evidence.
     prompt = f"""
-You are finishing a complex ClickHouse analysis for an end user.
-Write the final answer in English as a developed business-facing Markdown analysis.
+You are finishing a complex ClickHouse analysis for an executive audience.
+Write the final answer in English as a developed business-facing Markdown analysis that reads like a senior data analyst briefing the COMEX.
 
 Required structure:
 - `## Executive Summary`
-- `## Analytical Narrative`
-- `## Key Findings`
-- `## Risks Or Gaps`
-- `## Recommendations`
+- `## What The Data Says`
+- `## Business Implications`
+- `## Recommended Actions`
+- `## Caveats`
 
 Rules:
-- Keep the tone functional, clear, decisive, and more developed than a short summary.
-- Use short paragraphs or flat bullet points.
+- Keep the tone functional, precise, concise, and executive-friendly.
+- Prefer short paragraphs with a few targeted bullets only when they genuinely improve readability.
+- If the user explicitly asked for a table or tabular comparison, include one compact Markdown table in `## What The Data Says` when the result is naturally tabular.
 - Highlight the most important values with **bold**.
 - Explicitly explain what the evidence suggests, not only what was queried.
-- Reference concrete metrics, rankings, percentages, counts, deltas, or date ranges whenever available.
-- Distinguish clearly between firm findings and directional hypotheses.
+- Reference concrete metrics, rankings, percentages, counts, deltas, segments, or date ranges whenever available.
+- Translate the evidence into business consequences, opportunities, or risks.
+- Distinguish clearly between firm findings, likely drivers, and open questions.
 - Do not include SQL sections or code fences here.
 - If the evidence is partial, say so honestly.
 - Avoid generic filler. Every section should add analytical value.
+- Sound like a senior analyst: measured, specific, and decision-oriented.
 
 Selected table: {selected_table}
 Forced finish: {"yes" if forced_finish else "no"}
@@ -7116,6 +7345,88 @@ User request:
     )
 
 
+async def polish_data_analyst_answer(
+    user_request: str,
+    selected_table: str,
+    draft_answer: str,
+    conversation_memory: str,
+    step_log: list[dict[str, Any]],
+    last_result_rows: list[dict[str, Any]],
+    knowledge_hits: list[dict[str, Any]],
+    forced_finish: bool,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> str:
+    # Final editorial pass: keep the facts, improve the executive narrative.
+    # This lets the agent stay evidence-driven during the loop, then switch to
+    # a cleaner senior-analyst writing style right before returning to the UI.
+    draft = str(draft_answer or "").strip()
+    if not draft:
+        return draft
+
+    prompt = f"""
+You are polishing the final answer of a ClickHouse Data Analyst agent.
+Rewrite the draft into a stronger executive memo for a COMEX audience.
+
+Required structure:
+- `## Executive Summary`
+- `## What The Data Says`
+- `## Business Implications`
+- `## Recommended Actions`
+- `## Caveats`
+
+Rules:
+- Keep the answer in English.
+- Make it more developed, more functional, and more decision-oriented than the draft.
+- Use precise statements grounded in the executed evidence.
+- If the user explicitly asked for a table or tabular comparison, keep one compact Markdown table in `## What The Data Says` when the evidence is naturally tabular.
+- Mention concrete figures, segments, comparisons, rankings, or time ranges whenever available.
+- Prefer short paragraphs. Use bullets only for tightly scoped recommendations or caveats.
+- Do not add SQL, code fences, or implementation details.
+- Do not invent facts that are not supported by the evidence.
+- Distinguish facts, likely explanations, and residual uncertainty.
+- The visible part should read like a senior data analyst's written debrief to leadership.
+
+Selected table: {selected_table}
+Forced finish: {"yes" if forced_finish else "no"}
+
+Recent conversation memory:
+{conversation_memory}
+
+Analytical steps:
+{_data_analyst_steps_context(step_log)}
+
+Latest query preview:
+{_data_analyst_result_preview_text(last_result_rows)}
+
+Knowledge signals:
+{json.dumps([
+    {
+        "doc_name": item.get("doc_name"),
+        "score": item.get("score"),
+        "text": _truncate_text_preview(str(item.get("text") or ""), 260),
+    }
+    for item in knowledge_hits[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
+], ensure_ascii=False, indent=2)}
+
+User request:
+{user_request}
+
+Draft answer to improve:
+{draft}
+""".strip()
+
+    return await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+    )
+
+
 def build_data_analyst_response_markdown(
     final_body: str,
     executed_sqls: list[str],
@@ -7126,13 +7437,19 @@ def build_data_analyst_response_markdown(
     confidence_score: int,
     confidence_reason: str,
     step_log: Optional[list[dict[str, Any]]] = None,
+    force_visible_table: bool = False,
 ) -> str:
+    # Keep the user-facing memo first, then append technical evidence blocks.
+    # The chat UI collapses most of these sections automatically, so analysts
+    # still get traceability without overwhelming the primary narrative.
     sections = [str(final_body or "").strip() or "## Executive Summary\nThe analysis completed, but no final narrative could be generated."]
     if step_log:
         step_highlights = _data_analyst_step_highlights(step_log)
         if step_highlights:
             sections.append("## Evidence Trail\n" + step_highlights)
     preview_table = _data_analyst_tabular_preview(last_result_meta, last_result_rows)
+    if preview_table and force_visible_table:
+        sections.append("## Result Table\n" + preview_table)
     if preview_table:
         sections.append("## Data Preview\n" + preview_table)
     if knowledge_hits:
@@ -7368,6 +7685,7 @@ Oracle SQL rules:
 - Use FETCH FIRST n ROWS ONLY for pagination
 - Use SUBSTR(), NVL(), TO_CHAR(), and DECODE() when helpful
 - Use only read-only SELECT or WITH queries
+- If the user explicitly asks for a table, preserve a tabular result preview in the final answer.
 
 Working rules:
 - At most one tool call per iteration
@@ -7383,7 +7701,7 @@ Connection label: {connection_label}
 Configured row limit: {oracle_config.get("rowLimit", ORACLE_DEFAULT_ROW_LIMIT)}
 Toolkit id: {oracle_config.get("toolkitId") or "default"}
 Custom system prompt:
-{oracle_config.get("systemPrompt") or ""}
+{_with_table_output_guidance(str(oracle_config.get("systemPrompt") or ""))}
 
 Current agent state:
 {json.dumps(state, ensure_ascii=False, indent=2)}
@@ -9277,6 +9595,10 @@ class FileManagerAgentRequest(BaseModel):
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
 
 
+class FileManagerPathTestRequest(BaseModel):
+    file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
+
+
 class PdfCreatorAgentStateModel(BaseModel):
     stage: str = "idle"
     pending_document: Optional[dict] = None
@@ -9651,12 +9973,14 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
     export_payload = _try_extract_file_export_payload(user_message)
 
 
+    # Empty turns are used as a lightweight bootstrap for the dedicated agent
+    # view: return a compact capability reminder instead of entering the ReAct loop.
     if not user_message:
         return {
             "answer": (
                 "## File Management Agent\n"
                 "Ask me to inspect, search, create, edit, move, or delete files.\n\n"
-                f"Current sandbox base path: `{config['basePath'] or 'not restricted'}`"
+                f"Current access root: `{config['basePath'] or 'full server-visible workspace'}`"
             ),
             "agent_state": state,
             "steps": [
@@ -11766,6 +12090,20 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                     llm_provider=req.llm_provider,
                     llm_api_key=req.llm_api_key,
                 )
+            final_body = await polish_data_analyst_answer(
+                current_request,
+                str(state["selected_table"]),
+                final_body,
+                conversation_memory,
+                step_log,
+                last_result_rows,
+                knowledge_hits,
+                forced_finish=False,
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_provider=req.llm_provider,
+                llm_api_key=req.llm_api_key,
+            )
             confidence_score, confidence_reason = _data_analyst_confidence_score(step_log, forced_finish=False)
             final_answer = build_data_analyst_response_markdown(
                 final_body,
@@ -11777,6 +12115,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 confidence_score,
                 confidence_reason,
                 step_log=step_log,
+                force_visible_table=_user_explicitly_requests_table(current_request),
             )
             state["stage"] = "ready"
             state["pending_request"] = ""
@@ -12054,6 +12393,20 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         llm_provider=req.llm_provider,
         llm_api_key=req.llm_api_key,
     )
+    final_body = await polish_data_analyst_answer(
+        current_request,
+        str(state["selected_table"]),
+        final_body,
+        conversation_memory,
+        step_log,
+        last_result_rows,
+        knowledge_hits,
+        forced_finish=True,
+        llm_base_url=req.llm_base_url,
+        llm_model=req.llm_model,
+        llm_provider=req.llm_provider,
+        llm_api_key=req.llm_api_key,
+    )
     confidence_score, confidence_reason = _data_analyst_confidence_score(step_log, forced_finish=True)
     final_answer = build_data_analyst_response_markdown(
         final_body,
@@ -12065,6 +12418,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         confidence_score,
         confidence_reason,
         step_log=step_log,
+        force_visible_table=_user_explicitly_requests_table(current_request),
     )
     state["stage"] = "ready"
     state["pending_request"] = ""
@@ -12687,6 +13041,36 @@ async def test_oracle_connection_endpoint(req: OracleTestRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/file-manager/test-path")
+async def test_file_manager_path(req: FileManagerPathTestRequest):
+    try:
+        config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+        target = _resolve_agent_path(".", config["basePath"])
+        if not target.exists():
+            raise ValueError(f"The configured folder does not exist: {target}")
+        if not target.is_dir():
+            raise ValueError(f"The configured path is not a directory: {target}")
+
+        entries = sorted(target.iterdir(), key=lambda item: item.name.lower())
+        preview = [
+            {
+                "name": item.name,
+                "kind": "directory" if item.is_dir() else "file",
+            }
+            for item in entries[:8]
+        ]
+
+        return {
+            "status": "ok",
+            "resolvedPath": str(target),
+            "restricted": bool(config["basePath"]),
+            "entryCount": len(entries),
+            "preview": preview,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def build_choice_markdown(title: str, prompt: str, options: list[str]) -> str:
     bullet_list = "\n".join(f"- [ ] {option}" for option in options)
     return f"## {title}\n{prompt}\n\n{bullet_list}"
@@ -12704,6 +13088,11 @@ def reset_clickhouse_clarification(state: ClickHouseAgentState) -> None:
 
 @app.post("/api/chat/clickhouse-agent")
 async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
+    # This agent intentionally mixes two behaviors:
+    # 1. fast-path handling for obvious utility requests such as schema listing
+    #    or simple row previews
+    # 2. LLM-guided SQL planning when the request is analytical or ambiguous
+    # The goal is to avoid unnecessary clarification for routine database tasks.
     _emit_log("info", "clickhouse", "Received request", {"query": req.message})
     state = req.agent_state
 
@@ -13092,6 +13481,127 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     if not state.table_schema:
         raise HTTPException(status_code=400, detail=f"Table '{state.selected_table}' has no readable columns.")
 
+    # Direct schema requests should not go through field/date disambiguation.
+    if state.pending_request and is_clickhouse_schema_request(state.pending_request):
+        schema_sql = (
+            "SELECT name, type, default_kind, default_expression "
+            "FROM system.columns "
+            f"WHERE database = {quote_clickhouse_literal(req.clickhouse.database)} "
+            f"AND table = {quote_clickhouse_literal(state.selected_table)} "
+            "ORDER BY position"
+        )
+        schema_section = build_clickhouse_schema_section(state.selected_table, state.table_schema)
+        answer = build_clickhouse_response_markdown(
+            f"I found **{len(state.table_schema)} columns** in `{state.selected_table}`.",
+            [schema_sql],
+            [schema_section],
+        )
+        state.last_sql = schema_sql
+        state.last_result_meta = [
+            {"name": "Column", "type": "String"},
+            {"name": "Type", "type": "String"},
+            {"name": "Default", "type": "String"},
+        ]
+        state.last_result_rows = [
+            {
+                "Column": column.get("name", ""),
+                "Type": column.get("type", ""),
+                "Default": column.get("default_expression", "") or column.get("default_kind", "") or "",
+            }
+            for column in state.table_schema
+        ][:200]
+        state.stage = "ready"
+        state.pending_request = ""
+        reset_clickhouse_clarification(state)
+        reset_clickhouse_chart_state(state)
+        return {
+            "answer": answer,
+            "agent_state": dump_clickhouse_agent_state(state),
+            "sql": schema_sql,
+            "steps": [
+                {
+                    "id": "ch-selected-table",
+                    "title": "Selected ClickHouse table",
+                    "status": "success",
+                    "details": f"Using table `{state.selected_table}`.",
+                },
+                {
+                    "id": "ch-schema-direct",
+                    "title": "Returned table schema directly",
+                    "status": "success",
+                    "details": f"Listed {len(state.table_schema)} column(s) without requesting any extra clarification.",
+                },
+            ],
+        }
+
+    # Direct raw-row requests are another fast path. When the user explicitly
+    # asks for rows with all fields, return a bounded preview immediately.
+    if state.pending_request and is_clickhouse_sample_rows_request(state.pending_request):
+        requested_limit = extract_clickhouse_requested_row_limit(
+            state.pending_request,
+            default=10,
+            max_limit=max(1, min(int(req.clickhouse.query_limit or 100), 100)),
+        )
+        sample_sql = (
+            f"SELECT * FROM {quote_clickhouse_identifier(state.selected_table)}\n"
+            f"LIMIT {requested_limit}"
+        )
+        try:
+            start_exec = _time.time()
+            result = await execute_clickhouse_sql(req.clickhouse, sample_sql)
+            elapsed = _time.time() - start_exec
+            _emit_log(
+                "sql",
+                "clickhouse",
+                f"Executed direct sample query successfully ({elapsed:.2f}s)",
+                {"sql": sample_sql, "rows": len(result.get('data', []))},
+            )
+        except Exception as exc:
+            _emit_log("error", "clickhouse", f"Direct sample query failed: {exc}", {"sql": sample_sql})
+            raise
+
+        state.last_sql = sample_sql
+        state.last_result_meta = result.get("meta", [])
+        export_row_cap = max(1, min(int(req.clickhouse.query_limit or 200), 2000))
+        state.last_result_rows = result.get("data", [])[:export_row_cap]
+        preview_headers = [str(item.get("name", "")) for item in state.last_result_meta if str(item.get("name", ""))]
+        preview_table = build_clickhouse_markdown_table(
+            result.get("data", []),
+            headers=preview_headers or None,
+            max_rows=requested_limit,
+        )
+        answer = build_clickhouse_response_markdown(
+            (
+                f"Here are **{len(result.get('data', []))} row(s)** from `{state.selected_table}` "
+                f"with **all available columns**."
+            ),
+            [sample_sql],
+            [f"## Data Preview\n{preview_table}" if preview_table else ""],
+        )
+        state.stage = "ready"
+        state.pending_request = ""
+        reset_clickhouse_clarification(state)
+        reset_clickhouse_chart_state(state)
+        return {
+            "answer": answer,
+            "agent_state": dump_clickhouse_agent_state(state),
+            "sql": sample_sql,
+            "steps": [
+                {
+                    "id": "ch-selected-table",
+                    "title": "Selected ClickHouse table",
+                    "status": "success",
+                    "details": f"Using table `{state.selected_table}`.",
+                },
+                {
+                    "id": "ch-sample-direct",
+                    "title": "Returned sample rows directly",
+                    "status": "success",
+                    "details": f"Fetched {len(result.get('data', []))} row(s) with all columns and formatted them as a table.",
+                },
+            ],
+        }
+
     if state.stage == "awaiting_field":
         selected_field = resolve_user_choice(user_message, state.clarification_options)
         if not selected_field:
@@ -13282,7 +13792,18 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
         req.llm_provider,
         req.llm_api_key,
     )
-    answer = build_clickhouse_response_markdown(result_summary, [sql])
+    tabular_section = ""
+    if _user_explicitly_requests_table(original_request):
+        tabular_section = build_clickhouse_markdown_table(
+            result.get("data", []),
+            headers=[str(item.get("name") or "") for item in (result.get("meta") or []) if str(item.get("name") or "").strip()] or None,
+            max_rows=min(max(5, int(req.clickhouse.query_limit or 20)), 20),
+        )
+    answer = build_clickhouse_response_markdown(
+        result_summary,
+        [sql],
+        [f"## Result Table\n{tabular_section}" if tabular_section else ""],
+    )
 
     state.last_sql = sql
     state.last_result_meta = result.get("meta", [])
@@ -13469,10 +13990,16 @@ async def list_llm_models(req: LlmModelsRequest):
 @app.post("/api/embedding/models")
 async def list_embedding_models(req: EmbeddingModelsRequest):
     normalized_base_url = _normalize_local_service_url(req.base_url)
-    if normalized_base_url.rstrip("/").endswith("/embeddings"):
-        endpoint = normalized_base_url.rstrip("/")[: -len("/embeddings")] + "/models"
-    else:
-        endpoint = normalized_base_url.rstrip("/") + "/models"
+    lowered = normalized_base_url.rstrip("/").lower()
+    is_direct_endpoint = lowered.endswith("/embeddings") or lowered.endswith(":embeddings")
+    if is_direct_endpoint:
+        return {
+            "status": "skipped",
+            "models": [],
+            "model_count": 0,
+            "message": "Model discovery is unavailable when you provide a direct embedding endpoint URL.",
+        }
+    endpoint = normalized_base_url.rstrip("/") + "/models"
     headers = {"Content-Type": "application/json"}
     if req.api_key:
         headers["Authorization"] = f"Bearer {req.api_key}"
@@ -13497,18 +14024,24 @@ async def list_embedding_models(req: EmbeddingModelsRequest):
 
 @app.post("/api/mcp/test")
 async def test_mcp_connection(req: MCPTestRequest):
-    """Connect to an MCP server via FastMCP and return its available tools."""
+    """Connect to an MCP server via the Python MCP SDK and return its available tools."""
     try:
-        async with _fastmcp_client(
+        async with _mcp_client_session(
             req.url,
             disable_ssl_verification=req.disable_ssl_verification,
-        ) as client:
-            tool_definitions = await client.list_tools()
+        ) as session:
+            tool_definitions = await session.list_tools()
+            resource_definitions = await session.list_resources()
             tools = [
                 {"name": tool.name, "description": tool.description or ""}
-                for tool in tool_definitions
+                for tool in (tool_definitions.tools or [])
             ]
-        return {"status": "ok", "tools": tools, "tool_count": len(tools)}
+        return {
+            "status": "ok",
+            "tools": tools,
+            "tool_count": len(tools),
+            "resource_count": len(resource_definitions.resources or []),
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -13530,13 +14063,14 @@ def _mcp_tool_to_openai(tool) -> dict:
 
 @app.post("/api/chat/mcp")
 async def chat_mcp(req: MCPChatRequest):
-    """Agentic loop: connects to an MCP server via FastMCP, lets the LLM call tools, returns the final answer."""
+    """Agentic loop: connects to an MCP server via the Python MCP SDK, lets the LLM call tools, returns the final answer."""
     try:
-        async with _fastmcp_client(
+        async with _mcp_client_session(
             req.mcp_url,
             disable_ssl_verification=req.disable_ssl_verification,
-        ) as client:
-            tool_definitions = await client.list_tools()
+        ) as session:
+            tool_result = await session.list_tools()
+            tool_definitions = list(tool_result.tools or [])
             openai_tools = [_mcp_tool_to_openai(tool) for tool in tool_definitions]
             memory_history = _normalized_history_messages(
                 req.history,
@@ -13619,7 +14153,7 @@ async def chat_mcp(req: MCPChatRequest):
                     "tool_calls": raw_tool_calls,
                 })
 
-                # Execute each tool call via FastMCP
+                # Execute each tool call via the Python MCP SDK
                 for tc in raw_tool_calls:
                     # Normalise across Ollama / OpenAI formats
                     if isinstance(tc, dict) and "function" in tc:
@@ -13636,7 +14170,7 @@ async def chat_mcp(req: MCPChatRequest):
                     tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
 
                     try:
-                        result = await client.call_tool_mcp(tool_name, tool_args or {})
+                        result = await session.call_tool(tool_name, tool_args or {})
                         tool_output = _format_mcp_tool_result(result)
                     except Exception as e:
                         tool_output = f"[Tool error] {e}"

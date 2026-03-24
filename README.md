@@ -49,6 +49,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **Agents & Tools portal** | Configurable external application tiles managed in Settings and rendered as a glass-style portal page from the landing screen |
 | **Conversation memory** | Current conversation keeps a short backend-synced working memory window (at least 5 recent steps, currently 10 useful messages) |
 | **Markdown & HTML** | Syntax-highlighted code blocks, proper tables, raw HTML from LLMs, copy button |
+| **Tabular answers on demand** | Pure LLM plus all SQL / analyst / file-oriented agents can return a compact Markdown table when the user explicitly asks for rows, columns, schema lists, previews, or tabular output |
 | **Clickable clarifications** | Agent choices are rendered as large clickable tiles in the chat instead of requiring manual retyping when possible |
 | **Chat zoom** | Floating Apple-inspired zoom control on the right side of the chat with fine-grained scaling |
 | **Compact answer layout** | Main answer stays visible while SQL, reasoning, previews, and other technical appendices collapse into expandable details blocks |
@@ -216,10 +217,10 @@ Multi-agent orchestration with seven roles:
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
-| **ClickHouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL and can produce charts |
-| **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, and can export the latest dataset to CSV |
-| **Oracle SQL** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries and answers in business-facing Markdown |
-| **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations |
+| **ClickHouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL, can produce charts, and can show result sets or schema lists as Markdown tables on demand |
+| **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, can export the latest dataset to CSV, and can surface a visible result table when requested |
+| **Oracle SQL** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries, answers in business-facing Markdown, and preserves a readable data table in the final answer |
+| **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations and tabular output when a file summary is naturally table-shaped |
 | **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
 | **Data quality - Tables** | Profiles ClickHouse tables and generates an English Markdown quality report from a dedicated overlay form |
 
@@ -231,6 +232,7 @@ Multi-agent orchestration with seven roles:
 4. If multiple tables, fields or date columns are plausible, it asks the user to choose with clickable task-tile options.
 5. It generates a read-only ClickHouse query, validates it, executes it, and returns:
    - a short final answer in English,
+   - a Markdown result table when you explicitly ask for a tabular view,
    - the executed SQL,
    - a concise reasoning summary,
    - and, when relevant, an inline chart or a chart suggestion.
@@ -254,7 +256,7 @@ The ClickHouse agent uses the backend only and always relies on the configured l
    - search the knowledge base when it helps,
    - retry failed SQL with a simpler alternative without spending an extra credited step,
    - export the latest dataset to CSV when explicitly requested,
-   - and return a business-facing Markdown answer with visible analytical steps in the chat.
+   - and return a business-facing Markdown answer with a visible result table when you ask for one.
 
 #### Oracle SQL quick flow
 
@@ -536,6 +538,7 @@ The File Management agent is a backend Python-only ReAct loop focused on safe fi
 - Creation: directories, text files, Excel workbooks
 - Edition: overwrite files, update Excel sheets/cells, append rows
 - Move / delete: explicit confirmation required before execution
+- Tabular answers: when the user asks for rows, columns, summaries, or previews in table form, the agent can return a compact Markdown table
 
 ### Safety
 

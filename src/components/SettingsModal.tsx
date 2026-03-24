@@ -36,6 +36,7 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     knnNeighbors: config.knnNeighbors || 50,
     mcpTools: config.mcpTools ?? [],
     documentationUrl: config.documentationUrl ?? '',
+    agenticDataVizUrl: config.agenticDataVizUrl ?? '',
     portalApps: Array.isArray(config.portalApps)
       ? config.portalApps.map((app, index) => ({
           id: app.id || `portal_app_${index + 1}`,
@@ -127,6 +128,7 @@ export function SettingsModal({
   // State for available embedding models
   const [embeddingModels, setEmbeddingModels] = useState<string[]>([]);
   const [isRefreshingEmbed, setIsRefreshingEmbed] = useState(false);
+  const [embeddingModelsMessage, setEmbeddingModelsMessage] = useState('');
   
   // Connection test states for LLM
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -163,6 +165,7 @@ export function SettingsModal({
   const [mcpTestStates, setMcpTestStates] = useState<Record<string, { status: 'idle' | 'testing' | 'success' | 'error'; message: string; tools: { name: string; description: string }[] }>>({});
   const [dbStatus, setDbStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
   const [dbMessage, setDbMessage] = useState('');
+  const isDirectEmbeddingEndpoint = /(?:\/embeddings|:embeddings)$/i.test((localConfig.embeddingBaseUrl || '').trim());
 
   useEffect(() => {
     currentDraftFingerprintRef.current = JSON.stringify(localConfig);
@@ -541,6 +544,7 @@ export function SettingsModal({
   // Fetch available models from the configured embedding provider
   const fetchEmbeddingModels = async () => {
     setIsRefreshingEmbed(true);
+    setEmbeddingModelsMessage('');
     try {
       const response = await fetch('/api/embedding/models', {
         method: 'POST',
@@ -558,11 +562,13 @@ export function SettingsModal({
       const data = await response.json();
       const fetched: string[] = Array.isArray(data.models) ? data.models : [];
       setEmbeddingModels(fetched);
+      setEmbeddingModelsMessage(typeof data.message === 'string' ? data.message : '');
       if (fetched.length > 0 && !fetched.includes(localConfig.embeddingModel)) {
         setLocalConfig(prev => ({ ...prev, embeddingModel: fetched[0] }));
       }
     } catch (err) {
       console.error("Error fetching embedding models:", err);
+      setEmbeddingModelsMessage('');
     } finally {
       setIsRefreshingEmbed(false);
     }
@@ -1203,6 +1209,26 @@ export function SettingsModal({
                 </div>
               </div>
 
+              <div className="rounded-[1.75rem] border border-emerald-200/80 bg-[linear-gradient(135deg,rgba(236,253,245,0.96),rgba(220,252,231,0.88),rgba(240,253,250,0.92))] p-5 shadow-[0_18px_40px_rgba(16,185,129,0.10)]">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Server className="w-4 h-4 text-emerald-500" />
+                  <h3 className="text-sm font-semibold text-emerald-950">Agentic Data Viz redirect</h3>
+                </div>
+                <p className="text-xs text-emerald-900/80 leading-relaxed mb-3">
+                  If you set a URL here, the <strong>Agentic Data Viz</strong> card on the home page will open that application in a new browser tab. Leave it empty to keep the current in-app page.
+                </p>
+                <input
+                  type="url"
+                  value={localConfig.agenticDataVizUrl}
+                  onChange={(e) => setLocalConfig((prev) => ({ ...prev, agenticDataVizUrl: e.target.value }))}
+                  className="w-full bg-white/85 border border-white/80 rounded-2xl px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 transition-all"
+                  placeholder="https://dataviz.example.com"
+                />
+                <p className="text-xs text-emerald-900/70 mt-2">
+                  This redirect is considered active as soon as the URL is filled in.
+                </p>
+              </div>
+
               {(localConfig.portalApps ?? []).length === 0 ? (
                 <div className="rounded-[1.75rem] border border-dashed border-sky-200 bg-white/70 px-6 py-10 text-center shadow-[0_10px_24px_rgba(148,163,184,0.08)]">
                   <p className="text-sm font-medium text-gray-700">No app tile configured yet.</p>
@@ -1602,15 +1628,19 @@ export function SettingsModal({
                 <div className="space-y-4">
                   <div>
                     <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                      <Server className="w-4 h-4" /> OpenAI-Compatible Base URL
+                      <Server className="w-4 h-4" /> Embedding endpoint URL
                     </label>
                     <div className="flex gap-2">
                       <input
                         type="text"
                         value={localConfig.embeddingBaseUrl}
-                        onChange={(e) => setLocalConfig({ ...localConfig, embeddingBaseUrl: e.target.value })}
+                        onChange={(e) => {
+                          setLocalConfig({ ...localConfig, embeddingBaseUrl: e.target.value });
+                          setEmbeddingModels([]);
+                          setEmbeddingModelsMessage('');
+                        }}
                         className="flex-1 bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
-                        placeholder="http://localhost:11434/v1"
+                        placeholder="https://host.example.com/v2:embeddings"
                       />
                       <button
                         onClick={testEmbeddingConnection}
@@ -1621,7 +1651,10 @@ export function SettingsModal({
                       </button>
                     </div>
                     <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                      Base URL (for example <code>http://host/v1</code>) or a full URL ending with <code>/embeddings</code> (for example <code>http://host/v1/openai/embeddings</code>).
+                      Use either an OpenAI-compatible base URL such as <code>https://host/v1</code>, or a direct endpoint URL such as <code>https://host/v2:embeddings</code> or <code>https://host/v1/embeddings</code>.
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      The same endpoint is used for both document vectorization and user-query vectorization.
                     </p>
                     <label className="flex items-center gap-2 mt-2 cursor-pointer select-none w-fit">
                       <input
@@ -1640,28 +1673,30 @@ export function SettingsModal({
 
                   <div>
                     <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
-                      <Key className="w-4 h-4" /> API Key (Optional)
+                      <Key className="w-4 h-4" /> API Key
                     </label>
                     <input
                       type="password"
                       value={localConfig.embeddingApiKey}
                       onChange={(e) => setLocalConfig({ ...localConfig, embeddingApiKey: e.target.value })}
                       className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all"
-                      placeholder="sk-..."
+                      placeholder="Bearer token or API key"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
-                        <Bot className="w-4 h-4" /> Model Name
+                        <Bot className="w-4 h-4" /> Model name
                       </label>
-                      <button
-                        onClick={fetchEmbeddingModels}
-                        className="text-blue-500 hover:text-blue-400 flex items-center gap-1 text-xs font-medium"
-                      >
-                        <RefreshCw className={`w-3 h-3 ${isRefreshingEmbed ? 'animate-spin' : ''}`} /> Refresh Models
-                      </button>
+                      {!isDirectEmbeddingEndpoint && (
+                        <button
+                          onClick={fetchEmbeddingModels}
+                          className="text-blue-500 hover:text-blue-400 flex items-center gap-1 text-xs font-medium"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isRefreshingEmbed ? 'animate-spin' : ''}`} /> Discover models
+                        </button>
+                      )}
                     </div>
                     {embeddingModels.length > 0 ? (
                       <select
@@ -1680,7 +1715,17 @@ export function SettingsModal({
                         placeholder="nomic-embed-text"
                       />
                     )}
-                    <p className="text-xs text-gray-500 mt-1">Used to vectorize user queries locally.</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Optional when your embedding provider infers the model from the endpoint. Keep it filled when your provider still expects a model in the request body.
+                    </p>
+                    {isDirectEmbeddingEndpoint && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        Direct embedding endpoint detected: model discovery is disabled automatically.
+                      </p>
+                    )}
+                    {!isDirectEmbeddingEndpoint && embeddingModelsMessage && (
+                      <p className="text-xs text-gray-500 mt-1">{embeddingModelsMessage}</p>
+                    )}
                   </div>
                 </div>
               </div>

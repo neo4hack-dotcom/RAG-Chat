@@ -416,6 +416,7 @@ export type AppConfig = {
   knnNeighbors: number;
   mcpTools: McpTool[];
   documentationUrl: string;
+  agenticDataVizUrl: string;
   portalApps: PortalApp[];
   settingsAccessPassword: string;
   clickhouseHost: string;
@@ -462,7 +463,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   baseUrl: "http://localhost:11434",
   apiKey: "",
   model: "llama3",
-  systemPrompt: "You are a helpful, smart, and concise AI assistant. Present non-JSON answers in polished Markdown with clear sections, concise bullets, tasteful **bold** emphasis, and tables when they help. Safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> are allowed when they genuinely improve the layout. Never return a full HTML document, CSS, or JavaScript. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies.",
+  systemPrompt: "You are a helpful, smart, and concise AI assistant. Present non-JSON answers in polished Markdown with clear sections, concise bullets, tasteful **bold** emphasis, and tables when they help. Safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> are allowed when they genuinely improve the layout. Never return a full HTML document, CSS, or JavaScript. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies. If the user explicitly asks for a table, rows/columns, a matrix, a grid, a schema list, or a tabular preview, return the relevant structured result as a valid Markdown table whenever the data is naturally tabular.",
   disableSslVerification: false,
   elasticsearchUrl: "http://localhost:9200",
   elasticsearchIndex: "rag_documents",
@@ -480,6 +481,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
   ],
   documentationUrl: '',
+  agenticDataVizUrl: '',
   portalApps: [],
   settingsAccessPassword: 'MM@2026',
   clickhouseHost: 'localhost',
@@ -511,13 +513,13 @@ export const DEFAULT_CONFIG: AppConfig = {
     maxIterations: 8,
     toolkitId: '',
     systemPrompt:
-      'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and present final user-facing answers in polished Markdown with clear sections, concise bullets, and tasteful emphasis. Safe semantic HTML fragments are allowed when they improve readability.',
+      'You are the Oracle SQL agent. Reply in English. Use the Oracle tools before making assumptions, generate optimized Oracle SQL with explicit columns, and present final user-facing answers in polished Markdown with clear sections, concise bullets, and tasteful emphasis. Safe semantic HTML fragments are allowed when they improve readability. When the user explicitly asks for a table or schema list, include a readable Markdown table.',
   },
   fileManagerConfig: {
     basePath: '',
     maxIterations: 10,
     systemPrompt:
-      'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, ask for confirmation before destructive or overwrite actions, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis.',
+      'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, ask for confirmation before destructive or overwrite actions, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis. When the user explicitly asks for tabular output, include a Markdown table whenever the result is naturally tabular.',
   },
 };
 
@@ -918,6 +920,7 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
     ...(config ?? {}),
     disableSslVerification: config?.disableSslVerification ?? DEFAULT_CONFIG.disableSslVerification,
     settingsAccessPassword: config?.settingsAccessPassword || DEFAULT_CONFIG.settingsAccessPassword,
+    agenticDataVizUrl: config?.agenticDataVizUrl ?? DEFAULT_CONFIG.agenticDataVizUrl,
     portalApps: incomingPortalApps
       .filter((app): app is PortalApp => Boolean(app))
       .map((app, index) => ({

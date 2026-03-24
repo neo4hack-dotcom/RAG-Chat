@@ -1,5 +1,6 @@
-import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit } from "lucide-react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, Route, SplitSquareVertical, FilePenLine, Gauge } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
@@ -82,7 +83,7 @@ This agent works in English and uses backend Python tools to inspect and manage 
 
 - Use it to browse folders, read files, summarize CSV or Excel data, and create or edit supported files.
 - Overwrite, move, and delete operations always require an explicit confirmation step before execution.
-- Use the Configure button, or double-click the agent chip below, to configure the sandbox base path, iteration limit, or custom system prompt.`;
+- Use the Configure button, or double-click the agent chip below, to configure the access root, iteration limit, or custom system prompt.`;
   }
 
   if (agentRole === 'pdf_creator') {
@@ -162,11 +163,43 @@ type DataQualityFormState = {
   timeColumn: string | null;
 };
 
+type MentionTargetDefinition = {
+  id: string;
+  label: string;
+  shortLabel: string;
+  aliases: string[];
+  role?: AgentRole;
+  icon: LucideIcon;
+  tone: string;
+};
+
+type BreadcrumbNode = {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  toneClass: string;
+};
+
+type DraftArtifact = {
+  id: string;
+  title: string;
+  kindLabel: string;
+  preview: string;
+  content: string;
+  timestamp: number;
+};
+
+type OrchestratorView = {
+  strategist: MentionTargetDefinition;
+  executor: MentionTargetDefinition;
+  transcript: Array<{ id: string; speaker: string; side: 'left' | 'right'; message: string }>;
+};
+
 const CHAT_ZOOM_MIN = 0.85;
 const CHAT_ZOOM_MAX = 1.4;
 const CHAT_ZOOM_STEP = 0.05;
 const CHAT_ZOOM_DEFAULT = 1;
-const BEAUTIFUL_RESPONSE_PROMPT = "[SYSTEM: For every non-JSON answer, produce a polished, presentation-ready result. Prefer elegant Markdown with short section headings, compact bullet lists, tasteful **bold** emphasis, comparison tables when useful, and blockquotes for notes. Put the main answer first. If you include technical details, SQL, raw previews, reasoning notes, or appendices, place them after the main answer and preferably inside `<details><summary>Expand details</summary>...</details>` blocks. You may use safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> when they genuinely improve the layout. Never output a full HTML document, CSS, JavaScript, <head>, <body>, <iframe>, or inline event handlers. Keep the result clean, premium, readable, and visually impressive in the chat UI.]";
+const BEAUTIFUL_RESPONSE_PROMPT = "[SYSTEM: For every non-JSON answer, produce a polished, presentation-ready result. Prefer elegant Markdown with short section headings, compact bullet lists, tasteful **bold** emphasis, comparison tables when useful, and blockquotes for notes. If the user explicitly asks for a table, rows/columns, a schema list, a matrix, a grid, or a tabular preview, return the relevant structured result as a valid compact Markdown table whenever the data is naturally tabular. Put the main answer first. If you include technical details, SQL, raw previews, reasoning notes, or appendices, place them after the main answer and preferably inside `<details><summary>Expand details</summary>...</details>` blocks. You may use safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> when they genuinely improve the layout. Never output a full HTML document, CSS, JavaScript, <head>, <body>, <iframe>, or inline event handlers. Keep the result clean, premium, readable, and visually impressive in the chat UI.]";
 const CLICKABLE_CHOICES_PROMPT = '[SYSTEM: If you need clarification and you offer explicit choices, format every selectable option as its own markdown task list item using exactly "- [ ] Option". Keep option labels short so the UI can turn them into clickable replies.]';
 const WELCOME_MESSAGE_CONTENT = "# Welcome to RAGnarok ⚡️\n\nI'm your AI assistant, ready to connect to your LLMs, RAG system, or agents.";
 
@@ -181,6 +214,10 @@ function isAgentIntroMessage(message: Message): boolean {
 
 function isIntroductoryAssistantMessage(message: Message): boolean {
   return isDefaultWelcomeMessage(message) || isAgentIntroMessage(message);
+}
+
+function hasMeaningfulConversationMessages(messages: Message[]): boolean {
+  return messages.some((message) => !isIntroductoryAssistantMessage(message));
 }
 
 function stepBadgeLabel(step: AgentStep): string {
@@ -256,6 +293,138 @@ function summarizeDataQualityRun(form: DataQualityFormState): string {
       : `Sample size: ${form.sampleSize.toLocaleString()} rows.`
   );
   return lines.join("\n");
+}
+
+const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
+  manager: 'Agent Manager',
+  clickhouse_query: 'Clickhouse SQL',
+  data_analyst: 'Data Analyst',
+  file_management: 'File management',
+  pdf_creator: 'PDF creator',
+  oracle_analyst: 'Oracle SQL',
+  data_quality_tables: 'Data quality - Tables',
+};
+
+const AGENT_ROLE_SHORT_LABELS: Record<AgentRole, string> = {
+  manager: 'MGR',
+  clickhouse_query: 'CLICK',
+  data_analyst: 'ANALYST',
+  file_management: 'FILES',
+  pdf_creator: 'PDF',
+  oracle_analyst: 'ORACLE',
+  data_quality_tables: 'QUALITY',
+};
+
+const AGENT_MENTION_TARGETS: MentionTargetDefinition[] = [
+  { id: 'manager', label: 'Agent Manager', shortLabel: 'MGR', aliases: ['manager', 'planner', 'planificateur'], role: 'manager', icon: Star, tone: 'from-amber-500 to-orange-500' },
+  { id: 'clickhouse', label: 'Clickhouse SQL', shortLabel: 'CLICK', aliases: ['clickhouse', 'clickhousesql'], role: 'clickhouse_query', icon: Database, tone: 'from-cyan-500 to-sky-500' },
+  { id: 'data_analyst', label: 'Data Analyst', shortLabel: 'ANALYST', aliases: ['analyst', 'dataanalyst'], role: 'data_analyst', icon: Cpu, tone: 'from-violet-500 to-fuchsia-500' },
+  { id: 'oracle', label: 'Oracle SQL', shortLabel: 'ORACLE', aliases: ['oracle', 'oraclesql'], role: 'oracle_analyst', icon: Database, tone: 'from-orange-500 to-amber-500' },
+  { id: 'files', label: 'File management', shortLabel: 'FILES', aliases: ['file', 'files', 'filemanager'], role: 'file_management', icon: FolderOpen, tone: 'from-emerald-500 to-teal-500' },
+  { id: 'pdf', label: 'PDF creator', shortLabel: 'PDF', aliases: ['pdf', 'pdfcreator'], role: 'pdf_creator', icon: File, tone: 'from-slate-600 to-slate-800' },
+  { id: 'quality', label: 'Data quality - Tables', shortLabel: 'QUALITY', aliases: ['quality', 'dataquality'], role: 'data_quality_tables', icon: BarChart3, tone: 'from-fuchsia-500 to-pink-500' },
+  { id: 'designer', label: 'Designer', shortLabel: 'DESIGN', aliases: ['designer'], icon: FilePenLine, tone: 'from-pink-500 to-rose-500' },
+  { id: 'writer', label: 'Writer', shortLabel: 'WRITER', aliases: ['writer', 'redacteur', 'rédacteur'], icon: FilePenLine, tone: 'from-indigo-500 to-blue-500' },
+  { id: 'strategist', label: 'Strategist', shortLabel: 'STRAT', aliases: ['strategist', 'stratege', 'stratège'], icon: BrainCircuit, tone: 'from-purple-500 to-indigo-500' },
+  { id: 'executor', label: 'Executor', shortLabel: 'EXEC', aliases: ['executor', 'executeur', 'exécuteur'], icon: Hammer, tone: 'from-slate-700 to-slate-900' },
+];
+
+function normalizeMentionToken(value: string): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '');
+}
+
+function extractMentionTargets(text: string): MentionTargetDefinition[] {
+  const matches = String(text || '').match(/@([A-Za-zÀ-ÖØ-öø-ÿ0-9_-]+)/g) ?? [];
+  const seen = new Set<string>();
+  const resolved: MentionTargetDefinition[] = [];
+
+  for (const rawMatch of matches) {
+    const token = normalizeMentionToken(rawMatch.slice(1));
+    const target = AGENT_MENTION_TARGETS.find((entry) => entry.aliases.some((alias) => normalizeMentionToken(alias) === token));
+    if (!target || seen.has(target.id)) continue;
+    seen.add(target.id);
+    resolved.push(target);
+  }
+
+  return resolved;
+}
+
+function getMentionQuery(text: string, cursor: number): string | null {
+  const safeCursor = Number.isFinite(cursor) ? Math.max(0, cursor) : text.length;
+  const beforeCursor = text.slice(0, safeCursor);
+  const match = beforeCursor.match(/(?:^|\s)@([A-Za-zÀ-ÖØ-öø-ÿ0-9_-]*)$/);
+  return match ? match[1] ?? '' : null;
+}
+
+function replaceMentionToken(text: string, cursor: number, replacement: string): string {
+  const safeCursor = Number.isFinite(cursor) ? Math.max(0, cursor) : text.length;
+  const beforeCursor = text.slice(0, safeCursor);
+  const afterCursor = text.slice(safeCursor);
+  const match = beforeCursor.match(/(?:^|\s)@([A-Za-zÀ-ÖØ-öø-ÿ0-9_-]*)$/);
+  if (!match || match.index === undefined) {
+    return `${text.trimEnd()} ${replacement} `.trimStart();
+  }
+  const prefix = beforeCursor.slice(0, match.index);
+  const leadingSpace = beforeCursor.charAt(match.index) === ' ' ? ' ' : '';
+  return `${prefix}${leadingSpace}${replacement} ${afterCursor}`.replace(/\s{2,}/g, ' ');
+}
+
+function buildDraftArtifacts(messages: Message[]): DraftArtifact[] {
+  const artifacts: DraftArtifact[] = [];
+
+  [...messages]
+    .filter((message) => message.role === 'assistant' && !isIntroductoryAssistantMessage(message))
+    .reverse()
+    .forEach((message, messageIndex) => {
+      const content = String(message.content || '').trim();
+      if (!content) return;
+
+      const codeBlocks = [...content.matchAll(/```([\w-]+)?\n([\s\S]*?)```/g)];
+      codeBlocks.slice(0, 2).forEach((block, blockIndex) => {
+        const language = block[1] ? block[1].toUpperCase() : 'CODE';
+        const snippet = (block[2] || '').trim();
+        if (!snippet) return;
+        artifacts.push({
+          id: `${message.id}-code-${blockIndex}`,
+          title: `${language} draft`,
+          kindLabel: language,
+          preview: compactMessagePreview(snippet, 180),
+          content: snippet,
+          timestamp: message.timestamp - blockIndex,
+        });
+      });
+
+      if (message.chart) {
+        artifacts.push({
+          id: `${message.id}-chart`,
+          title: message.chart.title || 'Chart draft',
+          kindLabel: message.chart.type.toUpperCase(),
+          preview: `${message.chart.points.length} point(s) prepared for ${message.chart.xField} × ${message.chart.yField}.`,
+          content: content,
+          timestamp: message.timestamp + 1,
+        });
+      }
+
+      if (content.length > 320 || /\|.+\|/.test(content)) {
+        const headingMatch = content.match(/^##?\s+(.+)$/m);
+        artifacts.push({
+          id: `${message.id}-note-${messageIndex}`,
+          title: headingMatch?.[1]?.trim() || 'Analysis draft',
+          kindLabel: 'NOTE',
+          preview: compactMessagePreview(content, 220),
+          content,
+          timestamp: message.timestamp + 2,
+        });
+      }
+    });
+
+  return artifacts
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 8);
 }
 
 function isFrenchCapabilitiesQuery(text: string): boolean {
@@ -456,6 +625,11 @@ export function ChatInterface({
   const [isZoomControlOpen, setIsZoomControlOpen] = useState(false);
   const [isThinkingPanelOpen, setIsThinkingPanelOpen] = useState(false);
   const [isInputCopied, setIsInputCopied] = useState(false);
+  const [isBreadcrumbPanelOpen, setIsBreadcrumbPanelOpen] = useState(false);
+  const [isOrchestratorPanelOpen, setIsOrchestratorPanelOpen] = useState(false);
+  const [isDraftPanelOpen, setIsDraftPanelOpen] = useState(false);
+  const [isAgentStatePanelOpen, setIsAgentStatePanelOpen] = useState(false);
+  const [inputCursor, setInputCursor] = useState(0);
   
   // Refs for DOM elements
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -467,6 +641,7 @@ export function ChatInterface({
   const dataQualityAutoOpenRef = useRef(false);
   const dataQualityMetadataRequestRef = useRef(0);
   const toolsIslandRef = useRef<HTMLDivElement>(null);
+  const activeRequestControllerRef = useRef<AbortController | null>(null);
   const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   const currentConversation = conversations.find(c => c.id === currentId);
@@ -516,6 +691,11 @@ export function ChatInterface({
   const lastAssistantMessageAnchorKey = lastAssistantMessage
     ? `${lastAssistantMessage.id}:${lastAssistantMessage.timestamp}`
     : "";
+  const latestUserMessage = [...messages].reverse().find((message) => message.role === 'user') ?? null;
+  const latestMentionTargets = useMemo(
+    () => extractMentionTargets(latestUserMessage?.content ?? ''),
+    [latestUserMessage?.content]
+  );
   const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
   const [isPlanningMonitorOpen, setIsPlanningMonitorOpen] = useState(false);
   const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
@@ -548,6 +728,8 @@ export function ChatInterface({
   };
 
   const resetChatShell = () => {
+    activeRequestControllerRef.current?.abort();
+    activeRequestControllerRef.current = null;
     agentIntroBootstrapRef.current = null;
     dataQualityAutoOpenRef.current = false;
     onCurrentIdChange(null);
@@ -561,6 +743,8 @@ export function ChatInterface({
     setIsDataQualityModalOpen(false);
     setDataQualityFormError(null);
     setIsConsoleOpen(false);
+    setIsOrchestratorPanelOpen(false);
+    setIsAgentStatePanelOpen(false);
   };
 
   // Start a completely new chat session
@@ -840,6 +1024,7 @@ export function ChatInterface({
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
     if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst' && agentRole !== 'data_quality_tables') return;
+    if (hasMeaningfulConversationMessages(currentConversation.messages)) return;
     if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
 
     const bootstrapKey = `${currentConversation.id}:${agentRole}:${currentConversation.updatedAt}`;
@@ -1024,11 +1209,14 @@ export function ChatInterface({
 
     setDataQualityFormError(null);
     setIsLoading(true);
+    const controller = new AbortController();
+    activeRequestControllerRef.current = controller;
 
     try {
       const response = await fetch('/api/chat/data-quality-agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           message: JSON.stringify(payload, null, 2),
           history: buildConversationMemory(nextMessages).steps.map((step) => ({
@@ -1113,9 +1301,17 @@ export function ChatInterface({
       setDataQualitySchema(nextState.schemaInfo);
       setIsDataQualityModalOpen(false);
     } catch (error) {
+      if ((error as any)?.name === 'AbortError') {
+        setIsConnected(true);
+        setDataQualityFormError('Run stopped.');
+        return;
+      }
       setIsConnected(false);
       setDataQualityFormError(error instanceof Error ? error.message : 'Unable to run the data-quality analysis.');
     } finally {
+      if (activeRequestControllerRef.current === controller) {
+        activeRequestControllerRef.current = null;
+      }
       setIsLoading(false);
     }
   };
@@ -1330,9 +1526,32 @@ export function ChatInterface({
     });
   };
 
+  const stopCurrentExecution = () => {
+    activeRequestControllerRef.current?.abort();
+    activeRequestControllerRef.current = null;
+    setIsLoading(false);
+  };
+
+  const handleMentionSelect = (target: MentionTargetDefinition) => {
+    const cursor = textareaRef.current?.selectionStart ?? inputCursor ?? input.length;
+    const nextValue = replaceMentionToken(input, cursor, `@${target.aliases[0]}`);
+    setInput(nextValue);
+    window.requestAnimationFrame(() => {
+      if (!textareaRef.current) return;
+      const nextCursor = nextValue.lastIndexOf(`@${target.aliases[0]}`) + target.aliases[0].length + 2;
+      textareaRef.current.focus();
+      textareaRef.current.selectionStart = nextCursor;
+      textareaRef.current.selectionEnd = nextCursor;
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+      setInputCursor(nextCursor);
+    });
+  };
+
   // Auto-resize the textarea based on content
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
+    setInputCursor(e.target.selectionStart ?? e.target.value.length);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
@@ -1341,7 +1560,23 @@ export function ChatInterface({
 
   // Main function to handle sending a message
   const handleSend = async (text: string = input) => {
-    if (workflow === 'AGENT' && agentRole === 'data_quality_tables') {
+    const mentionedTargets = extractMentionTargets(text);
+    const mentionedRoles = Array.from(
+      new Set(
+        mentionedTargets
+          .map((target) => target.role)
+          .filter((role): role is AgentRole => Boolean(role))
+      )
+    );
+    const resolvedWorkflow: WorkflowMode = mentionedTargets.length > 0 ? 'AGENT' : workflow;
+    const resolvedAgentRole: AgentRole =
+      mentionedRoles.length === 1 && mentionedTargets.length === 1
+        ? mentionedRoles[0]
+        : mentionedTargets.length > 0
+          ? 'manager'
+          : agentRole;
+
+    if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'data_quality_tables') {
       void openDataQualityModal();
       return;
     }
@@ -1392,11 +1627,21 @@ export function ChatInterface({
 
     // Reset input fields and UI state
     setInput("");
+    setInputCursor(0);
     setAttachments([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
     setIsLoading(true);
+    const controller = new AbortController();
+    activeRequestControllerRef.current = controller;
+    if (mentionedTargets.length > 0) {
+      onWorkflowChange('AGENT');
+      onAgentRoleChange(resolvedAgentRole);
+      if (mentionedTargets.length > 1) {
+        setIsOrchestratorPanelOpen(true);
+      }
+    }
 
     try {
       const memoryHistory = buildConversationMemory(activeMessages).steps.map((step) => ({
@@ -1439,14 +1684,15 @@ export function ChatInterface({
       };
 
       // Route the request based on the selected workflow
-      if (workflow === 'LLM' && isAppCapabilitiesQuery(text)) {
+      if (resolvedWorkflow === 'LLM' && isAppCapabilitiesQuery(text)) {
         reply = buildAppCapabilitiesReply(text);
         setIsConnected(true);
-      } else if (workflow === 'RAG') {
+      } else if (resolvedWorkflow === 'RAG') {
         // Call our full-stack RAG backend
         const response = await fetch('/api/chat/rag', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1475,7 +1721,7 @@ export function ChatInterface({
         sources = data.sources;
         confidence = data.confidence;
         setIsConnected(true);
-      } else if (workflow === 'MCP') {
+      } else if (resolvedWorkflow === 'MCP') {
         const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === mcpToolId);
         if (!activeTool?.url) {
           throw new Error("No MCP tool is selected or its URL is missing. Configure an MCP tool in Settings.");
@@ -1483,6 +1729,7 @@ export function ChatInterface({
         const response = await fetch('/api/chat/mcp', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1528,10 +1775,11 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'CREWAI') {
+      } else if (resolvedWorkflow === 'CREWAI') {
         const response = await fetch('/api/chat/crewai-planning', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1584,10 +1832,11 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'AGENT' && agentRole === 'manager') {
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'manager') {
         const response = await fetch('/api/chat/manager-agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1692,10 +1941,11 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'AGENT' && agentRole === 'data_analyst') {
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'data_analyst') {
         const response = await fetch('/api/chat/data-analyst-agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1756,10 +2006,11 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'AGENT' && agentRole === 'clickhouse_query') {
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'clickhouse_query') {
         const response = await fetch('/api/chat/clickhouse-agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1820,10 +2071,11 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'AGENT' && agentRole === 'file_management') {
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'file_management') {
         const response = await fetch('/api/chat/file-manager-agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1878,10 +2130,11 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'AGENT' && agentRole === 'pdf_creator') {
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'pdf_creator') {
         const response = await fetch('/api/chat/pdf-creator-agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -1936,10 +2189,11 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (workflow === 'AGENT' && agentRole === 'oracle_analyst') {
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'oracle_analyst') {
         const response = await fetch('/api/chat/oracle-analyst-agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
             history: memoryHistory,
@@ -2010,8 +2264,8 @@ export function ChatInterface({
       } else {
         // Standard LLM / Agent flow (calls external API directly from frontend)
         let dynamicSystemPrompt = `${formattedSystemPrompt}\n\n${CLICKABLE_CHOICES_PROMPT}`;
-        if (workflow === 'AGENT') {
-          dynamicSystemPrompt += `\n\n[SYSTEM: You are currently operating as an Agent with the role: ${agentRole.toUpperCase()}. Act accordingly.]`;
+        if (resolvedWorkflow === 'AGENT') {
+          dynamicSystemPrompt += `\n\n[SYSTEM: You are currently operating as an Agent with the role: ${resolvedAgentRole.toUpperCase()}. Act accordingly.]`;
         }
 
         // Prepare messages for OpenAI/Ollama format, handling attachments
@@ -2072,6 +2326,7 @@ export function ChatInterface({
         const response = await fetch(chatEndpoint, {
           method: "POST",
           headers,
+          signal: controller.signal,
           body: JSON.stringify(payload),
         });
 
@@ -2106,7 +2361,7 @@ export function ChatInterface({
           const updated = [...prev];
           updated[idx] = {
             ...updated[idx],
-            agentState: workflow === 'AGENT' && agentRole === 'clickhouse_query'
+            agentState: resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'clickhouse_query'
               ? {
                   ...(updated[idx].agentState ?? {}),
                   clickhouse: nextClickhouseAgentState,
@@ -2119,6 +2374,10 @@ export function ChatInterface({
         return updated;
       });
     } catch (error) {
+      if ((error as any)?.name === 'AbortError') {
+        setIsConnected(true);
+        return;
+      }
       console.error("Error fetching from LLM:", error);
       setIsConnected(false);
       const errorMsg: Message = {
@@ -2140,11 +2399,19 @@ export function ChatInterface({
         return updated;
       });
     } finally {
+      if (activeRequestControllerRef.current === controller) {
+        activeRequestControllerRef.current = null;
+      }
       setIsLoading(false);
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Tab" && mentionSuggestions.length > 0 && activeMentionQuery !== null) {
+      e.preventDefault();
+      handleMentionSelect(mentionSuggestions[0]);
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -2224,10 +2491,326 @@ export function ChatInterface({
           : workflow === 'CREWAI'
           ? 'LangGraph Planning'
             : 'Pure LLM';
+  const activeContextBadge = workflow === 'AGENT'
+    ? agentRole === 'manager'
+      ? {
+          eyebrow: 'Agent',
+          label: 'Agent Manager',
+          icon: Star,
+          iconWrapClass: 'bg-amber-50 text-amber-600 ring-1 ring-amber-200 dark:bg-amber-900/25 dark:text-amber-300 dark:ring-amber-800/70',
+          eyebrowClass: 'text-amber-700 dark:text-amber-300',
+        }
+      : agentRole === 'clickhouse_query'
+        ? {
+            eyebrow: 'Agent',
+            label: 'Clickhouse SQL',
+            icon: Database,
+            iconWrapClass: 'bg-cyan-50 text-cyan-600 ring-1 ring-cyan-200 dark:bg-cyan-900/25 dark:text-cyan-300 dark:ring-cyan-800/70',
+            eyebrowClass: 'text-cyan-700 dark:text-cyan-300',
+          }
+        : agentRole === 'data_analyst'
+          ? {
+              eyebrow: 'Agent',
+              label: 'Data Analyst',
+              icon: Cpu,
+              iconWrapClass: 'bg-violet-50 text-violet-600 ring-1 ring-violet-200 dark:bg-violet-900/25 dark:text-violet-300 dark:ring-violet-800/70',
+              eyebrowClass: 'text-violet-700 dark:text-violet-300',
+            }
+          : agentRole === 'file_management'
+            ? {
+                eyebrow: 'Agent',
+                label: 'File management',
+                icon: FolderOpen,
+                iconWrapClass: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200 dark:bg-emerald-900/25 dark:text-emerald-300 dark:ring-emerald-800/70',
+                eyebrowClass: 'text-emerald-700 dark:text-emerald-300',
+              }
+            : agentRole === 'pdf_creator'
+              ? {
+                  eyebrow: 'Agent',
+                  label: 'PDF creator',
+                  icon: File,
+                  iconWrapClass: 'bg-slate-100 text-slate-700 ring-1 ring-slate-200 dark:bg-slate-800/70 dark:text-slate-200 dark:ring-slate-700/70',
+                  eyebrowClass: 'text-slate-600 dark:text-slate-300',
+                }
+              : agentRole === 'oracle_analyst'
+                ? {
+                    eyebrow: 'Agent',
+                    label: 'Oracle SQL',
+                    icon: Database,
+                    iconWrapClass: 'bg-orange-50 text-orange-600 ring-1 ring-orange-200 dark:bg-orange-900/25 dark:text-orange-300 dark:ring-orange-800/70',
+                    eyebrowClass: 'text-orange-700 dark:text-orange-300',
+                  }
+                : {
+                    eyebrow: 'Agent',
+                    label: 'Data quality - Tables',
+                    icon: BarChart3,
+                    iconWrapClass: 'bg-fuchsia-50 text-fuchsia-600 ring-1 ring-fuchsia-200 dark:bg-fuchsia-900/25 dark:text-fuchsia-300 dark:ring-fuchsia-800/70',
+                    eyebrowClass: 'text-fuchsia-700 dark:text-fuchsia-300',
+                  }
+    : workflow === 'MCP'
+      ? {
+          eyebrow: 'MCP',
+          label: activeMcpToolLabel,
+          icon: Network,
+          iconWrapClass: 'bg-teal-50 text-teal-600 ring-1 ring-teal-200 dark:bg-teal-900/25 dark:text-teal-300 dark:ring-teal-800/70',
+          eyebrowClass: 'text-teal-700 dark:text-teal-300',
+        }
+      : workflow === 'RAG'
+        ? {
+            eyebrow: 'Mode',
+            label: 'RAG Knowledge',
+            icon: Database,
+            iconWrapClass: 'bg-blue-50 text-blue-600 ring-1 ring-blue-200 dark:bg-blue-900/25 dark:text-blue-300 dark:ring-blue-800/70',
+            eyebrowClass: 'text-blue-700 dark:text-blue-300',
+          }
+        : workflow === 'CREWAI'
+          ? {
+              eyebrow: 'Mode',
+              label: 'LangGraph Planning',
+              icon: CalendarDays,
+              iconWrapClass: 'bg-sky-50 text-sky-600 ring-1 ring-sky-200 dark:bg-sky-900/25 dark:text-sky-300 dark:ring-sky-800/70',
+              eyebrowClass: 'text-sky-700 dark:text-sky-300',
+            }
+          : {
+              eyebrow: 'Mode',
+              label: 'Pure LLM',
+              icon: Cpu,
+              iconWrapClass: 'bg-blue-50 text-blue-600 ring-1 ring-blue-200 dark:bg-blue-900/25 dark:text-blue-300 dark:ring-blue-800/70',
+              eyebrowClass: 'text-blue-700 dark:text-blue-300',
+            };
   const floatingUtilityButtonClass = "group flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-white/65 text-gray-800 shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02] hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55";
   const formattedSystemPrompt = withBeautifulResponsePrompt(config.systemPrompt);
   const formattedOracleSystemPrompt = withBeautifulResponsePrompt(config.oracleAnalystConfig.systemPrompt);
   const formattedFileManagerSystemPrompt = withBeautifulResponsePrompt(config.fileManagerConfig.systemPrompt);
+  const ActiveContextIcon = activeContextBadge.icon;
+  const activeContextShortLabel =
+    workflow === 'AGENT'
+      ? AGENT_ROLE_SHORT_LABELS[agentRole]
+      : workflow === 'MCP'
+        ? 'MCP'
+        : workflow === 'RAG'
+          ? 'RAG'
+          : workflow === 'CREWAI'
+            ? 'PLAN'
+            : 'LLM';
+  const activeMentionQuery = useMemo(() => getMentionQuery(input, inputCursor), [input, inputCursor]);
+  const mentionSuggestions = useMemo(() => {
+    if (activeMentionQuery === null) return [];
+    const normalizedQuery = normalizeMentionToken(activeMentionQuery);
+    return AGENT_MENTION_TARGETS.filter((target) => (
+      !normalizedQuery
+        || target.aliases.some((alias) => normalizeMentionToken(alias).startsWith(normalizedQuery))
+        || normalizeMentionToken(target.label).includes(normalizedQuery)
+    )).slice(0, 6);
+  }, [activeMentionQuery]);
+  const breadcrumbNodes = useMemo<BreadcrumbNode[]>(() => {
+    const nodes: BreadcrumbNode[] = [
+      {
+        id: 'user',
+        label: 'User',
+        icon: MessageSquare,
+        toneClass: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+      },
+    ];
+
+    if (workflow === 'AGENT' && agentRole === 'manager') {
+      nodes.push({
+        id: 'manager',
+        label: 'Agent Manager',
+        icon: Star,
+        toneClass: 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
+      });
+
+      if (managerAgentState.activeDelegate) {
+        const delegateRole = managerAgentState.activeDelegate;
+        const delegateIcon =
+          delegateRole === 'file_management'
+            ? FolderOpen
+            : delegateRole === 'data_analyst'
+              ? Cpu
+              : delegateRole === 'oracle_analyst'
+                ? Database
+                : delegateRole === 'pdf_creator'
+                  ? File
+                  : delegateRole === 'data_quality_tables'
+                    ? BarChart3
+                    : Database;
+        nodes.push({
+          id: delegateRole,
+          label: AGENT_ROLE_LABELS[delegateRole],
+          icon: delegateIcon,
+          toneClass: 'border-cyan-200/80 bg-cyan-50/80 text-cyan-700 dark:border-cyan-800/70 dark:bg-cyan-950/20 dark:text-cyan-200',
+        });
+      }
+    } else if (workflow === 'AGENT') {
+      nodes.push({
+        id: agentRole,
+        label: AGENT_ROLE_LABELS[agentRole],
+        icon: ActiveContextIcon,
+        toneClass: `${activeContextBadge.iconWrapClass} border`,
+      });
+    } else if (workflow === 'MCP') {
+      nodes.push({
+        id: 'mcp',
+        label: activeMcpToolLabel,
+        icon: Network,
+        toneClass: 'border-teal-200/80 bg-teal-50/80 text-teal-700 dark:border-teal-800/70 dark:bg-teal-950/20 dark:text-teal-200',
+      });
+    } else if (workflow === 'RAG') {
+      nodes.push({
+        id: 'rag',
+        label: 'RAG Knowledge',
+        icon: Database,
+        toneClass: 'border-blue-200/80 bg-blue-50/80 text-blue-700 dark:border-blue-800/70 dark:bg-blue-950/20 dark:text-blue-200',
+      });
+    } else if (workflow === 'CREWAI') {
+      nodes.push({
+        id: 'planning',
+        label: 'LangGraph Planning',
+        icon: CalendarDays,
+        toneClass: 'border-sky-200/80 bg-sky-50/80 text-sky-700 dark:border-sky-800/70 dark:bg-sky-950/20 dark:text-sky-200',
+      });
+    } else {
+      nodes.push({
+        id: 'llm',
+        label: 'Pure LLM',
+        icon: Cpu,
+        toneClass: 'border-blue-200/80 bg-blue-50/80 text-blue-700 dark:border-blue-800/70 dark:bg-blue-950/20 dark:text-blue-200',
+      });
+    }
+
+    latestMentionTargets.forEach((target) => {
+      if (nodes.some((node) => node.label === target.label)) return;
+      nodes.push({
+        id: `mention-${target.id}`,
+        label: target.label,
+        icon: target.icon,
+        toneClass: 'border-violet-200/80 bg-violet-50/80 text-violet-700 dark:border-violet-800/70 dark:bg-violet-950/20 dark:text-violet-200',
+      });
+    });
+
+    return nodes;
+  }, [workflow, agentRole, managerAgentState.activeDelegate, latestMentionTargets, ActiveContextIcon, activeContextBadge.iconWrapClass, activeMcpToolLabel]);
+  const orchestratorView = useMemo<OrchestratorView | null>(() => {
+    const strategist =
+      latestMentionTargets[0]
+      ?? AGENT_MENTION_TARGETS.find((target) => target.role === 'manager')
+      ?? AGENT_MENTION_TARGETS[0];
+    const executor =
+      latestMentionTargets[1]
+      ?? (workflow === 'AGENT'
+        ? AGENT_MENTION_TARGETS.find((target) => target.role === agentRole && target.role !== 'manager')
+        : undefined)
+      ?? AGENT_MENTION_TARGETS.find((target) => target.role === 'clickhouse_query')
+      ?? AGENT_MENTION_TARGETS[1];
+
+    if (!latestUserMessage && workflow !== 'AGENT') {
+      return null;
+    }
+
+    const latestThinking = thinkingMessages[0]?.steps ?? [];
+    const transcript = [
+      {
+        id: 'orchestrator-1',
+        speaker: strategist.label,
+        side: 'left' as const,
+        message: latestUserMessage?.content
+          ? `Mission received: "${compactMessagePreview(latestUserMessage.content, 180)}". Break the request down into a clean execution plan.`
+          : 'Define the goal clearly, assign the right specialist, and keep the execution path visible to the user.',
+      },
+      {
+        id: 'orchestrator-2',
+        speaker: executor.label,
+        side: 'right' as const,
+        message: latestThinking.length > 0
+          ? `Execution focus: ${latestThinking.slice(0, 3).map((step) => step.title).join(' • ')}`
+          : `I will execute the active task as ${workflow === 'AGENT' ? AGENT_ROLE_LABELS[agentRole] : activeToolsSummary}, then return a concise deliverable.`,
+      },
+      {
+        id: 'orchestrator-3',
+        speaker: strategist.label,
+        side: 'left' as const,
+        message: 'Keep the outcome user-facing. Move raw SQL, technical details, and side investigations into supporting panels when possible.',
+      },
+    ];
+
+    return { strategist, executor, transcript };
+  }, [latestMentionTargets, latestUserMessage, workflow, agentRole, thinkingMessages, activeToolsSummary]);
+  const draftArtifacts = useMemo(() => buildDraftArtifacts(messages), [messages]);
+  const latestTraceSteps = useMemo(() => {
+    for (const message of [...messages].reverse()) {
+      if (message.role === 'assistant' && Array.isArray(message.steps) && message.steps.length > 0) {
+        return message.steps;
+      }
+    }
+    return [] as AgentStep[];
+  }, [messages]);
+  const latestConfidence = useMemo(() => {
+    for (const message of [...messages].reverse()) {
+      if (message.role === 'assistant' && typeof message.confidence === 'number') {
+        return message.confidence;
+      }
+    }
+    if (latestTraceSteps.length > 0) {
+      const errorSteps = latestTraceSteps.filter((step) => step.status === 'error').length;
+      const successSteps = latestTraceSteps.filter((step) => step.status === 'success').length;
+      const base = latestTraceSteps.length === 0 ? 0.58 : Math.max(0.2, Math.min(0.94, (successSteps + 0.5) / (latestTraceSteps.length + errorSteps + 0.5)));
+      return base;
+    }
+    return null;
+  }, [messages, latestTraceSteps]);
+  const confidenceBadge = useMemo(() => {
+    if (latestConfidence === null || latestConfidence === undefined) {
+      return {
+        label: 'Estimated',
+        value: 'Unknown',
+        tone: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+      };
+    }
+    const percent = Math.round(latestConfidence * 100);
+    if (latestConfidence >= 0.72) {
+      return {
+        label: 'Confidence',
+        value: `${percent}% · High`,
+        tone: 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
+      };
+    }
+    if (latestConfidence >= 0.45) {
+      return {
+        label: 'Confidence',
+        value: `${percent}% · Medium`,
+        tone: 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
+      };
+    }
+    return {
+      label: 'Confidence',
+      value: `${percent}% · Low`,
+      tone: 'border-rose-200/80 bg-rose-50/80 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
+    };
+  }, [latestConfidence]);
+  const activityIndicators = useMemo(() => {
+    const labels = workflow === 'AGENT'
+      ? agentRole === 'manager'
+        ? ['routing specialists', 'reviewing prior context', 'preparing next hand-off']
+        : agentRole === 'clickhouse_query'
+          ? ['reviewing schema', 'planning SQL variants', 'formatting result']
+          : agentRole === 'data_analyst'
+            ? ['probing data patterns', 'comparing query variants', 'writing executive summary']
+            : agentRole === 'file_management'
+              ? ['inspecting files', 'checking safe operations', 'preparing output']
+              : agentRole === 'oracle_analyst'
+                ? ['inspecting Oracle schema', 'checking SQL safety', 'summarizing findings']
+                : ['preparing specialist workflow', 'reviewing context', 'packaging response']
+      : workflow === 'RAG'
+        ? ['vectorizing request', 'retrieving context', 'grounding answer']
+        : workflow === 'MCP'
+          ? ['connecting tool session', 'calling MCP tool', 'formatting tool output']
+          : workflow === 'CREWAI'
+            ? ['reviewing schedule draft', 'checking triggers', 'assembling execution plan']
+            : ['consulting prompt context', 'generating variants', 'writing final answer'];
+    return labels;
+  }, [workflow, agentRole]);
+  const activityProgressValue = isLoading ? 72 : latestTraceSteps.length > 0 ? Math.min(100, 28 + latestTraceSteps.length * 14) : 16;
 
   return (
     <div className="flex h-screen relative overflow-hidden bg-[#f5f5f5] dark:bg-[#0f0f13] transition-colors duration-300">
@@ -2343,6 +2926,47 @@ export function ChatInterface({
         </div>
       </header>
 
+      {isBreadcrumbPanelOpen && breadcrumbNodes.length > 1 && (
+        <div className="pointer-events-none relative z-20 px-4 md:px-8">
+          <div className="mx-auto mt-1 max-w-[77rem] rounded-[1.55rem] border border-white/60 bg-white/72 px-4 py-3 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-2xl dark:border-white/10 dark:bg-black/35">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                  Dynamic Breadcrumb
+                </div>
+                <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                  Live collaboration path across the active conversation.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsBreadcrumbPanelOpen(false)}
+                className="pointer-events-auto inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+                title="Close breadcrumb"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {breadcrumbNodes.map((node, index) => {
+                const NodeIcon = node.icon;
+                return (
+                  <React.Fragment key={node.id}>
+                    <div className={`pointer-events-auto inline-flex items-center gap-2 rounded-full border px-3 py-2 text-sm font-medium shadow-sm ${node.toneClass}`}>
+                      <NodeIcon className="h-4 w-4" />
+                      <span>{node.label}</span>
+                    </div>
+                    {index < breadcrumbNodes.length - 1 && (
+                      <ChevronRight className="h-4 w-4 text-gray-400 dark:text-gray-500" />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className="flex-1 flex flex-col min-h-0" style={chatScaledStyle}>
         <div className="flex-1 min-h-0 px-4 md:px-8 pb-4">
@@ -2360,7 +2984,7 @@ export function ChatInterface({
                         message={msg}
                         onCheckboxToggle={handleCheckboxToggle}
                         onAction={handleChatAction}
-                        showSteps={false}
+                        showSteps
                       />
                     </div>
                   ))}
@@ -2445,6 +3069,41 @@ export function ChatInterface({
               {/* Input Area */}
               <div className="pt-3 z-10 w-full max-w-[77rem] mx-auto">
                 <div className="glass-panel rounded-[1.8rem] p-1.5 flex flex-col gap-1.5 shadow-2xl shadow-black/5">
+                  {activeMentionQuery !== null && (
+                    <div className="px-3.5 pt-2.5 pb-1">
+                      <div className="rounded-[1.35rem] border border-white/70 bg-white/78 p-2.5 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-white/6">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                              Agent mentions
+                            </div>
+                            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                              Type <span className="font-semibold">@</span> to target a specialist or open an orchestrated hand-off.
+                            </div>
+                          </div>
+                          <span className="rounded-full border border-slate-200/80 bg-slate-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                            Tab to insert
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {mentionSuggestions.map((target) => {
+                            const MentionIcon = target.icon;
+                            return (
+                              <button
+                                key={`mention-${target.id}`}
+                                type="button"
+                                onClick={() => handleMentionSelect(target)}
+                                className="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/85 px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10"
+                              >
+                                <MentionIcon className="h-3.5 w-3.5" />
+                                <span>@{target.aliases[0]}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   {attachments.length > 0 && (
                     <div className="flex flex-wrap gap-2 px-3.5 pt-2.5 pb-1">
                       {attachments.map(att => (
@@ -2486,6 +3145,8 @@ export function ChatInterface({
                       ref={textareaRef}
                       value={input}
                       onChange={handleInputChange}
+                      onClick={(event) => setInputCursor(event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
+                      onSelect={(event) => setInputCursor(event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
                       onKeyDown={handleKeyDown}
                       placeholder={inputPlaceholder}
                       className="w-full min-h-[48px] bg-transparent border-none resize-none focus:ring-0 px-2 py-3 text-[14px] leading-[1.65] text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 outline-none overflow-y-auto"
@@ -2501,11 +3162,22 @@ export function ChatInterface({
                       {isInputCopied ? <Check className="w-4.5 h-4.5" /> : <Copy className="w-4.5 h-4.5" />}
                     </button>
                     <button
-                      onClick={() => handleSend()}
-                      disabled={(!input.trim() && attachments.length === 0) || isLoading}
-                      className="flex-shrink-0 w-11 h-11 rounded-2xl bg-black text-white flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-800 transition-colors mb-0.5 mr-0.5"
+                      onClick={() => {
+                        if (isLoading) {
+                          stopCurrentExecution();
+                          return;
+                        }
+                        handleSend();
+                      }}
+                      disabled={!isLoading && (!input.trim() && attachments.length === 0)}
+                      className={`flex-shrink-0 w-11 h-11 rounded-2xl flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors mb-0.5 mr-0.5 ${
+                        isLoading
+                          ? 'bg-rose-600 text-white hover:bg-rose-700'
+                          : 'bg-black text-white hover:bg-gray-800'
+                      }`}
+                      title={isLoading ? 'Stop current execution' : 'Send'}
                     >
-                      <Send className="w-4.5 h-4.5 ml-0.5" />
+                      {isLoading ? <X className="w-4.5 h-4.5" /> : <Send className="w-4.5 h-4.5 ml-0.5" />}
                     </button>
                   </div>
                 </div>
@@ -2724,6 +3396,342 @@ export function ChatInterface({
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="absolute left-5 top-1/2 z-30 hidden -translate-y-1/2 lg:flex">
+        <div className="flex flex-col items-start gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setIsZoomControlOpen(false);
+              setIsThinkingPanelOpen(false);
+              setIsToolsIslandOpen(true);
+            }}
+            className={floatingUtilityButtonClass}
+            title={activeContextBadge.label}
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <ActiveContextIcon className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.12em] text-gray-500 dark:text-gray-400">
+                {activeContextShortLabel}
+              </span>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsBreadcrumbPanelOpen((open) => !open)}
+            className={`${floatingUtilityButtonClass} ${isBreadcrumbPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            title="Dynamic breadcrumb"
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <Route className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                PATH
+              </span>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsOrchestratorPanelOpen((open) => !open)}
+            className={`${floatingUtilityButtonClass} ${isOrchestratorPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            title="Orchestrator mode"
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <SplitSquareVertical className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                ORCH
+              </span>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsDraftPanelOpen((open) => !open)}
+            className={`${floatingUtilityButtonClass} ${isDraftPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            title="Draft zone"
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <FilePenLine className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                DRAFT
+              </span>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsAgentStatePanelOpen((open) => !open)}
+            className={`${floatingUtilityButtonClass} ${isAgentStatePanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+            title="Agent state"
+          >
+            <div className="flex flex-col items-center gap-0.5">
+              <Gauge className="h-4.5 w-4.5" />
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                STATE
+              </span>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      {isAgentStatePanelOpen && (
+        <div className="absolute left-24 top-[8.25rem] z-30 hidden w-[23rem] lg:block">
+          <div className="overflow-hidden rounded-[2rem] border border-white/60 bg-white/78 shadow-[0_20px_60px_rgba(15,23,42,0.16)] backdrop-blur-2xl dark:border-white/10 dark:bg-black/40">
+            <div className="flex items-start justify-between gap-3 border-b border-black/5 px-4 py-4 dark:border-white/10">
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                  Agent state
+                </div>
+                <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  Transparent execution view
+                </div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Live activity, cognitive load indicators, execution trace depth, and confidence.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAgentStatePanelOpen(false)}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+                title="Close agent state"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-4 py-4">
+              <div className="rounded-[1.45rem] border border-white/70 bg-white/80 p-3 shadow-sm dark:border-white/10 dark:bg-white/5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                      Cognitive load
+                    </div>
+                    <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                      {isLoading ? 'Agent actively working' : 'Idle but ready'}
+                    </div>
+                  </div>
+                  <div className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${isLoading ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200'}`}>
+                    {isLoading ? 'LIVE' : 'READY'}
+                  </div>
+                </div>
+                <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-black/8 dark:bg-white/10">
+                  <div
+                    className={`h-full rounded-full bg-gradient-to-r from-cyan-500 via-blue-500 to-violet-500 ${isLoading ? 'animate-pulse' : ''}`}
+                    style={{ width: `${activityProgressValue}%` }}
+                  />
+                </div>
+                <div className="mt-3 space-y-1.5">
+                  {activityIndicators.map((label, index) => (
+                    <div key={label} className="flex items-center gap-2 text-[12px] text-gray-600 dark:text-gray-300">
+                      <span className={`h-1.5 w-1.5 rounded-full ${index === 0 && isLoading ? 'bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)]' : 'bg-gray-300 dark:bg-gray-600'}`} />
+                      <span>{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-[1.35rem] border border-white/70 bg-white/80 p-3 shadow-sm dark:border-white/10 dark:bg-white/5">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                    Trace depth
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
+                    {latestTraceSteps.length}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    step{latestTraceSteps.length > 1 ? 's' : ''} in the latest execution trace
+                  </div>
+                </div>
+                <div className={`rounded-[1.35rem] border p-3 shadow-sm ${confidenceBadge.tone}`}>
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] opacity-75">
+                    {confidenceBadge.label}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {confidenceBadge.value}
+                  </div>
+                  <div className="mt-1 text-xs opacity-75">
+                    Based on explicit score when available, otherwise inferred from execution quality.
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-[1.45rem] border border-white/70 bg-white/80 p-3 shadow-sm dark:border-white/10 dark:bg-white/5">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                  Latest visible route
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {breadcrumbNodes.map((node, index) => {
+                    const NodeIcon = node.icon;
+                    return (
+                      <React.Fragment key={`agent-state-${node.id}`}>
+                        <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium ${node.toneClass}`}>
+                          <NodeIcon className="h-3.5 w-3.5" />
+                          {node.label}
+                        </span>
+                        {index < breadcrumbNodes.length - 1 && (
+                          <ChevronRight className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500" />
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isDraftPanelOpen && (
+        <div className="absolute left-24 top-[6.75rem] bottom-6 z-30 hidden w-[22rem] lg:block">
+          <div className="flex h-full flex-col overflow-hidden rounded-[2rem] border border-white/60 bg-white/76 shadow-[0_20px_60px_rgba(15,23,42,0.16)] backdrop-blur-2xl dark:border-white/10 dark:bg-black/40">
+            <div className="flex items-start justify-between gap-3 border-b border-black/5 px-4 py-4 dark:border-white/10">
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                  Draft zone
+                </div>
+                <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  Working artifacts
+                </div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Long-form outputs, code, and reusable notes stay here while the main chat remains focused.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDraftPanelOpen(false)}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+                title="Close draft zone"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+              {draftArtifacts.length === 0 ? (
+                <div className="rounded-[1.4rem] border border-dashed border-gray-200/80 bg-white/70 px-4 py-5 text-sm text-gray-500 dark:border-white/10 dark:bg-white/5 dark:text-gray-400">
+                  No drafts yet. As soon as the assistant produces a long report, code block, or chart payload, it will appear here.
+                </div>
+              ) : (
+                draftArtifacts.map((artifact) => (
+                  <div
+                    key={artifact.id}
+                    className="rounded-[1.45rem] border border-white/70 bg-white/80 p-3 shadow-sm dark:border-white/10 dark:bg-white/5"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                          {artifact.kindLabel}
+                        </div>
+                        <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                          {artifact.title}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => navigator.clipboard.writeText(artifact.content)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+                        title="Copy draft"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <p className="mt-2 text-[12px] leading-relaxed text-gray-600 dark:text-gray-300">
+                      {artifact.preview}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isOrchestratorPanelOpen && orchestratorView && (
+        <div className="absolute inset-x-0 top-[7.25rem] bottom-8 z-40 flex items-center justify-center px-6">
+          <div className="absolute inset-0 bg-slate-950/10 backdrop-blur-[3px] dark:bg-black/30" />
+          <div className="relative flex h-[min(40rem,calc(100vh-10rem))] w-full max-w-[88rem] overflow-hidden rounded-[2.3rem] border border-white/70 bg-white/82 shadow-[0_32px_90px_rgba(15,23,42,0.20)] backdrop-blur-3xl dark:border-white/10 dark:bg-black/55">
+            <div className="w-[22%] min-w-[16rem] border-r border-black/5 bg-gradient-to-br from-violet-50/90 to-white px-5 py-5 dark:border-white/10 dark:from-violet-950/20 dark:to-transparent">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-600 dark:text-violet-300">
+                Strategist
+              </div>
+              <div className="mt-3 flex items-center gap-3">
+                <div className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${orchestratorView.strategist.tone} text-white shadow-lg`}>
+                  {React.createElement(orchestratorView.strategist.icon, { className: "h-5 w-5" })}
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    {orchestratorView.strategist.label}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Frames the objective and delegates the next move.
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-hidden px-5 py-5">
+              <div className="flex items-start justify-between gap-3 border-b border-black/5 pb-4 dark:border-white/10">
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                    Orchestrator mode
+                  </div>
+                  <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    Multi-agent hand-off
+                  </div>
+                  <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    Watch the strategist brief the executor while the main chat stays available underneath.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsOrchestratorPanelOpen(false)}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+                  title="Close orchestrator"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="mt-5 space-y-3 overflow-y-auto pr-1">
+                {orchestratorView.transcript.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className={`flex ${entry.side === 'right' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`max-w-[78%] rounded-[1.5rem] px-4 py-3 shadow-sm ${
+                      entry.side === 'left'
+                        ? 'border border-violet-200/70 bg-violet-50/80 text-violet-950 dark:border-violet-800/70 dark:bg-violet-950/20 dark:text-violet-100'
+                        : 'border border-sky-200/70 bg-sky-50/80 text-sky-950 dark:border-sky-800/70 dark:bg-sky-950/20 dark:text-sky-100'
+                    }`}>
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] opacity-70">
+                        {entry.speaker}
+                      </div>
+                      <div className="mt-1 text-sm leading-relaxed">
+                        {entry.message}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="w-[22%] min-w-[16rem] border-l border-black/5 bg-gradient-to-bl from-sky-50/90 to-white px-5 py-5 dark:border-white/10 dark:from-sky-950/20 dark:to-transparent">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-300">
+                Executor
+              </div>
+              <div className="mt-3 flex items-center gap-3">
+                <div className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${orchestratorView.executor.tone} text-white shadow-lg`}>
+                  {React.createElement(orchestratorView.executor.icon, { className: "h-5 w-5" })}
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    {orchestratorView.executor.label}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Executes the concrete task and reports back with the deliverable.
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -3074,6 +4082,7 @@ export function ChatInterface({
           setDataQualityForm((prev) => ({ ...prev, timeColumn }));
         }}
         onSubmit={handleDataQualityRun}
+        onStop={stopCurrentExecution}
       />
       <AgentConsoleModal
         isOpen={isConsoleOpen}

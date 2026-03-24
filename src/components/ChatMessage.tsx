@@ -184,6 +184,61 @@ function stepSuggestedPath(step: AgentStep): string {
   return (((step as any).suggested_path ?? (step as any).suggestedPath) ?? '').toString().trim();
 }
 
+function deriveConfidenceBadge(message: Message): {
+  label: string;
+  value: string;
+  toneClass: string;
+} | null {
+  if (typeof message.confidence === 'number' && Number.isFinite(message.confidence)) {
+    const percent = Math.round(message.confidence * 100);
+    if (message.confidence >= 0.72) {
+      return {
+        label: 'Confidence',
+        value: `${percent}% · High`,
+        toneClass: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
+      };
+    }
+    if (message.confidence >= 0.45) {
+      return {
+        label: 'Confidence',
+        value: `${percent}% · Medium`,
+        toneClass: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
+      };
+    }
+    return {
+      label: 'Confidence',
+      value: `${percent}% · Low`,
+      toneClass: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
+    };
+  }
+
+  if (Array.isArray(message.steps) && message.steps.length > 0) {
+    const errorCount = message.steps.filter((step) => step.status === 'error').length;
+    const successCount = message.steps.filter((step) => step.status === 'success').length;
+    const inferred = Math.max(0.24, Math.min(0.9, (successCount + 0.5) / (message.steps.length + errorCount + 0.5)));
+    const percent = Math.round(inferred * 100);
+    return inferred >= 0.65
+      ? {
+          label: 'Estimated',
+          value: `${percent}% · Stable`,
+          toneClass: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
+        }
+      : inferred >= 0.4
+        ? {
+            label: 'Estimated',
+            value: `${percent}% · Caution`,
+            toneClass: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
+          }
+        : {
+            label: 'Estimated',
+            value: `${percent}% · Fragile`,
+            toneClass: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
+          };
+  }
+
+  return null;
+}
+
 function MessageCopyButton({ text, isUser }: { text: string; isUser: boolean }) {
   const [copied, setCopied] = useState(false);
 
@@ -856,6 +911,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
 
   const [isStepsExpanded, setIsStepsExpanded] = useState(false);
   const [isSourcesExpanded, setIsSourcesExpanded] = useState(false);
+  const confidenceBadge = !isUser ? deriveConfidenceBadge(message) : null;
 
   const renderStepIcon = (status: AgentStep['status']) => {
     switch (status) {
@@ -915,7 +971,16 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
       )}>
         <MessageCopyButton text={content} isUser={isUser} />
 
-        {/* Agent Thinking Steps */}
+        {!isUser && confidenceBadge && (
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${confidenceBadge.toneClass}`}>
+              <span className="uppercase tracking-[0.12em] opacity-75">{confidenceBadge.label}</span>
+              <span>{confidenceBadge.value}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Agent execution trace */}
         {showSteps && !isUser && message.steps && message.steps.length > 0 && (
           <div className="mb-3 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 rounded-xl overflow-hidden shadow-sm">
             <button
@@ -924,7 +989,7 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
             >
               <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200">
                 <BrainCircuit className="w-4 h-4 text-purple-500" />
-                Agent Thinking Process ({message.steps.filter(s => s.status === 'success').length}/{message.steps.length})
+                Execution Trace ({message.steps.filter(s => s.status === 'success').length}/{message.steps.length})
               </div>
               {isStepsExpanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
             </button>
