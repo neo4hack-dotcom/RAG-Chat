@@ -8,6 +8,7 @@ import { PlanningMonitorModal } from "./PlanningMonitorModal";
 import { AgentConsoleModal } from "./AgentConsoleModal";
 import { FileManagerConfigModal } from "./FileManagerConfigModal";
 import { DataQualityModal } from "./DataQualityModal";
+import { SqlDraftModal } from "./SqlDraftModal";
 import { downloadMarkdownPdf } from "../lib/pdf";
 
 interface ChatInterfaceProps {
@@ -183,10 +184,22 @@ type BreadcrumbNode = {
 type DraftArtifact = {
   id: string;
   title: string;
+  kind: "sql" | "code" | "note" | "chart";
   kindLabel: string;
   preview: string;
   content: string;
   timestamp: number;
+  engineHint?: "clickhouse" | "oracle";
+};
+
+type SqlDraftPreviewResult = {
+  engine: "clickhouse" | "oracle";
+  executedSql: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  rowCount: number;
+  shownRows: number;
+  rowLimit: number;
 };
 
 const CHAT_ZOOM_MIN = 0.85;
@@ -249,6 +262,20 @@ function compactMessagePreview(content: string, maxLength = 132): string {
     .trim();
   if (!plain) return 'Assistant response';
   return plain.length > maxLength ? `${plain.slice(0, maxLength - 1)}…` : plain;
+}
+
+function inferSqlDraftEngine(workflow: WorkflowMode, agentRole: AgentRole, sql: string): "clickhouse" | "oracle" {
+  const cleaned = String(sql || "").toLowerCase();
+  if (
+    agentRole === "oracle_analyst"
+    || /\b(fetch first\s+\d+\s+rows\s+only|rownum\s*<=|nvl\(|decode\(|sysdate\b|to_char\()/i.test(cleaned)
+  ) {
+    return "oracle";
+  }
+  if (workflow === "AGENT" && (agentRole === "clickhouse_query" || agentRole === "data_analyst" || agentRole === "data_quality_tables")) {
+    return "clickhouse";
+  }
+  return "clickhouse";
 }
 
 function clampChatZoom(value: number): number {
@@ -367,7 +394,7 @@ function replaceMentionToken(text: string, cursor: number, replacement: string):
   return `${prefix}${leadingSpace}${replacement} ${afterCursor}`.replace(/\s{2,}/g, ' ');
 }
 
-function buildDraftArtifacts(messages: Message[]): DraftArtifact[] {
+function buildDraftArtifacts(messages: Message[], workflow: WorkflowMode, agentRole: AgentRole): DraftArtifact[] {
   const artifacts: DraftArtifact[] = [];
 
   [...messages]
@@ -382,13 +409,17 @@ function buildDraftArtifacts(messages: Message[]): DraftArtifact[] {
         const language = block[1] ? block[1].toUpperCase() : 'CODE';
         const snippet = (block[2] || '').trim();
         if (!snippet) return;
+        const normalizedLanguage = language.toLowerCase();
+        const isSqlDraft = normalizedLanguage === "sql" || normalizedLanguage === "clickhouse" || normalizedLanguage === "oracle";
         artifacts.push({
           id: `${message.id}-code-${blockIndex}`,
-          title: `${language} draft`,
-          kindLabel: language,
+          title: isSqlDraft ? "SQL draft" : `${language} draft`,
+          kind: isSqlDraft ? "sql" : "code",
+          kindLabel: isSqlDraft ? "SQL" : language,
           preview: compactMessagePreview(snippet, 180),
           content: snippet,
           timestamp: message.timestamp - blockIndex,
+          engineHint: isSqlDraft ? inferSqlDraftEngine(workflow, agentRole, snippet) : undefined,
         });
       });
 
@@ -396,6 +427,7 @@ function buildDraftArtifacts(messages: Message[]): DraftArtifact[] {
         artifacts.push({
           id: `${message.id}-chart`,
           title: message.chart.title || 'Chart draft',
+          kind: "chart",
           kindLabel: message.chart.type.toUpperCase(),
           preview: `${message.chart.points.length} point(s) prepared for ${message.chart.xField} × ${message.chart.yField}.`,
           content: content,
@@ -408,6 +440,7 @@ function buildDraftArtifacts(messages: Message[]): DraftArtifact[] {
         artifacts.push({
           id: `${message.id}-note-${messageIndex}`,
           title: headingMatch?.[1]?.trim() || 'Analysis draft',
+          kind: "note",
           kindLabel: 'NOTE',
           preview: compactMessagePreview(content, 220),
           content,
@@ -695,6 +728,14 @@ export function ChatInterface({
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
   const [isPlanningDraftDirty, setIsPlanningDraftDirty] = useState(false);
   const [planningBusy, setPlanningBusy] = useState(false);
+  const [isSqlDraftModalOpen, setIsSqlDraftModalOpen] = useState(false);
+  const [selectedSqlDraft, setSelectedSqlDraft] = useState<DraftArtifact | null>(null);
+  const [sqlDraftText, setSqlDraftText] = useState("");
+  const [sqlDraftEngine, setSqlDraftEngine] = useState<"clickhouse" | "oracle">("clickhouse");
+  const [sqlDraftRowLimit, setSqlDraftRowLimit] = useState(1000);
+  const [sqlDraftResult, setSqlDraftResult] = useState<SqlDraftPreviewResult | null>(null);
+  const [sqlDraftError, setSqlDraftError] = useState("");
+  const [isSqlDraftRunning, setIsSqlDraftRunning] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
   const [isToolsIslandOpen, setIsToolsIslandOpen] = useState(false);
   const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
@@ -1322,6 +1363,100 @@ export function ChatInterface({
     setPlanningError(null);
     setIsPlanningMonitorOpen(true);
     void loadPlanningState();
+  };
+
+  const openSqlDraftPreview = (artifact: DraftArtifact) => {
+    const defaultEngine = artifact.engineHint ?? (agentRole === 'oracle_analyst' ? 'oracle' : 'clickhouse');
+    setSelectedSqlDraft(artifact);
+    setSqlDraftText(artifact.content);
+    setSqlDraftEngine(defaultEngine);
+    setSqlDraftRowLimit(1000);
+    setSqlDraftResult(null);
+    setSqlDraftError('');
+    setIsSqlDraftModalOpen(true);
+  };
+
+  const closeSqlDraftPreview = () => {
+    setIsSqlDraftModalOpen(false);
+    setSelectedSqlDraft(null);
+    setSqlDraftText('');
+    setSqlDraftResult(null);
+    setSqlDraftError('');
+    setIsSqlDraftRunning(false);
+  };
+
+  const runSqlDraftPreview = async () => {
+    if (!sqlDraftText.trim()) {
+      setSqlDraftError('Enter or confirm a SQL draft before generating the table.');
+      return;
+    }
+
+    const disableSslVerification = config.disableSslVerification ?? false;
+    const effectiveClickhouseVerifySsl = disableSslVerification ? false : (config.clickhouseVerifySsl ?? true);
+    setIsSqlDraftRunning(true);
+    setSqlDraftError('');
+
+    try {
+      const response = await fetch('/api/sql-draft/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sql: sqlDraftText,
+          engine: sqlDraftEngine,
+          row_limit: sqlDraftRowLimit,
+          clickhouse: {
+            host: config.clickhouseHost,
+            port: config.clickhousePort,
+            database: config.clickhouseDatabase,
+            username: config.clickhouseUsername,
+            password: config.clickhousePassword,
+            secure: config.clickhouseSecure,
+            verify_ssl: effectiveClickhouseVerifySsl,
+            http_path: config.clickhouseHttpPath,
+            query_limit: Math.max(sqlDraftRowLimit, config.clickhouseQueryLimit),
+          },
+          oracle_connections: (config.oracleConnections ?? []).map((connection) => ({
+            id: connection.id,
+            label: connection.label,
+            host: connection.host,
+            port: connection.port,
+            service_name: connection.serviceName,
+            sid: connection.sid,
+            dsn: connection.dsn,
+            username: connection.username,
+            password: connection.password,
+          })),
+          oracle_analyst_config: {
+            connection_id: config.oracleAnalystConfig.connectionId,
+            row_limit: Math.max(sqlDraftRowLimit, config.oracleAnalystConfig.rowLimit),
+            max_retries: config.oracleAnalystConfig.maxRetries,
+            max_iterations: config.oracleAnalystConfig.maxIterations,
+            toolkit_id: config.oracleAnalystConfig.toolkitId,
+            system_prompt: config.oracleAnalystConfig.systemPrompt,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `SQL preview error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setSqlDraftResult({
+        engine: data.engine === 'oracle' ? 'oracle' : 'clickhouse',
+        executedSql: String(data.executed_sql || sqlDraftText),
+        columns: Array.isArray(data.columns) ? data.columns.map((column: unknown) => String(column)) : [],
+        rows: Array.isArray(data.rows) ? data.rows : [],
+        rowCount: Number(data.row_count || 0),
+        shownRows: Number(data.shown_rows || 0),
+        rowLimit: Number(data.row_limit || sqlDraftRowLimit),
+      });
+    } catch (error) {
+      setSqlDraftError(error instanceof Error ? error.message : 'Unable to generate the SQL preview.');
+    } finally {
+      setIsSqlDraftRunning(false);
+    }
   };
 
   const startNewPlanningDraft = () => {
@@ -2692,7 +2827,7 @@ export function ChatInterface({
 
     return nodes;
   }, [workflow, agentRole, managerAgentState.activeDelegate, latestMentionTargets, ActiveContextIcon, activeContextBadge.iconWrapClass, activeMcpToolLabel]);
-  const draftArtifacts = useMemo(() => buildDraftArtifacts(messages), [messages]);
+  const draftArtifacts = useMemo(() => buildDraftArtifacts(messages, workflow, agentRole), [messages, workflow, agentRole]);
   const latestTraceSteps = useMemo(() => {
     for (const message of [...messages].reverse()) {
       if (message.role === 'assistant' && Array.isArray(message.steps) && message.steps.length > 0) {
@@ -3526,6 +3661,20 @@ export function ChatInterface({
                     <p className="mt-2 text-[12px] leading-relaxed text-gray-600 dark:text-gray-300">
                       {artifact.preview}
                     </p>
+                    {artifact.kind === 'sql' && (
+                      <div className="mt-3 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openSqlDraftPreview(artifact)}
+                          className="inline-flex items-center justify-center rounded-full bg-cyan-500 px-3.5 py-2 text-xs font-semibold text-white shadow-md shadow-cyan-500/20 transition-colors hover:bg-cyan-400"
+                        >
+                          Open SQL preview
+                        </button>
+                        <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                          Review, edit, run, sort columns, and export.
+                        </span>
+                      </div>
+                    )}
                   </div>
                 ))
               )}
@@ -3880,6 +4029,21 @@ export function ChatInterface({
         }}
         onSubmit={handleDataQualityRun}
         onStop={stopCurrentExecution}
+      />
+      <SqlDraftModal
+        isOpen={isSqlDraftModalOpen}
+        artifactTitle={selectedSqlDraft?.title || 'SQL draft'}
+        sql={sqlDraftText}
+        engine={sqlDraftEngine}
+        rowLimit={sqlDraftRowLimit}
+        isLoading={isSqlDraftRunning}
+        error={sqlDraftError}
+        result={sqlDraftResult}
+        onClose={closeSqlDraftPreview}
+        onSqlChange={setSqlDraftText}
+        onEngineChange={setSqlDraftEngine}
+        onRowLimitChange={setSqlDraftRowLimit}
+        onRun={runSqlDraftPreview}
       />
       <AgentConsoleModal
         isOpen={isConsoleOpen}

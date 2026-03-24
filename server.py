@@ -1105,6 +1105,7 @@ async def execute_clickhouse_sql(
     sql: str,
     readonly: bool = True,
     json_format: bool = True,
+    max_result_rows_override: Optional[int] = None,
 ) -> dict[str, Any]:
     query = clean_sql_text(sql)
     if not query:
@@ -1120,7 +1121,13 @@ async def execute_clickhouse_sql(
         "readonly": 1 if readonly else 0,
         "wait_end_of_query": 1,
         "result_overflow_mode": "break",
-        "max_result_rows": max(1, min(config.query_limit, 5000)),
+        "max_result_rows": max(
+            1,
+            min(
+                int(max_result_rows_override if max_result_rows_override is not None else config.query_limit),
+                10_000,
+            ),
+        ),
     }
     auth = (config.username, config.password) if config.username else None
 
@@ -2800,6 +2807,17 @@ CHART_TYPE_BY_LABEL = {label.lower(): key for key, label in CHART_TYPE_LABELS.it
 
 def dump_clickhouse_agent_state(state: ClickHouseAgentState) -> dict[str, Any]:
     return state.model_dump(by_alias=True)
+
+
+def enforce_clickhouse_preview_limit(sql: str, row_limit: int) -> str:
+    cleaned = clean_sql_text(sql)
+    safe_limit = max(1, min(int(row_limit or 1000), 10_000))
+    lowered = cleaned.lower()
+    if lowered.startswith(("show ", "describe ", "desc ", "exists ", "explain ")):
+        return cleaned
+    if re.search(r"\blimit\s+\d+\b", lowered):
+        return cleaned
+    return f"{cleaned}\nLIMIT {safe_limit}"
 
 
 def reset_clickhouse_chart_state(state: ClickHouseAgentState) -> None:
@@ -10100,6 +10118,15 @@ class DataQualityMetadataRequest(BaseModel):
     table: Optional[str] = None
 
 
+class SqlDraftPreviewRequest(BaseModel):
+    sql: str
+    engine: Literal["clickhouse", "oracle"] = "clickhouse"
+    row_limit: int = 1000
+    clickhouse: ClickHouseConfig = Field(default_factory=ClickHouseConfig)
+    oracle_connections: list[OracleConnectionConfig] = Field(default_factory=list)
+    oracle_analyst_config: OracleAnalystConfigModel = Field(default_factory=OracleAnalystConfigModel)
+
+
 class ManagerAgentRequest(BaseModel):
     message: str
     history: list[dict] = []
@@ -13559,6 +13586,63 @@ async def test_oracle_connection_endpoint(req: OracleTestRequest):
         return await test_oracle_connection(req.connection)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/sql-draft/preview")
+async def preview_sql_draft(req: SqlDraftPreviewRequest):
+    row_limit = max(1, min(int(req.row_limit or 1000), 10_000))
+    engine = str(req.engine or "clickhouse").strip().lower()
+
+    if engine == "oracle":
+        connection = _resolve_oracle_connection(
+            req.oracle_connections or [OracleConnectionConfig(**DEFAULT_APP_CONFIG["oracleConnections"][0])],
+            req.oracle_analyst_config,
+        )
+        sql = clean_sql_text(req.sql)
+        if not is_safe_read_only_oracle_sql(sql):
+            raise HTTPException(status_code=400, detail="Only read-only Oracle SELECT queries are allowed.")
+        try:
+            result = await execute_oracle_query(connection, sql, row_limit)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return {
+            "engine": "oracle",
+            "executed_sql": result["sql"],
+            "columns": list(result.get("columns") or []),
+            "rows": list(result.get("rows") or []),
+            "row_count": int(result.get("row_count") or 0),
+            "shown_rows": len(result.get("rows") or []),
+            "row_limit": row_limit,
+        }
+
+    sql = enforce_clickhouse_preview_limit(req.sql, row_limit)
+    if not is_safe_read_only_sql(sql):
+        raise HTTPException(status_code=400, detail="Only read-only ClickHouse queries are allowed.")
+
+    try:
+        result = await execute_clickhouse_sql(
+            req.clickhouse,
+            sql,
+            max_result_rows_override=row_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rows = list(result.get("data") or [])
+    columns = [str(item.get("name") or "") for item in (result.get("meta") or []) if str(item.get("name") or "").strip()]
+    if not columns and rows:
+        columns = [str(key) for key in rows[0].keys()]
+
+    return {
+        "engine": "clickhouse",
+        "executed_sql": sql,
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "shown_rows": len(rows),
+        "row_limit": row_limit,
+    }
 
 
 @app.post("/api/file-manager/test-path")
