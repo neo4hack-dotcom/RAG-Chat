@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, CircleDashed, Loader2, XCircle, BrainCircuit, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3 } from "lucide-react";
-import { Message, cn, AgentStep, ChartSpec, ChatAction, preprocessMarkdown } from "../lib/utils";
+import { Bot, User, ChevronDown, ChevronRight, Loader2, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3 } from "lucide-react";
+import { Message, cn, ChartSpec, ChatAction, preprocessMarkdown } from "../lib/utils";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -13,7 +13,6 @@ interface ChatMessageProps {
   message: Message;
   onCheckboxToggle?: (messageId: string, text: string, checked: boolean) => void;
   onAction?: (action: ChatAction, message: Message) => void;
-  showSteps?: boolean;
 }
 
 type AssistantContentBlock =
@@ -155,88 +154,6 @@ function hasTaskListClassName(className: unknown): boolean {
   if (typeof className === "string") return className.includes("task-list-item");
   if (Array.isArray(className)) return className.some((item) => String(item).includes("task-list-item"));
   return false;
-}
-
-function stepActionLabel(step: AgentStep): string {
-  const rawType = ((step as any).type ?? '').toString().trim();
-  if (!rawType) return '';
-  return rawType.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function stepReasoning(step: AgentStep): string {
-  return ((step as any).reasoning ?? '').toString().trim();
-}
-
-function stepResultSummary(step: AgentStep): string {
-  return (((step as any).result_summary ?? (step as any).resultSummary) ?? '').toString().trim();
-}
-
-function stepSql(step: AgentStep): string {
-  return ((step as any).sql ?? '').toString().trim();
-}
-
-function stepRowCount(step: AgentStep): number | null {
-  const raw = (step as any).row_count ?? (step as any).rowCount;
-  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
-}
-
-function stepSuggestedPath(step: AgentStep): string {
-  return (((step as any).suggested_path ?? (step as any).suggestedPath) ?? '').toString().trim();
-}
-
-function deriveConfidenceBadge(message: Message): {
-  label: string;
-  value: string;
-  toneClass: string;
-} | null {
-  if (typeof message.confidence === 'number' && Number.isFinite(message.confidence)) {
-    const percent = Math.round(message.confidence * 100);
-    if (message.confidence >= 0.72) {
-      return {
-        label: 'Confidence',
-        value: `${percent}% · High`,
-        toneClass: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
-      };
-    }
-    if (message.confidence >= 0.45) {
-      return {
-        label: 'Confidence',
-        value: `${percent}% · Medium`,
-        toneClass: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
-      };
-    }
-    return {
-      label: 'Confidence',
-      value: `${percent}% · Low`,
-      toneClass: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
-    };
-  }
-
-  if (Array.isArray(message.steps) && message.steps.length > 0) {
-    const errorCount = message.steps.filter((step) => step.status === 'error').length;
-    const successCount = message.steps.filter((step) => step.status === 'success').length;
-    const inferred = Math.max(0.24, Math.min(0.9, (successCount + 0.5) / (message.steps.length + errorCount + 0.5)));
-    const percent = Math.round(inferred * 100);
-    return inferred >= 0.65
-      ? {
-          label: 'Estimated',
-          value: `${percent}% · Stable`,
-          toneClass: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
-        }
-      : inferred >= 0.4
-        ? {
-            label: 'Estimated',
-            value: `${percent}% · Caution`,
-            toneClass: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
-          }
-        : {
-            label: 'Estimated',
-            value: `${percent}% · Fragile`,
-            toneClass: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
-          };
-  }
-
-  return null;
 }
 
 function MessageCopyButton({ text, isUser }: { text: string; isUser: boolean }) {
@@ -906,21 +823,9 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = true }: ChatMessageProps) {
+export function ChatMessage({ message, onCheckboxToggle, onAction }: ChatMessageProps) {
   const isUser = message.role === "user";
-
-  const [isStepsExpanded, setIsStepsExpanded] = useState(false);
   const [isSourcesExpanded, setIsSourcesExpanded] = useState(false);
-  const confidenceBadge = !isUser ? deriveConfidenceBadge(message) : null;
-
-  const renderStepIcon = (status: AgentStep['status']) => {
-    switch (status) {
-      case 'success': return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
-      case 'running': return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />;
-      case 'error': return <XCircle className="w-4 h-4 text-red-500" />;
-      default: return <CircleDashed className="w-4 h-4 text-gray-400" />;
-    }
-  };
 
   const content = message.content;
   const renderedContent = !isUser ? preprocessMarkdown(content) : content;
@@ -970,97 +875,6 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
           : "glass-panel rounded-tl-sm w-full"
       )}>
         <MessageCopyButton text={content} isUser={isUser} />
-
-        {!isUser && confidenceBadge && (
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${confidenceBadge.toneClass}`}>
-              <span className="uppercase tracking-[0.12em] opacity-75">{confidenceBadge.label}</span>
-              <span>{confidenceBadge.value}</span>
-            </div>
-          </div>
-        )}
-
-        {/* Agent execution trace */}
-        {showSteps && !isUser && message.steps && message.steps.length > 0 && (
-          <div className="mb-3 bg-white/60 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60 rounded-xl overflow-hidden shadow-sm">
-            <button
-              onClick={() => setIsStepsExpanded(!isStepsExpanded)}
-              className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-white/40 dark:hover:bg-white/5 transition-colors"
-            >
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200">
-                <BrainCircuit className="w-4 h-4 text-purple-500" />
-                Execution Trace ({message.steps.filter(s => s.status === 'success').length}/{message.steps.length})
-              </div>
-              {isStepsExpanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
-            </button>
-            {isStepsExpanded && (
-              <div className="px-4 pb-3 pt-1 border-t border-gray-100/50">
-                <div className="space-y-2.5 mt-2">
-                  {message.steps.map((step, idx) => (
-                    <div key={step.id || idx} className="flex items-start gap-3">
-                      <div className="mt-0.5">{renderStepIcon(step.status)}</div>
-                      <div className="flex-1">
-                        <p className={cn("text-[13px] font-medium", step.status === 'error' ? "text-red-700 dark:text-red-400" : "text-gray-800 dark:text-gray-200")}>
-                          {step.title}
-                        </p>
-                        {(stepActionLabel(step) || stepRowCount(step) !== null || (step as any).retried || stepSuggestedPath(step)) && (
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
-                            {stepActionLabel(step) && (
-                              <span className="inline-flex items-center rounded-full bg-purple-100 px-2 py-0.5 font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-200">
-                                {stepActionLabel(step)}
-                              </span>
-                            )}
-                            {stepRowCount(step) !== null && (
-                              <span className="text-gray-500 dark:text-gray-400">
-                                {stepRowCount(step)} row(s)
-                              </span>
-                            )}
-                            {(step as any).retried && (
-                              <span className="text-amber-600 dark:text-amber-300">
-                                Auto-retried
-                              </span>
-                            )}
-                            {stepSuggestedPath(step) && (
-                              <span className="text-gray-500 dark:text-gray-400">
-                                {stepSuggestedPath(step)}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {stepReasoning(step) && (
-                          <p className="text-[12px] text-gray-600 dark:text-gray-300 mt-2 leading-relaxed">
-                            {stepReasoning(step)}
-                          </p>
-                        )}
-                        {stepResultSummary(step) && (
-                          <p className="text-[12px] text-gray-500 dark:text-gray-400 mt-1 leading-relaxed whitespace-pre-wrap">
-                            {stepResultSummary(step)}
-                          </p>
-                        )}
-                        {stepSql(step) && (
-                          <div className="relative mt-2 overflow-hidden rounded-xl border border-gray-200 bg-gray-950/95 dark:border-gray-700">
-                            <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
-                              <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400">SQL</span>
-                              <CopyButton text={stepSql(step)} />
-                            </div>
-                            <pre className="overflow-x-auto px-3 py-3 text-[11px] leading-relaxed text-gray-100">
-                              <code>{stepSql(step)}</code>
-                            </pre>
-                          </div>
-                        )}
-                        {step.details && !stepReasoning(step) && !stepResultSummary(step) && !stepSql(step) && (
-                          <p className="text-[12px] text-gray-500 dark:text-gray-400 mt-1 leading-relaxed whitespace-pre-wrap font-mono">
-                            {step.details}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
 
         {/* Attachments */}
         {message.attachments && message.attachments.length > 0 && (
@@ -1139,14 +953,6 @@ export function ChatMessage({ message, onCheckboxToggle, onAction, showSteps = t
                 {action.label}
               </button>
             ))}
-          </div>
-        )}
-
-        {/* RAG low-confidence warning */}
-        {!isUser && message.confidence !== undefined && message.confidence < 0.4 && (
-          <div className="mt-3 p-2.5 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg flex items-start gap-2 text-amber-800 dark:text-amber-200 text-xs">
-            <XCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-            <p><strong>Warning:</strong> Low-relevance documents detected (score: {Math.round(message.confidence * 100)}%). The answer may be imprecise.</p>
           </div>
         )}
 

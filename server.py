@@ -1244,6 +1244,55 @@ def is_clickhouse_sample_rows_request(user_message: str) -> bool:
     return True
 
 
+def is_clickhouse_row_count_request(user_message: str) -> bool:
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return False
+
+    direct_patterns = [
+        "number of rows",
+        "row count",
+        "count the rows",
+        "count rows",
+        "how many rows",
+        "how many records",
+        "how many lines",
+        "combien de lignes",
+        "combien d enregistrements",
+        "nombre de lignes",
+        "nombre d enregistrements",
+        "count(*)",
+    ]
+    if any(pattern in normalized for pattern in direct_patterns):
+        return True
+
+    has_count_word = any(
+        token in normalized
+        for token in [" count", "count ", "combien", "nombre", "how many", "total"]
+    )
+    has_row_word = any(
+        token in normalized
+        for token in [" row", " rows", " line", " lines", " ligne", " lignes", " record", " records", " enregistrement", " enregistrements"]
+    )
+    return has_count_word and has_row_word
+
+
+def is_clickhouse_row_request_ambiguous(user_message: str) -> bool:
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return False
+
+    has_row_word = any(
+        token in normalized
+        for token in [" row", " rows", " line", " lines", " ligne", " lignes", " record", " records", " enregistrement", " enregistrements"]
+    )
+    has_listing_verb = any(
+        token in normalized
+        for token in ["show", "give", "display", "return", "donne", "montre", "affiche", "liste", "list"]
+    )
+    return has_row_word and has_listing_verb and is_clickhouse_row_count_request(user_message) and is_clickhouse_sample_rows_request(user_message)
+
+
 def extract_clickhouse_requested_row_limit(user_message: str, default: int = 10, max_limit: int = 100) -> int:
     normalized = normalize_intent_text(user_message)
     if not normalized:
@@ -12452,7 +12501,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
 @app.post("/api/chat/manager-agent")
 async def chat_manager_agent(req: ManagerAgentRequest):
     start_t = _time.time()
-    _emit_log("info", "manager", "Received orchestrator request", {"query": req.message})
+    _emit_log("info", "manager", "Received manager request", {"query": req.message})
     user_message = (req.message or "").strip()
     manager_state = _normalize_manager_agent_state(req.manager_state.model_dump())
 
@@ -13086,6 +13135,10 @@ def reset_clickhouse_clarification(state: ClickHouseAgentState) -> None:
     state.clarification_options = []
 
 
+CLICKHOUSE_ROW_COUNT_OPTION = "Return the row count"
+CLICKHOUSE_SAMPLE_ROWS_OPTION = "Return sample rows"
+
+
 @app.post("/api/chat/clickhouse-agent")
 async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     # This agent intentionally mixes two behaviors:
@@ -13481,6 +13534,37 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     if not state.table_schema:
         raise HTTPException(status_code=400, detail=f"Table '{state.selected_table}' has no readable columns.")
 
+    if state.stage == "awaiting_row_intent":
+        row_intent_choice = resolve_user_choice(
+            user_message,
+            state.clarification_options or [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION],
+        )
+        if row_intent_choice == CLICKHOUSE_ROW_COUNT_OPTION:
+            state.pending_request = f"{state.pending_request}\n\n[Resolved intent: row count]".strip()
+            state.stage = "ready"
+            reset_clickhouse_clarification(state)
+        elif row_intent_choice == CLICKHOUSE_SAMPLE_ROWS_OPTION:
+            state.pending_request = f"{state.pending_request}\n\n[Resolved intent: sample rows]".strip()
+            state.stage = "ready"
+            reset_clickhouse_clarification(state)
+        else:
+            return {
+                "answer": build_choice_markdown(
+                    "Row Request Clarification",
+                    state.clarification_prompt or "Do you want the row count or a sample list of rows?",
+                    state.clarification_options or [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION],
+                ),
+                "agent_state": dump_clickhouse_agent_state(state),
+                "steps": [
+                    {
+                        "id": "ch-row-intent",
+                        "title": "Waiting for row intent clarification",
+                        "status": "running",
+                        "details": "The request could mean either a row count or a sample of rows.",
+                    }
+                ],
+            }
+
     # Direct schema requests should not go through field/date disambiguation.
     if state.pending_request and is_clickhouse_schema_request(state.pending_request):
         schema_sql = (
@@ -13530,6 +13614,87 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
                     "title": "Returned table schema directly",
                     "status": "success",
                     "details": f"Listed {len(state.table_schema)} column(s) without requesting any extra clarification.",
+                },
+            ],
+        }
+
+    if state.pending_request and is_clickhouse_row_request_ambiguous(state.pending_request):
+        state.stage = "awaiting_row_intent"
+        state.clarification_prompt = (
+            "Your request can mean either **count the rows** or **show sample rows**. "
+            "Choose the output you want."
+        )
+        state.clarification_options = [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION]
+        return {
+            "answer": build_choice_markdown(
+                "Row Request Clarification",
+                state.clarification_prompt,
+                state.clarification_options,
+            ),
+            "agent_state": dump_clickhouse_agent_state(state),
+            "steps": [
+                {
+                    "id": "ch-row-intent",
+                    "title": "Clarified row request",
+                    "status": "running",
+                    "details": "The request is ambiguous between row count and row listing.",
+                }
+            ],
+        }
+
+    if state.pending_request and is_clickhouse_row_count_request(state.pending_request):
+        count_sql = (
+            f"SELECT count() AS row_count\n"
+            f"FROM {quote_clickhouse_identifier(state.selected_table)}"
+        )
+        try:
+            start_exec = _time.time()
+            result = await execute_clickhouse_sql(req.clickhouse, count_sql)
+            elapsed = _time.time() - start_exec
+            _emit_log(
+                "sql",
+                "clickhouse",
+                f"Executed direct count query successfully ({elapsed:.2f}s)",
+                {"sql": count_sql, "rows": len(result.get('data', []))},
+            )
+        except Exception as exc:
+            _emit_log("error", "clickhouse", f"Direct count query failed: {exc}", {"sql": count_sql})
+            raise
+
+        count_value = 0
+        if result.get("data"):
+            try:
+                count_value = int((result.get("data") or [{}])[0].get("row_count") or 0)
+            except Exception:
+                count_value = 0
+
+        state.last_sql = count_sql
+        state.last_result_meta = result.get("meta", [])
+        state.last_result_rows = result.get("data", [])[:1]
+        answer = build_clickhouse_response_markdown(
+            f"`{state.selected_table}` contains **{count_value:,} row(s)**.",
+            [count_sql],
+        )
+        state.stage = "ready"
+        state.pending_request = ""
+        reset_clickhouse_clarification(state)
+        reset_clickhouse_chart_state(state)
+        return {
+            "answer": answer,
+            "agent_state": dump_clickhouse_agent_state(state),
+            "sql": count_sql,
+            "steps": [
+                {
+                    "id": "ch-selected-table",
+                    "title": "Selected ClickHouse table",
+                    "status": "success",
+                    "details": f"Using table `{state.selected_table}`.",
+                },
+                {
+                    "id": "ch-count-direct",
+                    "title": "Returned row count directly",
+                    "status": "success",
+                    "details": f"Counted **{count_value:,}** row(s) without switching to a row preview.",
                 },
             ],
         }

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, Route, SplitSquareVertical, FilePenLine, Gauge } from "lucide-react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
@@ -187,12 +187,6 @@ type DraftArtifact = {
   preview: string;
   content: string;
   timestamp: number;
-};
-
-type OrchestratorView = {
-  strategist: MentionTargetDefinition;
-  executor: MentionTargetDefinition;
-  transcript: Array<{ id: string; speaker: string; side: 'left' | 'right'; message: string }>;
 };
 
 const CHAT_ZOOM_MIN = 0.85;
@@ -625,8 +619,6 @@ export function ChatInterface({
   const [isZoomControlOpen, setIsZoomControlOpen] = useState(false);
   const [isThinkingPanelOpen, setIsThinkingPanelOpen] = useState(false);
   const [isInputCopied, setIsInputCopied] = useState(false);
-  const [isBreadcrumbPanelOpen, setIsBreadcrumbPanelOpen] = useState(false);
-  const [isOrchestratorPanelOpen, setIsOrchestratorPanelOpen] = useState(false);
   const [isDraftPanelOpen, setIsDraftPanelOpen] = useState(false);
   const [isAgentStatePanelOpen, setIsAgentStatePanelOpen] = useState(false);
   const [inputCursor, setInputCursor] = useState(0);
@@ -743,7 +735,6 @@ export function ChatInterface({
     setIsDataQualityModalOpen(false);
     setDataQualityFormError(null);
     setIsConsoleOpen(false);
-    setIsOrchestratorPanelOpen(false);
     setIsAgentStatePanelOpen(false);
   };
 
@@ -1638,9 +1629,6 @@ export function ChatInterface({
     if (mentionedTargets.length > 0) {
       onWorkflowChange('AGENT');
       onAgentRoleChange(resolvedAgentRole);
-      if (mentionedTargets.length > 1) {
-        setIsOrchestratorPanelOpen(true);
-      }
     }
 
     try {
@@ -2691,51 +2679,6 @@ export function ChatInterface({
 
     return nodes;
   }, [workflow, agentRole, managerAgentState.activeDelegate, latestMentionTargets, ActiveContextIcon, activeContextBadge.iconWrapClass, activeMcpToolLabel]);
-  const orchestratorView = useMemo<OrchestratorView | null>(() => {
-    const strategist =
-      latestMentionTargets[0]
-      ?? AGENT_MENTION_TARGETS.find((target) => target.role === 'manager')
-      ?? AGENT_MENTION_TARGETS[0];
-    const executor =
-      latestMentionTargets[1]
-      ?? (workflow === 'AGENT'
-        ? AGENT_MENTION_TARGETS.find((target) => target.role === agentRole && target.role !== 'manager')
-        : undefined)
-      ?? AGENT_MENTION_TARGETS.find((target) => target.role === 'clickhouse_query')
-      ?? AGENT_MENTION_TARGETS[1];
-
-    if (!latestUserMessage && workflow !== 'AGENT') {
-      return null;
-    }
-
-    const latestThinking = thinkingMessages[0]?.steps ?? [];
-    const transcript = [
-      {
-        id: 'orchestrator-1',
-        speaker: strategist.label,
-        side: 'left' as const,
-        message: latestUserMessage?.content
-          ? `Mission received: "${compactMessagePreview(latestUserMessage.content, 180)}". Break the request down into a clean execution plan.`
-          : 'Define the goal clearly, assign the right specialist, and keep the execution path visible to the user.',
-      },
-      {
-        id: 'orchestrator-2',
-        speaker: executor.label,
-        side: 'right' as const,
-        message: latestThinking.length > 0
-          ? `Execution focus: ${latestThinking.slice(0, 3).map((step) => step.title).join(' • ')}`
-          : `I will execute the active task as ${workflow === 'AGENT' ? AGENT_ROLE_LABELS[agentRole] : activeToolsSummary}, then return a concise deliverable.`,
-      },
-      {
-        id: 'orchestrator-3',
-        speaker: strategist.label,
-        side: 'left' as const,
-        message: 'Keep the outcome user-facing. Move raw SQL, technical details, and side investigations into supporting panels when possible.',
-      },
-    ];
-
-    return { strategist, executor, transcript };
-  }, [latestMentionTargets, latestUserMessage, workflow, agentRole, thinkingMessages, activeToolsSummary]);
   const draftArtifacts = useMemo(() => buildDraftArtifacts(messages), [messages]);
   const latestTraceSteps = useMemo(() => {
     for (const message of [...messages].reverse()) {
@@ -2926,47 +2869,6 @@ export function ChatInterface({
         </div>
       </header>
 
-      {isBreadcrumbPanelOpen && breadcrumbNodes.length > 1 && (
-        <div className="pointer-events-none relative z-20 px-4 md:px-8">
-          <div className="mx-auto mt-1 max-w-[77rem] rounded-[1.55rem] border border-white/60 bg-white/72 px-4 py-3 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-2xl dark:border-white/10 dark:bg-black/35">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
-                  Dynamic Breadcrumb
-                </div>
-                <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                  Live collaboration path across the active conversation.
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsBreadcrumbPanelOpen(false)}
-                className="pointer-events-auto inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
-                title="Close breadcrumb"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {breadcrumbNodes.map((node, index) => {
-                const NodeIcon = node.icon;
-                return (
-                  <React.Fragment key={node.id}>
-                    <div className={`pointer-events-auto inline-flex items-center gap-2 rounded-full border px-3 py-2 text-sm font-medium shadow-sm ${node.toneClass}`}>
-                      <NodeIcon className="h-4 w-4" />
-                      <span>{node.label}</span>
-                    </div>
-                    {index < breadcrumbNodes.length - 1 && (
-                      <ChevronRight className="h-4 w-4 text-gray-400 dark:text-gray-500" />
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className="flex-1 flex flex-col min-h-0" style={chatScaledStyle}>
         <div className="flex-1 min-h-0 px-4 md:px-8 pb-4">
@@ -2984,7 +2886,6 @@ export function ChatInterface({
                         message={msg}
                         onCheckboxToggle={handleCheckboxToggle}
                         onAction={handleChatAction}
-                        showSteps
                       />
                     </div>
                   ))}
@@ -3410,39 +3311,13 @@ export function ChatInterface({
               setIsThinkingPanelOpen(false);
               setIsToolsIslandOpen(true);
             }}
-            className={floatingUtilityButtonClass}
+            className={`${floatingUtilityButtonClass} ${activeContextBadge.iconWrapClass}`}
             title={activeContextBadge.label}
           >
             <div className="flex flex-col items-center gap-0.5">
               <ActiveContextIcon className="h-4.5 w-4.5" />
-              <span className="text-[9px] font-semibold tracking-[0.12em] text-gray-500 dark:text-gray-400">
+              <span className={`text-[9px] font-semibold tracking-[0.12em] ${activeContextBadge.eyebrowClass}`}>
                 {activeContextShortLabel}
-              </span>
-            </div>
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsBreadcrumbPanelOpen((open) => !open)}
-            className={`${floatingUtilityButtonClass} ${isBreadcrumbPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
-            title="Dynamic breadcrumb"
-          >
-            <div className="flex flex-col items-center gap-0.5">
-              <Route className="h-4.5 w-4.5" />
-              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
-                PATH
-              </span>
-            </div>
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsOrchestratorPanelOpen((open) => !open)}
-            className={`${floatingUtilityButtonClass} ${isOrchestratorPanelOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
-            title="Orchestrator mode"
-          >
-            <div className="flex flex-col items-center gap-0.5">
-              <SplitSquareVertical className="h-4.5 w-4.5" />
-              <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
-                ORCH
               </span>
             </div>
           </button>
@@ -3641,97 +3516,6 @@ export function ChatInterface({
                   </div>
                 ))
               )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isOrchestratorPanelOpen && orchestratorView && (
-        <div className="absolute inset-x-0 top-[7.25rem] bottom-8 z-40 flex items-center justify-center px-6">
-          <div className="absolute inset-0 bg-slate-950/10 backdrop-blur-[3px] dark:bg-black/30" />
-          <div className="relative flex h-[min(40rem,calc(100vh-10rem))] w-full max-w-[88rem] overflow-hidden rounded-[2.3rem] border border-white/70 bg-white/82 shadow-[0_32px_90px_rgba(15,23,42,0.20)] backdrop-blur-3xl dark:border-white/10 dark:bg-black/55">
-            <div className="w-[22%] min-w-[16rem] border-r border-black/5 bg-gradient-to-br from-violet-50/90 to-white px-5 py-5 dark:border-white/10 dark:from-violet-950/20 dark:to-transparent">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-violet-600 dark:text-violet-300">
-                Strategist
-              </div>
-              <div className="mt-3 flex items-center gap-3">
-                <div className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${orchestratorView.strategist.tone} text-white shadow-lg`}>
-                  {React.createElement(orchestratorView.strategist.icon, { className: "h-5 w-5" })}
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {orchestratorView.strategist.label}
-                  </div>
-                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    Frames the objective and delegates the next move.
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-hidden px-5 py-5">
-              <div className="flex items-start justify-between gap-3 border-b border-black/5 pb-4 dark:border-white/10">
-                <div>
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
-                    Orchestrator mode
-                  </div>
-                  <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
-                    Multi-agent hand-off
-                  </div>
-                  <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    Watch the strategist brief the executor while the main chat stays available underneath.
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsOrchestratorPanelOpen(false)}
-                  className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/5 text-gray-600 transition-colors hover:bg-black/10 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15"
-                  title="Close orchestrator"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-
-              <div className="mt-5 space-y-3 overflow-y-auto pr-1">
-                {orchestratorView.transcript.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className={`flex ${entry.side === 'right' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div className={`max-w-[78%] rounded-[1.5rem] px-4 py-3 shadow-sm ${
-                      entry.side === 'left'
-                        ? 'border border-violet-200/70 bg-violet-50/80 text-violet-950 dark:border-violet-800/70 dark:bg-violet-950/20 dark:text-violet-100'
-                        : 'border border-sky-200/70 bg-sky-50/80 text-sky-950 dark:border-sky-800/70 dark:bg-sky-950/20 dark:text-sky-100'
-                    }`}>
-                      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] opacity-70">
-                        {entry.speaker}
-                      </div>
-                      <div className="mt-1 text-sm leading-relaxed">
-                        {entry.message}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="w-[22%] min-w-[16rem] border-l border-black/5 bg-gradient-to-bl from-sky-50/90 to-white px-5 py-5 dark:border-white/10 dark:from-sky-950/20 dark:to-transparent">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-300">
-                Executor
-              </div>
-              <div className="mt-3 flex items-center gap-3">
-                <div className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${orchestratorView.executor.tone} text-white shadow-lg`}>
-                  {React.createElement(orchestratorView.executor.icon, { className: "h-5 w-5" })}
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {orchestratorView.executor.label}
-                  </div>
-                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    Executes the concrete task and reports back with the deliverable.
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
         </div>
