@@ -39,6 +39,31 @@ from mcp.client.streamable_http import streamable_http_client
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 
+try:
+    from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor
+    from sklearn.feature_extraction import DictVectorizer
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LinearRegression, LogisticRegression
+    from sklearn.metrics import (
+        accuracy_score,
+        f1_score,
+        mean_absolute_error,
+        mean_squared_error,
+        precision_score,
+        r2_score,
+        recall_score,
+    )
+    from sklearn.model_selection import train_test_split
+    HAVE_SKLEARN = True
+except Exception:
+    HAVE_SKLEARN = False
+
+try:
+    from xgboost import XGBClassifier, XGBRegressor
+    HAVE_XGBOOST = True
+except Exception:
+    HAVE_XGBOOST = False
+
 
 @asynccontextmanager
 async def ragnarok_lifespan(app: FastAPI):
@@ -288,7 +313,7 @@ DEFAULT_PREFERENCES = {
     "page": "landing",
 }
 
-AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_quality_tables", "data_analyst"}
+AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_analyst", "feature_engineer", "auto_ml"}
 PLANNER_AGENT_ROLES = {"manager", "clickhouse_query", "file_management"}
 PLANNER_TRIGGER_KINDS = {
     "once",
@@ -1281,6 +1306,17 @@ def find_date_columns(schema: list[dict[str, str]]) -> list[str]:
     return [name for name in date_like if name]
 
 
+def _clickhouse_schema_category(type_name: str) -> str:
+    lowered = (type_name or "").lower()
+    if any(token in lowered for token in ["date", "time"]):
+        return "date"
+    if any(token in lowered for token in ["int", "float", "decimal", "numeric", "double", "real"]):
+        return "numeric"
+    if any(token in lowered for token in ["string", "fixedstring", "uuid", "enum", "ipv", "bool"]):
+        return "string"
+    return "other"
+
+
 def match_schema_columns(candidates: list[str], schema: list[dict[str, str]]) -> list[str]:
     lookup = {
         column.get("name", "").lower(): column.get("name", "")
@@ -1365,6 +1401,37 @@ def is_clickhouse_schema_request(user_message: str) -> bool:
     has_listing_verb = any(token in normalized for token in ["liste", "donne", "montre", "show", "list", "what are", "describe", "schema", "structure"])
     has_row_request = any(token in normalized for token in [" ligne", " lignes", " row", " rows", " sample", " preview", " tableau"])
     return has_column_word and has_listing_verb and not has_row_request
+
+
+def is_clickhouse_table_list_request(user_message: str) -> bool:
+    normalized = normalize_intent_text(user_message)
+    if not normalized:
+        return False
+
+    direct_patterns = [
+        "list tables",
+        "list the tables",
+        "show tables",
+        "show the tables",
+        "what tables",
+        "what are the tables",
+        "available tables",
+        "table list",
+        "liste des tables",
+        "liste les tables",
+        "montre les tables",
+        "affiche les tables",
+        "quelles sont les tables",
+        "donne moi la liste des tables",
+        "donne moi les tables",
+    ]
+    if any(pattern in normalized for pattern in direct_patterns):
+        return True
+
+    has_table_word = any(token in normalized for token in [" table", " tables"])
+    has_listing_verb = any(token in normalized for token in ["list", "show", "what are", "available", "liste", "montre", "affiche", "quelles sont", "donne"])
+    has_schema_word = any(token in normalized for token in ["column", "field", "schema", "colonne", "champ", "structure"])
+    return has_table_word and has_listing_verb and not has_schema_word
 
 
 def is_clickhouse_sample_rows_request(user_message: str) -> bool:
@@ -5392,10 +5459,11 @@ def _normalize_pdf_creator_state(payload: Optional[dict]) -> dict[str, Any]:
 MANAGER_SPECIALIST_LABELS = {
     "clickhouse_query": "Clickhouse SQL",
     "data_analyst": "Data analyst",
+    "feature_engineer": "Feature Engineer",
+    "auto_ml": "Auto-ML",
     "file_management": "File management",
     "pdf_creator": "PDF creator",
     "oracle_analyst": "Oracle SQL",
-    "data_quality_tables": "Data quality - Tables",
 }
 MANAGER_CLICKHOUSE_FOLLOWUP_STAGES = {
     "awaiting_table",
@@ -5438,6 +5506,17 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
         "analysis agent": "data_analyst",
         "clickhouse analyst": "data_analyst",
         "analytics agent": "data_analyst",
+        "feature engineer": "feature_engineer",
+        "feature engineering": "feature_engineer",
+        "feature_engineer": "feature_engineer",
+        "features": "feature_engineer",
+        "feature creation": "feature_engineer",
+        "auto ml": "auto_ml",
+        "automl": "auto_ml",
+        "auto_ml": "auto_ml",
+        "ml": "auto_ml",
+        "machine learning": "auto_ml",
+        "model benchmark": "auto_ml",
         "file management": "file_management",
         "file manager": "file_management",
         "file_management": "file_management",
@@ -5453,12 +5532,6 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
         "oracle_analyst": "oracle_analyst",
         "oracle": "oracle_analyst",
         "pl/sql": "oracle_analyst",
-        "data quality": "data_quality_tables",
-        "data quality tables": "data_quality_tables",
-        "data_quality_tables": "data_quality_tables",
-        "data-quality": "data_quality_tables",
-        "profiling": "data_quality_tables",
-        "quality profiling": "data_quality_tables",
     }
     resolved = aliases.get(lowered)
     if resolved == "manager" and not allow_manager:
@@ -5554,10 +5627,11 @@ def _manager_trimmed_history(history: list[dict[str, Any]], limit: int = 10) -> 
 def _manager_specialist_state_summary(
     clickhouse_state: dict[str, Any],
     data_analyst_state: dict[str, Any],
+    feature_engineer_state: dict[str, Any],
+    auto_ml_state: dict[str, Any],
     file_manager_state: dict[str, Any],
     pdf_creator_state: dict[str, Any],
     oracle_state: dict[str, Any],
-    data_quality_state: dict[str, Any],
     manager_state: Optional[dict[str, Any]] = None,
 ) -> str:
     clickhouse_summary = {
@@ -5572,6 +5646,20 @@ def _manager_specialist_state_summary(
         "last_sql_count": len(data_analyst_state.get("last_sqls") or []),
         "has_last_rows": bool(data_analyst_state.get("last_result_rows")),
         "last_export_path": data_analyst_state.get("last_export_path") or "",
+    }
+    feature_engineer_summary = {
+        "stage": feature_engineer_state.get("stage") or "idle",
+        "selected_table": feature_engineer_state.get("selected_table"),
+        "idea_count": len(feature_engineer_state.get("feature_ideas") or []),
+        "has_final_answer": bool(feature_engineer_state.get("final_answer")),
+    }
+    auto_ml_summary = {
+        "stage": auto_ml_state.get("stage") or "idle",
+        "selected_table": auto_ml_state.get("selected_table"),
+        "target_column": auto_ml_state.get("target_column"),
+        "problem_type": auto_ml_state.get("problem_type") or "",
+        "comparison_rows": len(auto_ml_state.get("comparison_rows") or []),
+        "recommended_model": auto_ml_state.get("recommended_model") or "",
     }
     file_summary = {
         "pending_confirmation": bool(file_manager_state.get("pending_confirmation")),
@@ -5593,13 +5681,6 @@ def _manager_specialist_state_summary(
         "has_last_rows": bool(oracle_state.get("last_result_rows")),
         "awaiting_options": len(oracle_state.get("clarification_options") or []),
     }
-    data_quality_summary = {
-        "stage": data_quality_state.get("stage") or "idle",
-        "table": data_quality_state.get("table"),
-        "selected_columns": len(data_quality_state.get("columns") or []),
-        "has_final_answer": bool(data_quality_state.get("final_answer")),
-        "time_column": data_quality_state.get("time_column"),
-    }
     return json.dumps(
         {
             "manager": {
@@ -5607,10 +5688,11 @@ def _manager_specialist_state_summary(
             },
             "clickhouse": clickhouse_summary,
             "data_analyst": data_analyst_summary,
+            "feature_engineer": feature_engineer_summary,
+            "auto_ml": auto_ml_summary,
             "file_management": file_summary,
             "pdf_creator": pdf_summary,
             "oracle_analyst": oracle_summary,
-            "data_quality_tables": data_quality_summary,
         },
         ensure_ascii=False,
         indent=2,
@@ -5896,10 +5978,11 @@ def _heuristic_manager_delegate(
     manager_state: dict[str, Any],
     clickhouse_state: dict[str, Any],
     data_analyst_state: dict[str, Any],
+    feature_engineer_state: dict[str, Any],
+    auto_ml_state: dict[str, Any],
     file_manager_state: dict[str, Any],
     pdf_creator_state: dict[str, Any],
     oracle_state: dict[str, Any],
-    data_quality_state: dict[str, Any],
 ) -> Optional[tuple[str, str]]:
     normalized = normalize_intent_text(user_message)
     active_delegate = manager_state.get("active_delegate")
@@ -5911,13 +5994,14 @@ def _heuristic_manager_delegate(
         return "clickhouse_query", "Continuing the active ClickHouse clarification flow."
     if active_delegate == "data_analyst" and _data_analyst_state_needs_followup(data_analyst_state):
         return "data_analyst", "Continuing the active Data analyst table-selection flow."
+    if active_delegate == "feature_engineer" and _feature_engineer_state_needs_followup(feature_engineer_state):
+        return "feature_engineer", "Continuing the active Feature Engineer table-selection flow."
+    if active_delegate == "auto_ml" and _auto_ml_state_needs_followup(auto_ml_state):
+        return "auto_ml", "Continuing the active Auto-ML clarification flow."
     if active_delegate == "pdf_creator" and _pdf_creator_state_needs_followup(pdf_creator_state):
         return "pdf_creator", "Continuing the active PDF-creation flow."
     if active_delegate == "oracle_analyst" and _oracle_state_needs_followup(oracle_state):
         return "oracle_analyst", "Continuing the active Oracle table-selection flow."
-    if active_delegate == "data_quality_tables" and _data_quality_state_needs_followup(data_quality_state):
-        return "data_quality_tables", "Continuing the active data-quality setup flow."
-
     if _file_manager_state_needs_followup(file_manager_state) and (
         is_affirmative_response(user_message)
         or is_negative_response(user_message)
@@ -5929,13 +6013,14 @@ def _heuristic_manager_delegate(
         return "clickhouse_query", "The user is continuing a ClickHouse clarification step."
     if _data_analyst_state_needs_followup(data_analyst_state):
         return "data_analyst", "The user is continuing a Data analyst clarification step."
+    if _feature_engineer_state_needs_followup(feature_engineer_state):
+        return "feature_engineer", "The user is continuing a Feature Engineer clarification step."
+    if _auto_ml_state_needs_followup(auto_ml_state):
+        return "auto_ml", "The user is continuing an Auto-ML clarification step."
     if _pdf_creator_state_needs_followup(pdf_creator_state):
         return "pdf_creator", "The user is continuing a PDF export clarification or confirmation."
     if _oracle_state_needs_followup(oracle_state):
         return "oracle_analyst", "The user is continuing an Oracle table-selection step."
-    if _data_quality_state_needs_followup(data_quality_state):
-        return "data_quality_tables", "The user is continuing a data-quality guided step."
-
     if (
         isinstance(pending_pipeline, dict)
         and pending_pipeline.get("kind") == "clickhouse_to_file"
@@ -6112,29 +6197,6 @@ def _heuristic_manager_delegate(
         "fetch first",
         "row_number() over",
     ]
-    data_quality_tokens = [
-        "data quality",
-        "quality score",
-        "profiling",
-        "profile table",
-        "nulls",
-        "missing values",
-        "outliers",
-        "sentinel",
-        "duplicate values",
-        "cardinality",
-        "volumetric",
-        "data drift",
-        "column quality",
-        "qualite des donnees",
-        "qualite de donnees",
-        "profilage",
-        "valeurs nulles",
-        "valeurs manquantes",
-        "valeurs sentinelles",
-        "derive des donnees",
-        "qualite des colonnes",
-    ]
     data_analyst_tokens = [
         "analyze",
         "analysis",
@@ -6179,6 +6241,35 @@ def _heuristic_manager_delegate(
         "derivee",
         "insight",
         "insights",
+    ]
+    feature_engineer_tokens = [
+        "feature engineer",
+        "feature engineering",
+        "engineered feature",
+        "derived feature",
+        "derived variable",
+        "predictive feature",
+        "new feature",
+        "feature creation",
+        "calendar feature",
+        "recency feature",
+    ]
+    auto_ml_tokens = [
+        "auto ml",
+        "automl",
+        "machine learning",
+        "model benchmark",
+        "benchmark models",
+        "compare models",
+        "classifier",
+        "regression model",
+        "random forest",
+        "xgboost",
+        "precision",
+        "recall",
+        "f1 score",
+        "train model",
+        "predictive model",
     ]
     file_action_tokens = [
         "create",
@@ -6253,29 +6344,32 @@ def _heuristic_manager_delegate(
     )
     sql_execution_hit = oracle_hit or clickhouse_hit or generic_sql_hit or business_query_hit
     data_analyst_hit = any(token in normalized for token in data_analyst_tokens)
+    feature_engineer_hit = any(token in normalized for token in feature_engineer_tokens)
+    auto_ml_hit = any(token in normalized for token in auto_ml_tokens)
     pdf_hit = any(token in normalized for token in MANAGER_PDF_KEYWORDS)
-    data_quality_hit = any(token in normalized for token in data_quality_tokens)
     export_pipeline = _extract_clickhouse_file_export_pipeline(user_message)
     pdf_pipeline = _extract_clickhouse_pdf_export_pipeline(user_message)
     clickhouse_default_hit = clickhouse_hit or (sql_execution_hit and not oracle_hit)
 
-    if data_quality_hit and not file_hit:
-        return "data_quality_tables", "The request is explicitly about table profiling or data-quality analysis."
-    if oracle_hit and not data_quality_hit:
+    if oracle_hit:
         return "oracle_analyst", "The request requires Oracle SQL execution or Oracle schema exploration, so Oracle SQL should handle it."
+    if auto_ml_hit and not oracle_hit:
+        return "auto_ml", "The request is explicitly about benchmarking machine-learning models on ClickHouse data."
+    if feature_engineer_hit and not oracle_hit:
+        return "feature_engineer", "The request is explicitly about engineered predictive features on ClickHouse data."
     if export_pipeline and clickhouse_default_hit:
         return "clickhouse_query", "The request needs Clickhouse SQL first and then a file export from the query result."
     if pdf_pipeline and clickhouse_default_hit:
         return "clickhouse_query", "The request needs Clickhouse SQL first and then a PDF export from the query result."
-    if clickhouse_default_hit and data_analyst_hit and not data_quality_hit:
+    if clickhouse_default_hit and data_analyst_hit:
         return "data_analyst", "The request is a complex ClickHouse investigation, so Data analyst should handle it end to end."
-    if pdf_hit and not sql_execution_hit and not data_quality_hit:
+    if pdf_hit and not sql_execution_hit:
         return "pdf_creator", "The request is explicitly about turning content or the latest analysis into a PDF."
-    if file_creation_or_edit_hit and not data_quality_hit:
+    if file_creation_or_edit_hit:
         return "file_management", "The request explicitly asks to create or modify a file, so File management should handle it."
-    if file_hit and not sql_execution_hit and not data_quality_hit:
+    if file_hit and not sql_execution_hit:
         return "file_management", "The request is explicitly about filesystem or spreadsheet actions."
-    if clickhouse_default_hit and not data_quality_hit:
+    if clickhouse_default_hit:
         return "clickhouse_query", "The request requires Clickhouse SQL execution, schema inspection, or charting."
     return None
 
@@ -6286,10 +6380,11 @@ async def analyze_manager_routing(
     manager_state: dict[str, Any],
     clickhouse_state: dict[str, Any],
     data_analyst_state: dict[str, Any],
+    feature_engineer_state: dict[str, Any],
+    auto_ml_state: dict[str, Any],
     file_manager_state: dict[str, Any],
     pdf_creator_state: dict[str, Any],
     oracle_state: dict[str, Any],
-    data_quality_state: dict[str, Any],
     llm_base_url: str,
     llm_model: str,
     llm_provider: str,
@@ -6300,10 +6395,11 @@ async def analyze_manager_routing(
         manager_state,
         clickhouse_state,
         data_analyst_state,
+        feature_engineer_state,
+        auto_ml_state,
         file_manager_state,
         pdf_creator_state,
         oracle_state,
-        data_quality_state,
     )
     if heuristic:
         return {
@@ -6321,15 +6417,16 @@ Available delegates:
 - manager: use this when no specialist tool is needed and the manager can answer directly.
 - clickhouse_query: use this for Clickhouse SQL execution, schema inspection, table selection, metrics, charts, and the first SQL step before a downstream export.
 - data_analyst: use this only for complex multi-step investigations on ClickHouse data when a deeper end-to-end analysis is needed beyond a simple SQL answer.
+- feature_engineer: use this to propose engineered predictive variables from a ClickHouse table and suggest SQL expressions for them.
+- auto_ml: use this to benchmark several machine-learning models on ClickHouse data and compare their performance.
 - file_management: use this for filesystem actions, directories, files, CSV/Excel/Word/Parquet handling, create/edit/move/delete operations.
 - pdf_creator: use this to create a clean, professional PDF export from an analysis, a report, or the latest relevant result in the chat.
 - oracle_analyst: use this for Oracle SQL execution, Oracle database discovery, schema inspection, query validation, and narrative business answers from Oracle data.
-- data_quality_tables: use this for table profiling, null/outlier/sentinel analysis, column health scoring, and volumetric data-quality checks.
 
 If more than one specialist could be relevant, choose the one that should act first.
 Return JSON only with this exact shape:
 {{
-  "delegate": "manager" | "clickhouse_query" | "data_analyst" | "file_management" | "pdf_creator" | "oracle_analyst" | "data_quality_tables",
+  "delegate": "manager" | "clickhouse_query" | "data_analyst" | "feature_engineer" | "auto_ml" | "file_management" | "pdf_creator" | "oracle_analyst",
   "reasoning": "short English explanation",
   "handoff_message": "short English specialist instruction preserving the user's intent"
 }}
@@ -6340,7 +6437,10 @@ Rules:
 - If the request needs SQL execution, delegate to `clickhouse_query` for ClickHouse or `oracle_analyst` for Oracle.
 - If the database is not explicitly Oracle and the task still needs SQL execution, default to `clickhouse_query`.
 - Use `data_analyst` only when the task is a complex ClickHouse investigation that should run several analytical steps autonomously.
+- Use `feature_engineer` when the user wants engineered features, predictive variables, or SQL-ready feature suggestions on ClickHouse data.
+- Use `auto_ml` when the user wants to benchmark, compare, or score machine-learning models on ClickHouse data.
 - Never delegate Oracle work to `data_analyst`.
+- Never delegate Oracle work to `feature_engineer` or `auto_ml`.
 - If the user asks to create, write, save, edit, move, rename, or delete a file or folder, delegate to `file_management`.
 - If the user asks for a PDF export, a report PDF, or a professional PDF document, delegate to `pdf_creator` unless a ClickHouse query must happen first.
 - Keep `handoff_message` concise and actionable.
@@ -6350,7 +6450,7 @@ Current manager state:
 {json.dumps(manager_state, ensure_ascii=False, indent=2)}
 
 Current specialist state summary:
-{_manager_specialist_state_summary(clickhouse_state, data_analyst_state, file_manager_state, pdf_creator_state, oracle_state, data_quality_state, manager_state)}
+{_manager_specialist_state_summary(clickhouse_state, data_analyst_state, feature_engineer_state, auto_ml_state, file_manager_state, pdf_creator_state, oracle_state, manager_state)}
 
 Recent conversation:
 {json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
@@ -6830,6 +6930,136 @@ def _normalize_data_analyst_state(payload: Optional[dict]) -> dict[str, Any]:
 
 def _data_analyst_state_needs_followup(state: dict[str, Any]) -> bool:
     return str(state.get("stage") or "").strip() in {"awaiting_table", "awaiting_row_intent"}
+
+
+def _default_feature_engineer_state() -> dict[str, Any]:
+    return {
+        "stage": "idle",
+        "pending_request": "",
+        "available_tables": [],
+        "selected_table": None,
+        "schema_info": [],
+        "clarification_prompt": "",
+        "clarification_options": [],
+        "feature_ideas": [],
+        "final_answer": "",
+        "last_error": "",
+    }
+
+
+def _normalize_feature_engineer_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_feature_engineer_state()
+    if not isinstance(payload, dict):
+        return state
+    stage = str(payload.get("stage") or "").strip()
+    if stage in {"awaiting_table", "ready"}:
+        state["stage"] = stage
+    state["pending_request"] = str(payload.get("pending_request") or payload.get("pendingRequest") or "").strip()
+    available_tables = payload.get("available_tables") or payload.get("availableTables")
+    if isinstance(available_tables, list):
+        state["available_tables"] = [str(item).strip() for item in available_tables if str(item).strip()]
+    selected_table = payload.get("selected_table") or payload.get("selectedTable")
+    state["selected_table"] = str(selected_table).strip() or None if selected_table is not None else None
+    schema_info = payload.get("schema_info") or payload.get("schemaInfo")
+    if isinstance(schema_info, list):
+        state["schema_info"] = [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "type": str(item.get("type") or "").strip(),
+            }
+            for item in schema_info
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+    state["clarification_prompt"] = str(payload.get("clarification_prompt") or payload.get("clarificationPrompt") or "").strip()
+    clarification_options = payload.get("clarification_options") or payload.get("clarificationOptions")
+    if isinstance(clarification_options, list):
+        state["clarification_options"] = [str(item).strip() for item in clarification_options if str(item).strip()]
+    feature_ideas = payload.get("feature_ideas") or payload.get("featureIdeas")
+    if isinstance(feature_ideas, list):
+        state["feature_ideas"] = [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "source_columns": [str(value).strip() for value in (item.get("source_columns") or item.get("sourceColumns") or []) if str(value).strip()],
+                "rationale": str(item.get("rationale") or "").strip(),
+                "sql_expression": clean_sql_text(str(item.get("sql_expression") or item.get("sqlExpression") or "")),
+                "predictive_value": str(item.get("predictive_value") or item.get("predictiveValue") or "").strip(),
+            }
+            for item in feature_ideas
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+    state["final_answer"] = str(payload.get("final_answer") or payload.get("finalAnswer") or "").strip()
+    state["last_error"] = str(payload.get("last_error") or payload.get("lastError") or "").strip()
+    return state
+
+
+def _feature_engineer_state_needs_followup(state: dict[str, Any]) -> bool:
+    return str(state.get("stage") or "").strip() in {"awaiting_table"}
+
+
+def _default_auto_ml_state() -> dict[str, Any]:
+    return {
+        "stage": "idle",
+        "pending_request": "",
+        "available_tables": [],
+        "selected_table": None,
+        "schema_info": [],
+        "target_column": None,
+        "feature_columns": [],
+        "clarification_prompt": "",
+        "clarification_options": [],
+        "comparison_rows": [],
+        "problem_type": "",
+        "recommended_model": "",
+        "final_answer": "",
+        "last_error": "",
+    }
+
+
+def _normalize_auto_ml_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_auto_ml_state()
+    if not isinstance(payload, dict):
+        return state
+    stage = str(payload.get("stage") or "").strip()
+    if stage in {"awaiting_table", "awaiting_target", "ready"}:
+        state["stage"] = stage
+    state["pending_request"] = str(payload.get("pending_request") or payload.get("pendingRequest") or "").strip()
+    available_tables = payload.get("available_tables") or payload.get("availableTables")
+    if isinstance(available_tables, list):
+        state["available_tables"] = [str(item).strip() for item in available_tables if str(item).strip()]
+    selected_table = payload.get("selected_table") or payload.get("selectedTable")
+    state["selected_table"] = str(selected_table).strip() or None if selected_table is not None else None
+    schema_info = payload.get("schema_info") or payload.get("schemaInfo")
+    if isinstance(schema_info, list):
+        state["schema_info"] = [
+            {
+                "name": str(item.get("name") or "").strip(),
+                "type": str(item.get("type") or "").strip(),
+            }
+            for item in schema_info
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+    target_column = payload.get("target_column") or payload.get("targetColumn")
+    state["target_column"] = str(target_column).strip() or None if target_column is not None else None
+    feature_columns = payload.get("feature_columns") or payload.get("featureColumns")
+    if isinstance(feature_columns, list):
+        state["feature_columns"] = [str(item).strip() for item in feature_columns if str(item).strip()]
+    state["clarification_prompt"] = str(payload.get("clarification_prompt") or payload.get("clarificationPrompt") or "").strip()
+    clarification_options = payload.get("clarification_options") or payload.get("clarificationOptions")
+    if isinstance(clarification_options, list):
+        state["clarification_options"] = [str(item).strip() for item in clarification_options if str(item).strip()]
+    comparison_rows = payload.get("comparison_rows") or payload.get("comparisonRows")
+    if isinstance(comparison_rows, list):
+        state["comparison_rows"] = [row for row in comparison_rows if isinstance(row, dict)]
+    raw_problem_type = str(payload.get("problem_type") or payload.get("problemType") or "").strip().lower()
+    state["problem_type"] = raw_problem_type if raw_problem_type in {"classification", "regression"} else ""
+    state["recommended_model"] = str(payload.get("recommended_model") or payload.get("recommendedModel") or "").strip()
+    state["final_answer"] = str(payload.get("final_answer") or payload.get("finalAnswer") or "").strip()
+    state["last_error"] = str(payload.get("last_error") or payload.get("lastError") or "").strip()
+    return state
+
+
+def _auto_ml_state_needs_followup(state: dict[str, Any]) -> bool:
+    return str(state.get("stage") or "").strip() in {"awaiting_table", "awaiting_target"}
 
 
 def _data_analyst_date_columns(schema: list[dict[str, Any]]) -> list[str]:
@@ -7946,6 +8176,513 @@ def build_data_analyst_response_markdown(
     if sql_section:
         sections.append(sql_section)
     return "\n\n".join(section for section in sections if section.strip())
+
+
+FEATURE_ENGINEER_TABLE_OPTION_LIMIT = 8
+FEATURE_ENGINEER_SAMPLE_ROWS = 120
+AUTO_ML_TABLE_OPTION_LIMIT = 8
+AUTO_ML_TARGET_OPTION_LIMIT = 8
+AUTO_ML_SAMPLE_ROWS = 2500
+AUTO_ML_MAX_FEATURE_COLUMNS = 24
+
+
+def _feature_engineer_schema_brief(schema: list[dict[str, Any]]) -> str:
+    lines = []
+    for column in schema:
+        name = str(column.get("name") or "").strip()
+        if not name:
+            continue
+        column_type = str(column.get("type") or "").strip()
+        category = classify_clickhouse_column_type(column_type)
+        lines.append(f"- {name} ({column_type}, {category})")
+    return "\n".join(lines[:40]) or "- No schema information available."
+
+
+def _records_preview_markdown(rows: list[dict[str, Any]], limit: int = 5) -> str:
+    if not rows:
+        return "No sample rows available."
+    preview_rows = rows[:limit]
+    columns = list(preview_rows[0].keys())[:8]
+    if not columns:
+        return "No sample rows available."
+    header = "| " + " | ".join(columns) + " |"
+    divider = "| " + " | ".join(["---"] * len(columns)) + " |"
+    body = []
+    for row in preview_rows:
+        body.append("| " + " | ".join(_markdown_table_cell(row.get(col)) for col in columns) + " |")
+    return "\n".join([header, divider, *body])
+
+
+async def _fetch_clickhouse_sample_rows(
+    clickhouse: ClickHouseConfig,
+    table_name: str,
+    columns: list[str],
+    row_limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    selected_columns = columns[:AUTO_ML_MAX_FEATURE_COLUMNS]
+    select_sql = ", ".join(quote_clickhouse_identifier(column) for column in selected_columns) if selected_columns else "*"
+    sql = (
+        f"SELECT {select_sql}\n"
+        f"FROM {quote_clickhouse_identifier(table_name)}\n"
+        f"LIMIT {max(1, min(int(row_limit), 10_000))}"
+    )
+    result = await execute_clickhouse_sql(clickhouse, sql, max_result_rows_override=max(1, min(int(row_limit), 10_000)))
+    meta = result.get("meta", []) if isinstance(result.get("meta"), list) else []
+    rows = result.get("data", []) if isinstance(result.get("data"), list) else []
+    normalized_meta = [
+        {
+            "name": str(item.get("name") or "").strip(),
+            "type": str(item.get("type") or "").strip(),
+        }
+        for item in meta
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+    normalized_rows = [row for row in rows if isinstance(row, dict)]
+    return normalized_meta, normalized_rows, sql
+
+
+async def _generate_feature_engineering_ideas(
+    user_request: str,
+    selected_table: str,
+    schema: list[dict[str, Any]],
+    sample_rows: list[dict[str, Any]],
+    conversation_memory: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> list[dict[str, Any]]:
+    prompt = f"""
+You are a senior feature engineering specialist working on ClickHouse data.
+Propose practical predictive features for the selected table.
+
+Rules:
+- Answer ONLY as valid JSON.
+- Return 4 to 8 feature ideas.
+- Each idea must include: name, source_columns, rationale, sql_expression, predictive_value.
+- Prefer features that are realistically implementable in SQL.
+- Use simple date handling when relevant: day of week, month number, weekend flag, recency buckets.
+- Also consider ratio features, lags, frequency/count features, basket features, and anomaly flags when grounded in the schema.
+- Do not invent columns outside the provided schema.
+
+User request:
+{user_request}
+
+Selected table:
+{selected_table}
+
+Schema:
+{_feature_engineer_schema_brief(schema)}
+
+Sample rows:
+{_records_preview_markdown(sample_rows, limit=4)}
+
+Conversation memory:
+{conversation_memory}
+
+Expected JSON shape:
+{{
+  "ideas": [
+    {{
+      "name": "weekday_of_sale",
+      "source_columns": ["sale_date"],
+      "rationale": "Weekday seasonality can help explain sales patterns.",
+      "sql_expression": "toDayOfWeek(sale_date)",
+      "predictive_value": "Captures weekly demand cycles."
+    }}
+  ]
+}}
+""".strip()
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+    )
+    parsed = extract_json_object(raw)
+    ideas = parsed.get("ideas")
+    if not isinstance(ideas, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in ideas:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        sql_expression = clean_sql_text(str(item.get("sql_expression") or item.get("sqlExpression") or ""))
+        if not name or not sql_expression:
+            continue
+        normalized.append(
+            {
+                "name": name,
+                "source_columns": [str(value).strip() for value in (item.get("source_columns") or item.get("sourceColumns") or []) if str(value).strip()],
+                "rationale": str(item.get("rationale") or "").strip(),
+                "sql_expression": sql_expression,
+                "predictive_value": str(item.get("predictive_value") or item.get("predictiveValue") or "").strip(),
+            }
+        )
+    return normalized[:8]
+
+
+def _feature_engineer_markdown(
+    table_name: str,
+    sample_sql: str,
+    ideas: list[dict[str, Any]],
+    summary: str,
+) -> str:
+    lines = [
+        "## Executive Summary",
+        summary.strip() or f"I identified practical engineered features for `{table_name}` based on the available columns.",
+        "",
+        "## Recommended Features",
+    ]
+    if ideas:
+        lines.extend([
+            "| Feature | Source columns | Why it matters | Suggested SQL |",
+            "| --- | --- | --- | --- |",
+        ])
+        for idea in ideas:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _markdown_table_cell(idea.get("name")),
+                        _markdown_table_cell(", ".join(idea.get("source_columns") or [])),
+                        _markdown_table_cell(idea.get("predictive_value") or idea.get("rationale") or ""),
+                        _markdown_table_cell(idea.get("sql_expression") or ""),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("No robust engineered feature could be proposed from the current schema and sample.")
+    lines.extend([
+        "",
+        "## Implementation Notes",
+        "Use the SQL expressions below as starting points, validate them on a sample first, then materialize only the features that improve downstream model quality.",
+        "",
+        "## Executed SQL",
+        f"```sql\n{sample_sql}\n```",
+    ])
+    return "\n".join(lines).strip()
+
+
+def _infer_target_column(user_request: str, schema: list[dict[str, Any]]) -> Optional[str]:
+    normalized = normalize_intent_text(user_request)
+    schema_names = [str(column.get("name") or "").strip() for column in schema if str(column.get("name") or "").strip()]
+    direct = resolve_user_choice(normalized, schema_names)
+    if direct:
+        return direct
+    target_match = re.search(r"(?:predict|forecast|estimate|model|target|label|classifier|regression|predire|prédire|cible)\s+([a-zA-Z0-9_]+)", normalized)
+    if target_match:
+        hinted = target_match.group(1)
+        for column_name in schema_names:
+            if normalize_choice(column_name).lower() == normalize_choice(hinted).lower():
+                return column_name
+    return None
+
+
+def _auto_ml_target_candidates(schema: list[dict[str, Any]]) -> list[str]:
+    preferred = []
+    for column in schema:
+        name = str(column.get("name") or "").strip()
+        if not name:
+            continue
+        category = classify_clickhouse_column_type(str(column.get("type") or ""))
+        if category in {"numeric", "string", "date"}:
+            preferred.append(name)
+    return preferred
+
+
+def _heuristic_feature_engineering_ideas(schema: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ideas: list[dict[str, Any]] = []
+    numeric_columns = [str(column.get("name") or "").strip() for column in schema if classify_clickhouse_column_type(str(column.get("type") or "")) == "numeric"]
+    date_columns = [str(column.get("name") or "").strip() for column in schema if classify_clickhouse_column_type(str(column.get("type") or "")) == "date"]
+    string_columns = [str(column.get("name") or "").strip() for column in schema if classify_clickhouse_column_type(str(column.get("type") or "")) == "string"]
+
+    for column in date_columns[:2]:
+        ideas.append({
+            "name": f"{column}_weekday",
+            "source_columns": [column],
+            "rationale": "Calendar effects often explain cyclic demand or usage patterns.",
+            "sql_expression": f"toDayOfWeek({quote_clickhouse_identifier(column)})",
+            "predictive_value": "Captures weekday seasonality.",
+        })
+        ideas.append({
+            "name": f"{column}_month",
+            "source_columns": [column],
+            "rationale": "Month-level seasonality can surface campaign or seasonal demand shifts.",
+            "sql_expression": f"toMonth({quote_clickhouse_identifier(column)})",
+            "predictive_value": "Captures monthly seasonality.",
+        })
+    if len(numeric_columns) >= 2:
+        left, right = numeric_columns[:2]
+        ideas.append({
+            "name": f"{left}_to_{right}_ratio",
+            "source_columns": [left, right],
+            "rationale": "Ratios often explain relative intensity better than raw levels.",
+            "sql_expression": f"if({quote_clickhouse_identifier(right)} = 0, NULL, {quote_clickhouse_identifier(left)} / {quote_clickhouse_identifier(right)})",
+            "predictive_value": "Captures proportional behaviour between two measures.",
+        })
+    if numeric_columns:
+        column = numeric_columns[0]
+        ideas.append({
+            "name": f"{column}_high_flag",
+            "source_columns": [column],
+            "rationale": "Binary threshold flags can expose heavy-user or high-value patterns.",
+            "sql_expression": f"if({quote_clickhouse_identifier(column)} > 0, 1, 0)",
+            "predictive_value": "Separates low vs high signal records quickly.",
+        })
+    if string_columns:
+        column = string_columns[0]
+        ideas.append({
+            "name": f"{column}_length",
+            "source_columns": [column],
+            "rationale": "Text length can proxy quality, complexity, or customer intent.",
+            "sql_expression": f"lengthUTF8(toString({quote_clickhouse_identifier(column)}))",
+            "predictive_value": "Adds a simple structural signal from text-like fields.",
+        })
+    deduped = []
+    seen = set()
+    for idea in ideas:
+        name = str(idea.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(idea)
+    return deduped[:6]
+
+
+def _normalize_ml_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            if re.fullmatch(r"-?\d+", text):
+                return int(text)
+            if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+                return float(text)
+        except Exception:
+            pass
+        return text
+    return str(value)
+
+
+def _auto_ml_problem_type(target_values: list[Any], target_type: str) -> str:
+    non_null = [value for value in target_values if value is not None]
+    if not non_null:
+        return "classification"
+    unique_count = len({str(value) for value in non_null})
+    if target_type == "numeric" and unique_count > 12:
+        return "regression"
+    if unique_count > 20 and all(isinstance(value, (int, float)) for value in non_null):
+        return "regression"
+    return "classification"
+
+
+def _prepare_automl_dataset(
+    rows: list[dict[str, Any]],
+    schema: list[dict[str, Any]],
+    target_column: str,
+) -> tuple[list[dict[str, Any]], list[Any], list[str], str]:
+    schema_map = {
+        str(column.get("name") or "").strip(): classify_clickhouse_column_type(str(column.get("type") or ""))
+        for column in schema
+        if str(column.get("name") or "").strip()
+    }
+    feature_columns = [
+        name
+        for name in schema_map.keys()
+        if name != target_column
+    ][:AUTO_ML_MAX_FEATURE_COLUMNS]
+    records: list[dict[str, Any]] = []
+    targets: list[Any] = []
+    for row in rows:
+        if target_column not in row:
+            continue
+        normalized_target = _normalize_ml_value(row.get(target_column))
+        if normalized_target is None:
+            continue
+        record: dict[str, Any] = {}
+        for column in feature_columns:
+            value = _normalize_ml_value(row.get(column))
+            category = schema_map.get(column) or "other"
+            if category == "numeric":
+                record[column] = value if isinstance(value, (int, float)) else None
+            else:
+                record[column] = "__missing__" if value is None else str(value)
+        records.append(record)
+        targets.append(normalized_target)
+
+    problem_type = _auto_ml_problem_type(targets, schema_map.get(target_column) or "other")
+    if problem_type == "classification":
+        targets = [str(value) for value in targets]
+    else:
+        targets = [float(value) for value in targets if isinstance(value, (int, float))]
+        records = records[:len(targets)]
+    return records, targets, feature_columns, problem_type
+
+
+def _prepare_vectorized_features(records: list[dict[str, Any]]) -> Any:
+    if not HAVE_SKLEARN:
+        raise RuntimeError("scikit-learn is not installed on this server.")
+    vectorizer = DictVectorizer(sparse=False)
+    matrix = vectorizer.fit_transform(records)
+    imputer = SimpleImputer(strategy="constant", fill_value=0)
+    return imputer.fit_transform(matrix)
+
+
+def _run_automl_benchmark(
+    records: list[dict[str, Any]],
+    targets: list[Any],
+    problem_type: str,
+) -> tuple[list[dict[str, Any]], str]:
+    if not HAVE_SKLEARN:
+        raise RuntimeError("scikit-learn is not installed on this server.")
+    if len(records) < 60 or len(targets) < 60:
+        raise RuntimeError("Auto-ML needs at least 60 usable rows after cleaning to benchmark models reliably.")
+
+    features = _prepare_vectorized_features(records)
+    stratify = targets if problem_type == "classification" and len(set(targets)) > 1 else None
+    X_train, X_test, y_train, y_test = train_test_split(
+        features,
+        targets,
+        test_size=0.25,
+        random_state=42,
+        stratify=stratify,
+    )
+
+    candidate_models: list[tuple[str, Any]] = []
+    if problem_type == "classification":
+        candidate_models = [
+            ("Logistic Regression", LogisticRegression(max_iter=1000)),
+            ("Random Forest", RandomForestClassifier(n_estimators=180, random_state=42)),
+        ]
+        if HAVE_XGBOOST:
+            candidate_models.append(("XGBoost", XGBClassifier(n_estimators=160, max_depth=6, learning_rate=0.08, subsample=0.9, colsample_bytree=0.9, eval_metric="logloss", random_state=42)))
+        else:
+            candidate_models.append(("Gradient Boosting", GradientBoostingClassifier(random_state=42)))
+    else:
+        candidate_models = [
+            ("Linear Regression", LinearRegression()),
+            ("Random Forest", RandomForestRegressor(n_estimators=180, random_state=42)),
+        ]
+        if HAVE_XGBOOST:
+            candidate_models.append(("XGBoost", XGBRegressor(n_estimators=160, max_depth=6, learning_rate=0.08, subsample=0.9, colsample_bytree=0.9, random_state=42)))
+        else:
+            candidate_models.append(("Gradient Boosting", GradientBoostingRegressor(random_state=42)))
+
+    comparison_rows: list[dict[str, Any]] = []
+    for model_name, model in candidate_models:
+        try:
+            model.fit(X_train, y_train)
+            predictions = model.predict(X_test)
+            if problem_type == "classification":
+                row = {
+                    "Model": model_name,
+                    "Accuracy": round(float(accuracy_score(y_test, predictions)), 4),
+                    "Precision": round(float(precision_score(y_test, predictions, average="weighted", zero_division=0)), 4),
+                    "Recall": round(float(recall_score(y_test, predictions, average="weighted", zero_division=0)), 4),
+                    "F1": round(float(f1_score(y_test, predictions, average="weighted", zero_division=0)), 4),
+                }
+            else:
+                row = {
+                    "Model": model_name,
+                    "RMSE": round(float(math.sqrt(mean_squared_error(y_test, predictions))), 4),
+                    "MAE": round(float(mean_absolute_error(y_test, predictions)), 4),
+                    "R2": round(float(r2_score(y_test, predictions)), 4),
+                }
+            comparison_rows.append(row)
+        except Exception as exc:
+            comparison_rows.append({"Model": model_name, "Status": f"Failed: {exc}"})
+
+    scored_rows = [row for row in comparison_rows if any(metric in row for metric in ["Accuracy", "RMSE"])]
+    if not scored_rows:
+        raise RuntimeError("All candidate models failed during training.")
+    if problem_type == "classification":
+        best = max(scored_rows, key=lambda row: (row.get("F1") or 0, row.get("Accuracy") or 0))
+    else:
+        best = max(scored_rows, key=lambda row: (row.get("R2") or -999, -float(row.get("RMSE") or 999999)))
+    return comparison_rows, str(best.get("Model") or "")
+
+
+def _markdown_table_from_rows(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    columns: list[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in columns:
+                columns.append(key)
+    header = "| " + " | ".join(columns) + " |"
+    divider = "| " + " | ".join(["---"] * len(columns)) + " |"
+    body = []
+    for row in rows:
+        body.append("| " + " | ".join(_markdown_table_cell(row.get(column)) for column in columns) + " |")
+    return "\n".join([header, divider, *body])
+
+
+async def _auto_ml_narrative(
+    user_request: str,
+    selected_table: str,
+    target_column: str,
+    problem_type: str,
+    feature_columns: list[str],
+    comparison_rows: list[dict[str, Any]],
+    conversation_memory: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> str:
+    prompt = f"""
+You are presenting an Auto-ML benchmark to a business stakeholder.
+Write a concise but practical English Markdown summary.
+
+Rules:
+- Use the following sections:
+  - `## Executive Summary`
+  - `## Model Comparison`
+  - `## Recommendation`
+- Mention the selected target, the problem type, and the winning model.
+- Explain the decision in functional language.
+- Do not include SQL or code.
+
+User request:
+{user_request}
+
+Selected table:
+{selected_table}
+
+Target column:
+{target_column}
+
+Problem type:
+{problem_type}
+
+Feature columns:
+{json.dumps(feature_columns, ensure_ascii=False)}
+
+Comparison rows:
+{json.dumps(comparison_rows, ensure_ascii=False, indent=2)}
+
+Conversation memory:
+{conversation_memory}
+""".strip()
+    return await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+    )
 
 
 def _default_oracle_analyst_state() -> dict[str, Any]:
@@ -10165,6 +10902,36 @@ class DataAnalystAgentStateModel(BaseModel):
     knowledge_hits: list[dict] = Field(default_factory=list)
 
 
+class FeatureEngineerAgentStateModel(BaseModel):
+    stage: str = "idle"
+    pending_request: str = ""
+    available_tables: list[str] = Field(default_factory=list)
+    selected_table: Optional[str] = None
+    schema_info: list[dict] = Field(default_factory=list)
+    clarification_prompt: str = ""
+    clarification_options: list[str] = Field(default_factory=list)
+    feature_ideas: list[dict] = Field(default_factory=list)
+    final_answer: str = ""
+    last_error: str = ""
+
+
+class AutoMlAgentStateModel(BaseModel):
+    stage: str = "idle"
+    pending_request: str = ""
+    available_tables: list[str] = Field(default_factory=list)
+    selected_table: Optional[str] = None
+    schema_info: list[dict] = Field(default_factory=list)
+    target_column: Optional[str] = None
+    feature_columns: list[str] = Field(default_factory=list)
+    clarification_prompt: str = ""
+    clarification_options: list[str] = Field(default_factory=list)
+    comparison_rows: list[dict] = Field(default_factory=list)
+    problem_type: str = ""
+    recommended_model: str = ""
+    final_answer: str = ""
+    last_error: str = ""
+
+
 class DataQualityAgentRequest(BaseModel):
     message: str
     history: list[dict] = []
@@ -10190,7 +10957,31 @@ class DataAnalystAgentRequest(BaseModel):
     agent_state: DataAnalystAgentStateModel = Field(default_factory=DataAnalystAgentStateModel)
 
 
-class DataQualityMetadataRequest(BaseModel):
+class FeatureEngineerAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    clickhouse: ClickHouseConfig
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
+    agent_state: FeatureEngineerAgentStateModel = Field(default_factory=FeatureEngineerAgentStateModel)
+
+
+class AutoMlAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    clickhouse: ClickHouseConfig
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
+    agent_state: AutoMlAgentStateModel = Field(default_factory=AutoMlAgentStateModel)
+
+
+class ClickHouseGuideMetadataRequest(BaseModel):
     clickhouse: ClickHouseConfig
     table: Optional[str] = None
 
@@ -10219,8 +11010,9 @@ class ManagerAgentRequest(BaseModel):
     file_manager_state: FileManagerAgentStateModel = Field(default_factory=FileManagerAgentStateModel)
     pdf_creator_state: PdfCreatorAgentStateModel = Field(default_factory=PdfCreatorAgentStateModel)
     oracle_analyst_state: OracleAnalystAgentStateModel = Field(default_factory=OracleAnalystAgentStateModel)
-    data_quality_state: DataQualityAgentStateModel = Field(default_factory=DataQualityAgentStateModel)
     data_analyst_state: DataAnalystAgentStateModel = Field(default_factory=DataAnalystAgentStateModel)
+    feature_engineer_state: FeatureEngineerAgentStateModel = Field(default_factory=FeatureEngineerAgentStateModel)
+    auto_ml_state: AutoMlAgentStateModel = Field(default_factory=AutoMlAgentStateModel)
     oracle_connections: list[OracleConnectionConfig] = Field(default_factory=list)
     oracle_analyst_config: OracleAnalystConfigModel = Field(default_factory=OracleAnalystConfigModel)
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
@@ -11475,26 +12267,50 @@ async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
 
 @app.post("/api/data-quality/options")
 async def get_data_quality_options(req: DataQualityMetadataRequest):
-    state = _default_data_quality_state()
-    table_name = str(req.table or "").strip()
-    if table_name:
-        state["table"] = table_name
+    raise HTTPException(status_code=410, detail="Data Quality - Tables has been removed from this application.")
 
+
+@app.post("/api/clickhouse/guide-metadata")
+async def get_clickhouse_guide_metadata(req: ClickHouseGuideMetadataRequest):
     try:
-        state = await data_quality_schema_node(req.clickhouse, state)
+        available_tables = await list_clickhouse_tables(req.clickhouse)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Data-quality metadata loading failed: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"ClickHouse metadata loading failed: {exc}") from exc
+
+    selected_table = str(req.table or "").strip()
+    schema_info: list[dict[str, Any]] = []
+    target_candidates: list[str] = []
+
+    if selected_table:
+        if selected_table not in available_tables:
+            raise HTTPException(status_code=400, detail=f"Unknown ClickHouse table: {selected_table}")
+        try:
+            raw_schema = await describe_clickhouse_table(req.clickhouse, selected_table)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {selected_table}: {exc}") from exc
+
+        schema_info = [
+            {
+                "name": str(column.get("name") or ""),
+                "type": str(column.get("type") or ""),
+                "category": _clickhouse_schema_category(str(column.get("type") or "")),
+            }
+            for column in raw_schema
+            if str(column.get("name") or "").strip()
+        ]
+        target_candidates = _auto_ml_target_candidates(schema_info)
 
     return {
-        "available_tables": state.get("available_tables") or [],
-        "schema_info": state.get("schema_info") or [],
-        "available_columns": state.get("available_columns") or [],
-        "date_columns": state.get("date_columns") or [],
+        "available_tables": available_tables,
+        "schema_info": schema_info,
+        "target_candidates": target_candidates,
     }
 
 
 @app.post("/api/chat/data-quality-agent")
 async def chat_data_quality_agent(req: DataQualityAgentRequest):
+    raise HTTPException(status_code=410, detail="Data Quality - Tables has been removed from this application.")
+
     _emit_log("info", "data_quality", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     normalized_choice = normalize_choice(user_message)
@@ -13096,6 +13912,327 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
     }
 
 
+@app.post("/api/chat/feature-engineer-agent")
+async def chat_feature_engineer_agent(req: FeatureEngineerAgentRequest):
+    _emit_log("info", "feature_engineer", "Received request", {"query": req.message})
+    user_message = (req.message or "").strip()
+    state = _normalize_feature_engineer_state(req.agent_state.model_dump())
+    conversation_memory = _conversation_memory_markdown(
+        req.history,
+        current_message=state.get("pending_request") or user_message,
+        max_steps=CHAT_MEMORY_MAX_STEPS,
+    )
+
+    try:
+        state["available_tables"] = state["available_tables"] or await list_clickhouse_tables(req.clickhouse)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"ClickHouse connection error: {exc}") from exc
+
+    if not state["available_tables"]:
+        raise HTTPException(status_code=400, detail="No tables were found in the configured ClickHouse database.")
+
+    if not user_message:
+        return {
+            "answer": (
+                "## Feature Engineer\n"
+                "Ask for engineered variables on a ClickHouse table and I will propose predictive features, with SQL expressions you can reuse.\n\n"
+                f"- **Database:** `{req.clickhouse.database}`\n"
+                f"- **Current table focus:** `{state.get('selected_table') or 'not selected yet'}`\n"
+                "- **Typical outputs:** calendar features, ratio features, recency features, flags, and other predictive transformations."
+            ),
+            "agent_state": state,
+            "steps": [{"id": "feature-engineer-ready", "title": "Ready for feature ideation", "status": "success", "details": "The agent is ready to inspect a ClickHouse table and suggest engineered features."}],
+        }
+
+    if state.get("stage") == "awaiting_table":
+        selected_table = resolve_user_choice(user_message, state.get("clarification_options") or state["available_tables"])
+        if not selected_table:
+            return {
+                "answer": build_choice_markdown(
+                    "Table Clarification",
+                    state.get("clarification_prompt") or "Which table should I use to propose engineered features?",
+                    state.get("clarification_options") or state["available_tables"][:FEATURE_ENGINEER_TABLE_OPTION_LIMIT],
+                ),
+                "agent_state": state,
+                "steps": [{"id": "feature-engineer-await-table", "title": "Waiting for table selection", "status": "running", "details": "The agent needs one table before it can suggest engineered features."}],
+            }
+        state["selected_table"] = selected_table
+        state["stage"] = "ready"
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        user_message = state.get("pending_request") or user_message
+
+    if not state.get("selected_table"):
+        direct_table = resolve_user_choice(user_message, state["available_tables"])
+        if direct_table:
+            state["selected_table"] = direct_table
+        elif len(state["available_tables"]) == 1:
+            state["selected_table"] = state["available_tables"][0]
+        else:
+            table_analysis = await analyze_clickhouse_tables(
+                user_message,
+                state["available_tables"],
+                conversation_memory,
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+            )
+            matched_selected = match_available_options([table_analysis.get("selected_table") or ""], state["available_tables"])
+            matched_candidates = match_available_options(table_analysis.get("table_candidates") or [], state["available_tables"])
+            if matched_selected and not table_analysis.get("table_choice_required"):
+                state["selected_table"] = matched_selected[0]
+            elif len(matched_candidates) == 1 and not table_analysis.get("table_choice_required"):
+                state["selected_table"] = matched_candidates[0]
+            else:
+                state["stage"] = "awaiting_table"
+                state["pending_request"] = user_message
+                state["clarification_prompt"] = str(table_analysis.get("table_choice_prompt") or "").strip() or "Which table should I use to propose engineered features?"
+                state["clarification_options"] = (matched_candidates or state["available_tables"])[:FEATURE_ENGINEER_TABLE_OPTION_LIMIT]
+                return {
+                    "answer": build_choice_markdown("Table Clarification", state["clarification_prompt"], state["clarification_options"]),
+                    "agent_state": state,
+                    "steps": [{"id": "feature-engineer-route", "title": "Need table confirmation", "status": "running", "details": str(table_analysis.get("reasoning") or "Several tables remain plausible for feature ideation.")}],
+                }
+
+    if not state.get("schema_info"):
+        try:
+            state["schema_info"] = await describe_clickhouse_table(req.clickhouse, str(state["selected_table"]))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {state['selected_table']}: {exc}") from exc
+
+    sample_columns = [str(column.get("name") or "").strip() for column in state["schema_info"] if str(column.get("name") or "").strip()][:18]
+    _, rows, sample_sql = await _fetch_clickhouse_sample_rows(req.clickhouse, str(state["selected_table"]), sample_columns, FEATURE_ENGINEER_SAMPLE_ROWS)
+    _emit_log("sql", "feature_engineer", "Fetched feature-engineering sample", {"table": state["selected_table"], "rows": len(rows)})
+
+    ideas: list[dict[str, Any]] = []
+    try:
+        ideas = await _generate_feature_engineering_ideas(
+            user_message,
+            str(state["selected_table"]),
+            state["schema_info"],
+            rows,
+            conversation_memory,
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+    except Exception:
+        ideas = []
+    if not ideas:
+        ideas = _heuristic_feature_engineering_ideas(state["schema_info"])
+
+    summary = (
+        f"I reviewed the schema and a live sample from `{state['selected_table']}` and identified "
+        f"{len(ideas)} feature idea{'s' if len(ideas) != 1 else ''} that could strengthen predictive modeling."
+    )
+    answer = _feature_engineer_markdown(str(state["selected_table"]), sample_sql, ideas, summary)
+    state["feature_ideas"] = ideas
+    state["final_answer"] = answer
+    state["last_error"] = ""
+    state["pending_request"] = ""
+    state["clarification_prompt"] = ""
+    state["clarification_options"] = []
+    state["stage"] = "ready"
+    return {
+        "answer": answer,
+        "agent_state": state,
+        "steps": [
+            {"id": "feature-engineer-schema", "title": "Inspected schema", "status": "success", "details": f"Loaded {len(state['schema_info'])} columns from `{state['selected_table']}`."},
+            {"id": "feature-engineer-sample", "title": "Profiled sample rows", "status": "success", "details": f"Reviewed {len(rows)} rows to ground the feature suggestions."},
+            {"id": "feature-engineer-ideas", "title": "Generated feature ideas", "status": "success", "details": f"Prepared {len(ideas)} engineered features with SQL expressions."},
+        ],
+    }
+
+
+@app.post("/api/chat/auto-ml-agent")
+async def chat_auto_ml_agent(req: AutoMlAgentRequest):
+    _emit_log("info", "auto_ml", "Received request", {"query": req.message})
+    user_message = (req.message or "").strip()
+    state = _normalize_auto_ml_state(req.agent_state.model_dump())
+    conversation_memory = _conversation_memory_markdown(
+        req.history,
+        current_message=state.get("pending_request") or user_message,
+        max_steps=CHAT_MEMORY_MAX_STEPS,
+    )
+
+    try:
+        state["available_tables"] = state["available_tables"] or await list_clickhouse_tables(req.clickhouse)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"ClickHouse connection error: {exc}") from exc
+
+    if not state["available_tables"]:
+        raise HTTPException(status_code=400, detail="No tables were found in the configured ClickHouse database.")
+    if not HAVE_SKLEARN:
+        raise HTTPException(status_code=400, detail="Auto-ML requires scikit-learn on the server. Install the backend ML dependencies first.")
+
+    if not user_message:
+        return {
+            "answer": (
+                "## Auto-ML\n"
+                "Ask me to benchmark predictive models on a ClickHouse table and I will compare several algorithms on the requested target.\n\n"
+                "- **Model families:** linear/logistic regression, Random Forest, and XGBoost when available.\n"
+                "- **Output:** a Markdown comparison table plus a short recommendation."
+            ),
+            "agent_state": state,
+            "steps": [{"id": "auto-ml-ready", "title": "Ready for model benchmarking", "status": "success", "details": "The agent is ready to train and compare several machine-learning models."}],
+        }
+
+    if state.get("stage") == "awaiting_table":
+        selected_table = resolve_user_choice(user_message, state.get("clarification_options") or state["available_tables"])
+        if not selected_table:
+            return {
+                "answer": build_choice_markdown(
+                    "Table Clarification",
+                    state.get("clarification_prompt") or "Which table should I use for this Auto-ML benchmark?",
+                    state.get("clarification_options") or state["available_tables"][:AUTO_ML_TABLE_OPTION_LIMIT],
+                ),
+                "agent_state": state,
+                "steps": [{"id": "auto-ml-await-table", "title": "Waiting for table selection", "status": "running", "details": "The agent needs one training table before it can benchmark models."}],
+            }
+        state["selected_table"] = selected_table
+        state["stage"] = "ready"
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        user_message = state.get("pending_request") or user_message
+
+    if not state.get("selected_table"):
+        direct_table = resolve_user_choice(user_message, state["available_tables"])
+        if direct_table:
+            state["selected_table"] = direct_table
+        elif len(state["available_tables"]) == 1:
+            state["selected_table"] = state["available_tables"][0]
+        else:
+            table_analysis = await analyze_clickhouse_tables(
+                user_message,
+                state["available_tables"],
+                conversation_memory,
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+            )
+            matched_selected = match_available_options([table_analysis.get("selected_table") or ""], state["available_tables"])
+            matched_candidates = match_available_options(table_analysis.get("table_candidates") or [], state["available_tables"])
+            if matched_selected and not table_analysis.get("table_choice_required"):
+                state["selected_table"] = matched_selected[0]
+            elif len(matched_candidates) == 1 and not table_analysis.get("table_choice_required"):
+                state["selected_table"] = matched_candidates[0]
+            else:
+                state["stage"] = "awaiting_table"
+                state["pending_request"] = user_message
+                state["clarification_prompt"] = str(table_analysis.get("table_choice_prompt") or "").strip() or "Which table should I use for this Auto-ML benchmark?"
+                state["clarification_options"] = (matched_candidates or state["available_tables"])[:AUTO_ML_TABLE_OPTION_LIMIT]
+                return {
+                    "answer": build_choice_markdown("Table Clarification", state["clarification_prompt"], state["clarification_options"]),
+                    "agent_state": state,
+                    "steps": [{"id": "auto-ml-route", "title": "Need table confirmation", "status": "running", "details": str(table_analysis.get("reasoning") or "Several tables remain plausible for the requested model benchmark.")}],
+                }
+
+    if not state.get("schema_info"):
+        try:
+            state["schema_info"] = await describe_clickhouse_table(req.clickhouse, str(state["selected_table"]))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {state['selected_table']}: {exc}") from exc
+
+    if state.get("stage") == "awaiting_target":
+        target_choice = resolve_user_choice(user_message, state.get("clarification_options") or _auto_ml_target_candidates(state["schema_info"]))
+        if not target_choice:
+            return {
+                "answer": build_choice_markdown(
+                    "Target Clarification",
+                    state.get("clarification_prompt") or "Which column should be the prediction target?",
+                    state.get("clarification_options") or _auto_ml_target_candidates(state["schema_info"])[:AUTO_ML_TARGET_OPTION_LIMIT],
+                ),
+                "agent_state": state,
+                "steps": [{"id": "auto-ml-await-target", "title": "Waiting for target selection", "status": "running", "details": "The agent needs the target column before it can benchmark models."}],
+            }
+        state["target_column"] = target_choice
+        state["stage"] = "ready"
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        user_message = state.get("pending_request") or user_message
+
+    if not state.get("target_column"):
+        inferred_target = _infer_target_column(user_message, state["schema_info"])
+        if inferred_target:
+            state["target_column"] = inferred_target
+        else:
+            candidates = _auto_ml_target_candidates(state["schema_info"])[:AUTO_ML_TARGET_OPTION_LIMIT]
+            if len(candidates) == 1:
+                state["target_column"] = candidates[0]
+            else:
+                state["stage"] = "awaiting_target"
+                state["pending_request"] = user_message
+                state["clarification_prompt"] = "Which column should be the prediction target for the Auto-ML benchmark?"
+                state["clarification_options"] = candidates
+                return {
+                    "answer": build_choice_markdown("Target Clarification", state["clarification_prompt"], state["clarification_options"]),
+                    "agent_state": state,
+                    "steps": [{"id": "auto-ml-target", "title": "Need target confirmation", "status": "running", "details": "The benchmark needs one target column to evaluate candidate models."}],
+                }
+
+    sample_columns = [str(column.get("name") or "").strip() for column in state["schema_info"] if str(column.get("name") or "").strip()]
+    _, rows, sample_sql = await _fetch_clickhouse_sample_rows(req.clickhouse, str(state["selected_table"]), sample_columns, AUTO_ML_SAMPLE_ROWS)
+    _emit_log("sql", "auto_ml", "Fetched training sample", {"table": state["selected_table"], "rows": len(rows)})
+    records, targets, feature_columns, problem_type = _prepare_automl_dataset(rows, state["schema_info"], str(state["target_column"]))
+    comparison_rows, recommended_model = _run_automl_benchmark(records, targets, problem_type)
+
+    try:
+        narrative = await _auto_ml_narrative(
+            user_message,
+            str(state["selected_table"]),
+            str(state["target_column"]),
+            problem_type,
+            feature_columns,
+            comparison_rows,
+            conversation_memory,
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+    except Exception:
+        narrative = (
+            "## Executive Summary\n"
+            f"I benchmarked several candidate models on `{state['selected_table']}` to predict `{state['target_column']}`.\n\n"
+            "## Model Comparison\n"
+            f"The strongest performer was **{recommended_model}** on the sampled dataset.\n\n"
+            "## Recommendation\n"
+            "Use the leading model as the baseline, then iterate on feature engineering and hold-out validation before production deployment."
+        )
+
+    answer = "\n\n".join(
+        [
+            narrative.strip(),
+            "## Comparison Table",
+            _markdown_table_from_rows(comparison_rows),
+            "## Executed SQL",
+            f"```sql\n{sample_sql}\n```",
+        ]
+    ).strip()
+    state["feature_columns"] = feature_columns
+    state["comparison_rows"] = comparison_rows
+    state["problem_type"] = problem_type
+    state["recommended_model"] = recommended_model
+    state["final_answer"] = answer
+    state["last_error"] = ""
+    state["pending_request"] = ""
+    state["clarification_prompt"] = ""
+    state["clarification_options"] = []
+    state["stage"] = "ready"
+    return {
+        "answer": answer,
+        "agent_state": state,
+        "steps": [
+            {"id": "auto-ml-schema", "title": "Inspected schema", "status": "success", "details": f"Loaded {len(state['schema_info'])} columns from `{state['selected_table']}`."},
+            {"id": "auto-ml-dataset", "title": "Prepared training dataset", "status": "success", "details": f"Built a {problem_type} dataset with {len(records)} rows and {len(feature_columns)} feature columns."},
+            {"id": "auto-ml-benchmark", "title": "Benchmarked candidate models", "status": "success", "details": f"Compared {len(comparison_rows)} candidate models and recommended `{recommended_model}`."},
+        ],
+    }
+
+
 @app.post("/api/chat/manager-agent")
 async def chat_manager_agent(req: ManagerAgentRequest):
     start_t = _time.time()
@@ -13105,14 +14242,27 @@ async def chat_manager_agent(req: ManagerAgentRequest):
 
     clickhouse_state = dump_clickhouse_agent_state(req.clickhouse_state)
     data_analyst_state = _normalize_data_analyst_state(req.data_analyst_state.model_dump())
+    feature_engineer_state = _normalize_feature_engineer_state(req.feature_engineer_state.model_dump())
+    auto_ml_state = _normalize_auto_ml_state(req.auto_ml_state.model_dump())
     file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
     pdf_creator_state = _normalize_pdf_creator_state(req.pdf_creator_state.model_dump())
     oracle_analyst_state = _normalize_oracle_analyst_state(req.oracle_analyst_state.model_dump())
-    data_quality_state = _normalize_data_quality_state(req.data_quality_state.model_dump())
     file_manager_config = _normalize_file_manager_config(req.file_manager_config.model_dump())
     oracle_analyst_config = _normalize_oracle_analyst_config(req.oracle_analyst_config.model_dump())
     oracle_connections = req.oracle_connections or [OracleConnectionConfig(**DEFAULT_APP_CONFIG["oracleConnections"][0])]
     pending_pipeline = manager_state.get("pending_pipeline")
+
+    def _manager_agent_state_payload() -> dict[str, Any]:
+        return {
+            "manager": manager_state,
+            "clickhouse": clickhouse_state,
+            "dataAnalyst": data_analyst_state,
+            "featureEngineer": feature_engineer_state,
+            "autoMl": auto_ml_state,
+            "fileManager": file_manager_state,
+            "pdfCreator": pdf_creator_state,
+            "oracleAnalyst": oracle_analyst_state,
+        }
 
     if not user_message:
         manager_state["active_delegate"] = None
@@ -13120,17 +14270,9 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "answer": (
                 "## Agent Manager\n"
                 "Describe the outcome you want, and I will either answer directly or route the task "
-                "to Clickhouse SQL, Data analyst, File management, PDF creator, Oracle SQL, or Data quality - Tables when a specialist is needed."
+                "to Clickhouse SQL, Data Analyst, Feature Engineer, Auto-ML, File management, PDF creator, or Oracle SQL when a specialist is needed."
             ),
-            "agent_state": {
-                "manager": manager_state,
-                "clickhouse": clickhouse_state,
-                "dataAnalyst": data_analyst_state,
-                "fileManager": file_manager_state,
-                "pdfCreator": pdf_creator_state,
-                "oracleAnalyst": oracle_analyst_state,
-                "dataQuality": data_quality_state,
-            },
+            "agent_state": _manager_agent_state_payload(),
             "steps": [
                 {
                     "id": "manager-ready",
@@ -13171,6 +14313,34 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                 llm_provider=req.llm_provider,
                 max_steps=DATA_ANALYST_DEFAULT_MAX_STEPS,
                 agent_state=DataAnalystAgentStateModel(**data_analyst_state),
+            )
+        )
+
+    async def _delegate_feature_engineer(message: str) -> dict[str, Any]:
+        return await chat_feature_engineer_agent(
+            FeatureEngineerAgentRequest(
+                message=message,
+                history=req.history,
+                clickhouse=req.clickhouse,
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_api_key=req.llm_api_key,
+                llm_provider=req.llm_provider,
+                agent_state=FeatureEngineerAgentStateModel(**feature_engineer_state),
+            )
+        )
+
+    async def _delegate_auto_ml(message: str) -> dict[str, Any]:
+        return await chat_auto_ml_agent(
+            AutoMlAgentRequest(
+                message=message,
+                history=req.history,
+                clickhouse=req.clickhouse,
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_api_key=req.llm_api_key,
+                llm_provider=req.llm_provider,
+                agent_state=AutoMlAgentStateModel(**auto_ml_state),
             )
         )
 
@@ -13224,15 +14394,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             manager_state["active_delegate"] = None
             return {
                 "answer": "## Agent Manager\nThe pending file export was cancelled.",
-                "agent_state": {
-                    "manager": manager_state,
-                    "clickhouse": clickhouse_state,
-                    "dataAnalyst": data_analyst_state,
-                    "fileManager": file_manager_state,
-                    "pdfCreator": pdf_creator_state,
-                    "oracleAnalyst": oracle_analyst_state,
-                    "dataQuality": data_quality_state,
-                },
+                "agent_state": _manager_agent_state_payload(),
                 "steps": [
                     {
                         "id": "manager-export-cancelled",
@@ -13249,15 +14411,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             manager_state["active_delegate"] = None
             return {
                 "answer": _manager_export_details_prompt(pending_pipeline),
-                "agent_state": {
-                    "manager": manager_state,
-                    "clickhouse": clickhouse_state,
-                    "dataAnalyst": data_analyst_state,
-                    "fileManager": file_manager_state,
-                    "pdfCreator": pdf_creator_state,
-                    "oracleAnalyst": oracle_analyst_state,
-                    "dataQuality": data_quality_state,
-                },
+                "agent_state": _manager_agent_state_payload(),
                 "steps": [
                     {
                         "id": "manager-export-details",
@@ -13284,10 +14438,11 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             manager_state,
             clickhouse_state,
             data_analyst_state,
+            feature_engineer_state,
+            auto_ml_state,
             file_manager_state,
             pdf_creator_state,
             oracle_analyst_state,
-            data_quality_state,
             req.llm_base_url,
             req.llm_model,
             req.llm_provider,
@@ -13338,15 +14493,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
         )
         return {
             "answer": answer,
-            "agent_state": {
-                "manager": manager_state,
-                "clickhouse": clickhouse_state,
-                "dataAnalyst": data_analyst_state,
-                "fileManager": file_manager_state,
-                "pdfCreator": pdf_creator_state,
-                "oracleAnalyst": oracle_analyst_state,
-                "dataQuality": data_quality_state,
-            },
+            "agent_state": _manager_agent_state_payload(),
             "steps": base_steps + [
                 {
                     "id": "manager-direct",
@@ -13389,6 +14536,18 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             manager_state["active_delegate"] = (
                 "data_analyst" if _data_analyst_state_needs_followup(data_analyst_state) else None
             )
+        elif delegate == "feature_engineer":
+            delegated = await _delegate_feature_engineer(routing["handoff_message"])
+            feature_engineer_state = _normalize_feature_engineer_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "feature_engineer" if _feature_engineer_state_needs_followup(feature_engineer_state) else None
+            )
+        elif delegate == "auto_ml":
+            delegated = await _delegate_auto_ml(routing["handoff_message"])
+            auto_ml_state = _normalize_auto_ml_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "auto_ml" if _auto_ml_state_needs_followup(auto_ml_state) else None
+            )
         elif delegate == "file_management":
             delegated = await _delegate_file_manager(routing["handoff_message"])
             file_manager_state = _normalize_file_manager_state(delegated.get("agent_state"))
@@ -13410,23 +14569,6 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                 "oracle_analyst" if _oracle_state_needs_followup(oracle_analyst_state) else None
             )
             manager_state["pending_pipeline"] = None
-        elif delegate == "data_quality_tables":
-            delegated = await chat_data_quality_agent(
-                DataQualityAgentRequest(
-                    message=routing["handoff_message"],
-                    history=req.history,
-                    clickhouse=req.clickhouse,
-                    llm_base_url=req.llm_base_url,
-                    llm_model=req.llm_model,
-                    llm_api_key=req.llm_api_key,
-                    llm_provider=req.llm_provider,
-                    agent_state=DataQualityAgentStateModel(**data_quality_state),
-                )
-            )
-            data_quality_state = _normalize_data_quality_state(delegated.get("agent_state"))
-            manager_state["active_delegate"] = (
-                "data_quality_tables" if _data_quality_state_needs_followup(data_quality_state) else None
-            )
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported manager delegate: {delegate}")
     except HTTPException as exc:
@@ -13483,15 +14625,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     ),
                     "actions": delegated.get("actions"),
                     "chart": delegated.get("chart"),
-                    "agent_state": {
-                        "manager": manager_state,
-                        "clickhouse": clickhouse_state,
-                        "dataAnalyst": data_analyst_state,
-                        "fileManager": file_manager_state,
-                        "pdfCreator": pdf_creator_state,
-                        "oracleAnalyst": oracle_analyst_state,
-                        "dataQuality": data_quality_state,
-                    },
+                    "agent_state": _manager_agent_state_payload(),
                     "steps": manager_steps + specialist_steps,
                 }
 
@@ -13524,15 +14658,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     ),
                     "actions": chained.get("actions") or delegated.get("actions"),
                     "chart": delegated.get("chart") or chained.get("chart"),
-                    "agent_state": {
-                        "manager": manager_state,
-                        "clickhouse": clickhouse_state,
-                        "dataAnalyst": data_analyst_state,
-                        "fileManager": file_manager_state,
-                        "pdfCreator": pdf_creator_state,
-                        "oracleAnalyst": oracle_analyst_state,
-                        "dataQuality": data_quality_state,
-                    },
+                    "agent_state": _manager_agent_state_payload(),
                     "steps": manager_steps + specialist_steps + chained_steps,
                 }
             except HTTPException as exc:
@@ -13554,15 +14680,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     ),
                     "actions": delegated.get("actions"),
                     "chart": delegated.get("chart"),
-                    "agent_state": {
-                        "manager": manager_state,
-                        "clickhouse": clickhouse_state,
-                        "dataAnalyst": data_analyst_state,
-                        "fileManager": file_manager_state,
-                        "pdfCreator": pdf_creator_state,
-                        "oracleAnalyst": oracle_analyst_state,
-                        "dataQuality": data_quality_state,
-                    },
+                    "agent_state": _manager_agent_state_payload(),
                     "steps": manager_steps + specialist_steps,
                 }
 
@@ -13599,15 +14717,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     ),
                     "actions": chained.get("actions") or delegated.get("actions"),
                     "chart": delegated.get("chart") or chained.get("chart"),
-                    "agent_state": {
-                        "manager": manager_state,
-                        "clickhouse": clickhouse_state,
-                        "dataAnalyst": data_analyst_state,
-                        "fileManager": file_manager_state,
-                        "pdfCreator": pdf_creator_state,
-                        "oracleAnalyst": oracle_analyst_state,
-                        "dataQuality": data_quality_state,
-                    },
+                    "agent_state": _manager_agent_state_payload(),
                     "steps": manager_steps + specialist_steps + chained_steps,
                 }
             except HTTPException as exc:
@@ -13629,15 +14739,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     ),
                     "actions": delegated.get("actions"),
                     "chart": delegated.get("chart"),
-                    "agent_state": {
-                        "manager": manager_state,
-                        "clickhouse": clickhouse_state,
-                        "dataAnalyst": data_analyst_state,
-                        "fileManager": file_manager_state,
-                        "pdfCreator": pdf_creator_state,
-                        "oracleAnalyst": oracle_analyst_state,
-                        "dataQuality": data_quality_state,
-                    },
+                    "agent_state": _manager_agent_state_payload(),
                     "steps": manager_steps + specialist_steps,
                 }
 
@@ -13645,15 +14747,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
         "answer": delegated.get("answer") or "## Answer\nThe delegated agent completed its turn.",
         "actions": delegated.get("actions"),
         "chart": delegated.get("chart"),
-        "agent_state": {
-            "manager": manager_state,
-            "clickhouse": clickhouse_state,
-            "dataAnalyst": data_analyst_state,
-            "fileManager": file_manager_state,
-            "pdfCreator": pdf_creator_state,
-            "oracleAnalyst": oracle_analyst_state,
-            "dataQuality": data_quality_state,
-        },
+        "agent_state": _manager_agent_state_payload(),
         "steps": manager_steps + specialist_steps,
     }
 
@@ -14070,6 +15164,51 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     if state.stage == "ready" and user_message and not explicit_table_switch:
         state.pending_request = user_message
         reset_clickhouse_query_resolution(state)
+
+    if is_clickhouse_table_list_request(state.pending_request or user_message):
+        table_rows = [
+            {
+                "Table": table_name,
+                "Database": req.clickhouse.database,
+            }
+            for table_name in state.available_tables
+        ]
+        tables_sql = (
+            "SELECT name\n"
+            "FROM system.tables\n"
+            f"WHERE database = {quote_clickhouse_literal(req.clickhouse.database)}\n"
+            "ORDER BY name"
+        )
+        answer = build_clickhouse_response_markdown(
+            (
+                f"Here is the current table inventory for **{req.clickhouse.database}**.\n\n"
+                f"{build_clickhouse_markdown_table(table_rows, headers=['Table', 'Database'], max_rows=500)}"
+            ),
+            [tables_sql],
+        )
+        state.last_sql = tables_sql
+        state.last_result_meta = [
+            {"name": "Table", "type": "String"},
+            {"name": "Database", "type": "String"},
+        ]
+        state.last_result_rows = table_rows
+        state.pending_request = ""
+        reset_clickhouse_clarification(state)
+        reset_clickhouse_chart_state(state)
+        state.stage = "ready"
+        return {
+            "answer": answer,
+            "agent_state": dump_clickhouse_agent_state(state),
+            "sql": tables_sql,
+            "steps": [
+                {
+                    "id": "ch-list-tables",
+                    "title": "Listed available tables",
+                    "status": "success",
+                    "details": f"Returned {len(table_rows)} table(s) from `{req.clickhouse.database}` as a Markdown table.",
+                }
+            ],
+        }
 
     if not state.selected_table:
         selected_table = resolve_user_choice(user_message, state.available_tables)

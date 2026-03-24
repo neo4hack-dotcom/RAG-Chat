@@ -106,17 +106,6 @@ const AGENT_INTRO_CARD_CONFIG: Record<string, {
     bodyClass: "text-slate-700 dark:text-slate-200",
     subtleClass: "text-orange-700 dark:text-orange-300",
   },
-  data_quality_tables: {
-    marker: "<!-- agent-intro:data_quality_tables -->",
-    title: "Data Quality - Tables Agent",
-    icon: BarChart3,
-    containerClass: "border border-fuchsia-200 bg-white/98 shadow-[0_18px_48px_rgba(217,70,239,0.08)] dark:border-fuchsia-800/70 dark:bg-slate-950/92",
-    iconWrapClass: "bg-fuchsia-50 ring-1 ring-fuchsia-200 dark:bg-fuchsia-900/25 dark:ring-fuchsia-800/80",
-    iconClass: "text-fuchsia-600 dark:text-fuchsia-300",
-    titleClass: "text-slate-950 dark:text-white",
-    bodyClass: "text-slate-700 dark:text-slate-200",
-    subtleClass: "text-fuchsia-700 dark:text-fuchsia-300",
-  },
 };
 
 function getAgentIntroCardData(content: string) {

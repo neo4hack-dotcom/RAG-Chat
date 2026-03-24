@@ -1830,7 +1830,7 @@ export function SettingsModal({
                   <h3 className="text-sm font-semibold text-cyan-900 dark:text-cyan-200">ClickHouse SQL</h3>
                 </div>
                 <p className="text-xs text-cyan-800/90 dark:text-cyan-300/90 leading-relaxed">
-                  Configure the ClickHouse connection used by ClickHouse SQL, Data Analyst, Data Quality, and any Manager workflow that needs ClickHouse queries. All existing tests, safety limits, and table previews stay available here.
+                  Configure the ClickHouse connection used by ClickHouse SQL, Data Analyst, Feature Engineer, Auto-ML, and any Manager workflow that needs ClickHouse queries. All existing tests, safety limits, and table previews stay available here.
                 </p>
               </div>
 
