@@ -2487,6 +2487,7 @@ export function ChatInterface({
           icon: Star,
           iconWrapClass: 'bg-amber-50 text-amber-600 ring-1 ring-amber-200 dark:bg-amber-900/25 dark:text-amber-300 dark:ring-amber-800/70',
           eyebrowClass: 'text-amber-700 dark:text-amber-300',
+          buttonClass: 'border-amber-400/60 bg-amber-500 text-white shadow-[0_18px_40px_rgba(245,158,11,0.28)] hover:bg-amber-400 dark:border-amber-300/20 dark:bg-amber-500 dark:hover:bg-amber-400',
         }
       : agentRole === 'clickhouse_query'
         ? {
@@ -2495,6 +2496,7 @@ export function ChatInterface({
             icon: Database,
             iconWrapClass: 'bg-cyan-50 text-cyan-600 ring-1 ring-cyan-200 dark:bg-cyan-900/25 dark:text-cyan-300 dark:ring-cyan-800/70',
             eyebrowClass: 'text-cyan-700 dark:text-cyan-300',
+            buttonClass: 'border-cyan-400/60 bg-cyan-500 text-white shadow-[0_18px_40px_rgba(6,182,212,0.28)] hover:bg-cyan-400 dark:border-cyan-300/20 dark:bg-cyan-500 dark:hover:bg-cyan-400',
           }
         : agentRole === 'data_analyst'
           ? {
@@ -2503,6 +2505,7 @@ export function ChatInterface({
               icon: Cpu,
               iconWrapClass: 'bg-violet-50 text-violet-600 ring-1 ring-violet-200 dark:bg-violet-900/25 dark:text-violet-300 dark:ring-violet-800/70',
               eyebrowClass: 'text-violet-700 dark:text-violet-300',
+              buttonClass: 'border-violet-400/60 bg-violet-500 text-white shadow-[0_18px_40px_rgba(139,92,246,0.28)] hover:bg-violet-400 dark:border-violet-300/20 dark:bg-violet-500 dark:hover:bg-violet-400',
             }
           : agentRole === 'file_management'
             ? {
@@ -2511,6 +2514,7 @@ export function ChatInterface({
                 icon: FolderOpen,
                 iconWrapClass: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200 dark:bg-emerald-900/25 dark:text-emerald-300 dark:ring-emerald-800/70',
                 eyebrowClass: 'text-emerald-700 dark:text-emerald-300',
+                buttonClass: 'border-emerald-400/60 bg-emerald-500 text-white shadow-[0_18px_40px_rgba(16,185,129,0.28)] hover:bg-emerald-400 dark:border-emerald-300/20 dark:bg-emerald-500 dark:hover:bg-emerald-400',
               }
             : agentRole === 'pdf_creator'
               ? {
@@ -2519,6 +2523,7 @@ export function ChatInterface({
                   icon: File,
                   iconWrapClass: 'bg-slate-100 text-slate-700 ring-1 ring-slate-200 dark:bg-slate-800/70 dark:text-slate-200 dark:ring-slate-700/70',
                   eyebrowClass: 'text-slate-600 dark:text-slate-300',
+                  buttonClass: 'border-slate-400/60 bg-slate-700 text-white shadow-[0_18px_40px_rgba(51,65,85,0.28)] hover:bg-slate-600 dark:border-slate-300/20 dark:bg-slate-700 dark:hover:bg-slate-600',
                 }
               : agentRole === 'oracle_analyst'
                 ? {
@@ -2527,6 +2532,7 @@ export function ChatInterface({
                     icon: Database,
                     iconWrapClass: 'bg-orange-50 text-orange-600 ring-1 ring-orange-200 dark:bg-orange-900/25 dark:text-orange-300 dark:ring-orange-800/70',
                     eyebrowClass: 'text-orange-700 dark:text-orange-300',
+                    buttonClass: 'border-orange-400/60 bg-orange-500 text-white shadow-[0_18px_40px_rgba(249,115,22,0.28)] hover:bg-orange-400 dark:border-orange-300/20 dark:bg-orange-500 dark:hover:bg-orange-400',
                   }
                 : {
                     eyebrow: 'Agent',
@@ -2534,6 +2540,7 @@ export function ChatInterface({
                     icon: BarChart3,
                     iconWrapClass: 'bg-fuchsia-50 text-fuchsia-600 ring-1 ring-fuchsia-200 dark:bg-fuchsia-900/25 dark:text-fuchsia-300 dark:ring-fuchsia-800/70',
                     eyebrowClass: 'text-fuchsia-700 dark:text-fuchsia-300',
+                    buttonClass: 'border-fuchsia-400/60 bg-fuchsia-500 text-white shadow-[0_18px_40px_rgba(217,70,239,0.28)] hover:bg-fuchsia-400 dark:border-fuchsia-300/20 dark:bg-fuchsia-500 dark:hover:bg-fuchsia-400',
                   }
     : workflow === 'MCP'
       ? {
@@ -2542,14 +2549,16 @@ export function ChatInterface({
           icon: Network,
           iconWrapClass: 'bg-teal-50 text-teal-600 ring-1 ring-teal-200 dark:bg-teal-900/25 dark:text-teal-300 dark:ring-teal-800/70',
           eyebrowClass: 'text-teal-700 dark:text-teal-300',
+          buttonClass: 'border-teal-400/60 bg-teal-500 text-white shadow-[0_18px_40px_rgba(20,184,166,0.28)] hover:bg-teal-400 dark:border-teal-300/20 dark:bg-teal-500 dark:hover:bg-teal-400',
         }
       : workflow === 'RAG'
         ? {
             eyebrow: 'Mode',
             label: 'RAG Knowledge',
             icon: Database,
-            iconWrapClass: 'bg-blue-50 text-blue-600 ring-1 ring-blue-200 dark:bg-blue-900/25 dark:text-blue-300 dark:ring-blue-800/70',
-            eyebrowClass: 'text-blue-700 dark:text-blue-300',
+            iconWrapClass: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200 dark:bg-emerald-900/25 dark:text-emerald-300 dark:ring-emerald-800/70',
+            eyebrowClass: 'text-emerald-700 dark:text-emerald-300',
+            buttonClass: 'border-emerald-400/60 bg-emerald-500 text-white shadow-[0_18px_40px_rgba(16,185,129,0.28)] hover:bg-emerald-400 dark:border-emerald-300/20 dark:bg-emerald-500 dark:hover:bg-emerald-400',
           }
         : workflow === 'CREWAI'
           ? {
@@ -2558,6 +2567,7 @@ export function ChatInterface({
               icon: CalendarDays,
               iconWrapClass: 'bg-sky-50 text-sky-600 ring-1 ring-sky-200 dark:bg-sky-900/25 dark:text-sky-300 dark:ring-sky-800/70',
               eyebrowClass: 'text-sky-700 dark:text-sky-300',
+              buttonClass: 'border-sky-400/60 bg-sky-500 text-white shadow-[0_18px_40px_rgba(14,165,233,0.28)] hover:bg-sky-400 dark:border-sky-300/20 dark:bg-sky-500 dark:hover:bg-sky-400',
             }
           : {
               eyebrow: 'Mode',
@@ -2565,6 +2575,7 @@ export function ChatInterface({
               icon: Cpu,
               iconWrapClass: 'bg-blue-50 text-blue-600 ring-1 ring-blue-200 dark:bg-blue-900/25 dark:text-blue-300 dark:ring-blue-800/70',
               eyebrowClass: 'text-blue-700 dark:text-blue-300',
+              buttonClass: 'border-blue-400/60 bg-blue-500 text-white shadow-[0_18px_40px_rgba(59,130,246,0.28)] hover:bg-blue-400 dark:border-blue-300/20 dark:bg-blue-500 dark:hover:bg-blue-400',
             };
   const floatingUtilityButtonClass = "group flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-white/65 text-gray-800 shadow-[0_20px_50px_rgba(15,23,42,0.18)] backdrop-blur-2xl transition-all duration-300 hover:scale-[1.02] hover:bg-white/80 dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/55";
   const formattedSystemPrompt = withBeautifulResponsePrompt(config.systemPrompt);
@@ -3311,12 +3322,12 @@ export function ChatInterface({
               setIsThinkingPanelOpen(false);
               setIsToolsIslandOpen(true);
             }}
-            className={`${floatingUtilityButtonClass} ${activeContextBadge.iconWrapClass}`}
+            className={`${floatingUtilityButtonClass} ${activeContextBadge.buttonClass}`}
             title={activeContextBadge.label}
           >
             <div className="flex flex-col items-center gap-0.5">
               <ActiveContextIcon className="h-4.5 w-4.5" />
-              <span className={`text-[9px] font-semibold tracking-[0.12em] ${activeContextBadge.eyebrowClass}`}>
+              <span className="text-[9px] font-semibold tracking-[0.12em] text-white/90">
                 {activeContextShortLabel}
               </span>
             </div>

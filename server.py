@@ -314,6 +314,7 @@ DATA_ANALYST_MAX_RESULT_ROWS = 2000
 DATA_ANALYST_RESULT_PREVIEW_ROWS = 10
 DATA_ANALYST_TABLE_OPTION_LIMIT = 8
 DATA_ANALYST_MAX_KNOWLEDGE_RESULTS = 4
+DATA_ANALYST_REVIEW_INTERVAL = 1
 DATA_ANALYST_FORBIDDEN_DATE_FUNCTIONS = (
     "tostartofmonth",
     "tostartofweek",
@@ -1287,6 +1288,11 @@ def is_clickhouse_sample_rows_request(user_message: str) -> bool:
     if not normalized:
         return False
 
+    if "[resolved intent: row count]" in normalized:
+        return False
+    if "[resolved intent: sample rows]" in normalized:
+        return True
+
     row_tokens = [
         " rows", " row", " lignes", " ligne", "sample", "preview",
         "first rows", "first row", "top rows", "top row",
@@ -1309,6 +1315,11 @@ def is_clickhouse_row_count_request(user_message: str) -> bool:
     normalized = normalize_intent_text(user_message)
     if not normalized:
         return False
+
+    if "[resolved intent: sample rows]" in normalized:
+        return False
+    if "[resolved intent: row count]" in normalized:
+        return True
 
     direct_patterns = [
         "number of rows",
@@ -1341,6 +1352,9 @@ def is_clickhouse_row_count_request(user_message: str) -> bool:
 def is_clickhouse_row_request_ambiguous(user_message: str) -> bool:
     normalized = normalize_intent_text(user_message)
     if not normalized:
+        return False
+
+    if "[resolved intent: row count]" in normalized or "[resolved intent: sample rows]" in normalized:
         return False
 
     has_row_word = any(
@@ -3493,6 +3507,8 @@ def list_directory_tool(path: str = ".", recursive: bool = False, base_path: str
         if len(entries) >= FILE_TABULAR_PREVIEW_ROWS:
             break
 
+    entries.sort(key=lambda entry: (entry["type"] != "dir", entry["name"].lower(), entry["path"].lower()))
+
     preview_lines = [
         f"- `{Path(entry['path']).name}{'/' if entry['type'] == 'dir' else ''}` · {entry['type']} · {entry['size']} bytes"
         for entry in entries
@@ -3562,6 +3578,8 @@ def search_files_tool(path: str = ".", query: str = "", recursive: bool = True, 
                     "matchKind": match_kind,
                 }
             )
+
+    matches.sort(key=lambda item: (item["type"] != "dir", item["relativePath"].lower(), item["matchKind"]))
 
     preview = "\n".join(
         f"- `{item['relativePath']}` · {item['type']} · matched by {item['matchKind']}"
@@ -6623,6 +6641,10 @@ def _default_data_analyst_state() -> dict[str, Any]:
         "table_schema": [],
         "clarification_prompt": "",
         "clarification_options": [],
+        "analysis_goal": "",
+        "analysis_plan": [],
+        "success_criteria": [],
+        "latest_review": "",
         "last_sqls": [],
         "last_result_meta": [],
         "last_result_rows": [],
@@ -6639,7 +6661,7 @@ def _normalize_data_analyst_state(payload: Optional[dict]) -> dict[str, Any]:
         return state
 
     stage = str(payload.get("stage") or "").strip()
-    if stage in {"awaiting_table", "ready"}:
+    if stage in {"awaiting_table", "awaiting_row_intent", "ready"}:
         state["stage"] = stage
 
     state["pending_request"] = str(payload.get("pending_request") or payload.get("pendingRequest") or "").strip()
@@ -6670,6 +6692,14 @@ def _normalize_data_analyst_state(payload: Optional[dict]) -> dict[str, Any]:
     clarification_options = payload.get("clarification_options") or payload.get("clarificationOptions")
     if isinstance(clarification_options, list):
         state["clarification_options"] = [str(item).strip() for item in clarification_options if str(item).strip()]
+    state["analysis_goal"] = str(payload.get("analysis_goal") or payload.get("analysisGoal") or "").strip()
+    analysis_plan = payload.get("analysis_plan") or payload.get("analysisPlan")
+    if isinstance(analysis_plan, list):
+        state["analysis_plan"] = [str(item).strip() for item in analysis_plan if str(item).strip()]
+    success_criteria = payload.get("success_criteria") or payload.get("successCriteria")
+    if isinstance(success_criteria, list):
+        state["success_criteria"] = [str(item).strip() for item in success_criteria if str(item).strip()]
+    state["latest_review"] = str(payload.get("latest_review") or payload.get("latestReview") or "").strip()
     last_sqls = payload.get("last_sqls") or payload.get("lastSqls")
     if isinstance(last_sqls, list):
         state["last_sqls"] = [clean_sql_text(str(item)) for item in last_sqls if clean_sql_text(str(item))]
@@ -6704,7 +6734,7 @@ def _normalize_data_analyst_state(payload: Optional[dict]) -> dict[str, Any]:
 
 
 def _data_analyst_state_needs_followup(state: dict[str, Any]) -> bool:
-    return str(state.get("stage") or "").strip() == "awaiting_table"
+    return str(state.get("stage") or "").strip() in {"awaiting_table", "awaiting_row_intent"}
 
 
 def _data_analyst_date_columns(schema: list[dict[str, Any]]) -> list[str]:
@@ -6804,6 +6834,52 @@ def _data_analyst_target_step_count(user_request: str, max_steps: int) -> int:
     return max(3, min(max_steps, score))
 
 
+def _data_analyst_requested_limit(user_request: str) -> Optional[int]:
+    normalized = normalize_intent_text(user_request)
+    if not normalized:
+        return None
+
+    patterns = [
+        r"\b(?:top|first|limit|latest)\s+(\d{1,4})\b",
+        r"\b(\d{1,4})\s*(rows?|lines?|lignes?)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            try:
+                return max(1, min(int(match.group(1)), DATA_ANALYST_MAX_RESULT_ROWS))
+            except Exception:
+                return None
+    return None
+
+
+def _data_analyst_dynamic_query_limit(user_request: str, sql: str, base_limit: int) -> int:
+    requested = _data_analyst_requested_limit(user_request)
+    if requested is not None:
+        return max(1, min(requested, base_limit, DATA_ANALYST_MAX_RESULT_ROWS))
+
+    normalized_request = normalize_intent_text(user_request)
+    lowered_sql = clean_sql_text(sql).lower()
+    safe_cap = max(1, min(int(base_limit or 200), DATA_ANALYST_MAX_RESULT_ROWS))
+
+    if _data_analyst_export_requested(user_request):
+        return min(safe_cap, 500)
+
+    if any(token in normalized_request for token in ["sample rows", "show rows", "preview rows", "raw rows", "detail rows"]):
+        return min(safe_cap, 100)
+
+    if " group by " in f" {lowered_sql} " or any(token in normalized_request for token in ["breakdown", "compare", "segment", "ranking", "top ", "top-", "leaderboard"]):
+        return min(safe_cap, 100)
+
+    if any(token in normalized_request for token in ["trend", "over time", "daily", "weekly", "monthly", "quarterly", "cohort", "retention"]):
+        return min(safe_cap, 200)
+
+    if re.search(r"\b(count|sum|avg|min|max|uniq|quantile)", lowered_sql) and " group by " not in f" {lowered_sql} ":
+        return min(safe_cap, 10)
+
+    return min(safe_cap, 50)
+
+
 def _data_analyst_has_forbidden_date_functions(sql: str) -> bool:
     lowered = clean_sql_text(sql).lower()
     return any(token in lowered for token in DATA_ANALYST_FORBIDDEN_DATE_FUNCTIONS)
@@ -6834,6 +6910,155 @@ def _data_analyst_sql_is_valid(sql: str, schema: Optional[list[dict[str, Any]]] 
     if schema and _data_analyst_uses_date_literals_without_between(cleaned, schema):
         return False
     return True
+
+
+async def _data_analyst_define_goal(
+    user_request: str,
+    selected_table: str,
+    schema: list[dict[str, Any]],
+    conversation_memory: str,
+    max_steps: int,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> dict[str, Any]:
+    schema_lines = "\n".join(
+        f"- {column.get('name')}: {column.get('type')}"
+        for column in schema[:120]
+    )
+    prompt = f"""
+You are preparing a senior ClickHouse data analyst mission.
+Define a compact investigation goal before the ReAct loop starts.
+
+Return JSON only:
+{{
+  "analysis_goal": "one-sentence mission",
+  "analysis_plan": ["step 1", "step 2", "step 3"],
+  "success_criteria": ["criterion 1", "criterion 2", "criterion 3"]
+}}
+
+Rules:
+- Keep everything in English.
+- Be concrete and business-oriented.
+- The plan should describe distinct analytical angles to test.
+- The success criteria should explain when the analyst has enough evidence to finish.
+- Assume at most {max_steps} credited analytical actions.
+
+Selected table: {selected_table}
+Schema:
+{schema_lines}
+
+Conversation memory:
+{conversation_memory}
+
+User request:
+{user_request}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    return {
+        "analysis_goal": str(parsed.get("analysis_goal") or parsed.get("goal") or "").strip(),
+        "analysis_plan": [
+            str(item).strip()
+            for item in (parsed.get("analysis_plan") or parsed.get("plan") or [])
+            if str(item).strip()
+        ][:5],
+        "success_criteria": [
+            str(item).strip()
+            for item in (parsed.get("success_criteria") or parsed.get("criteria") or [])
+            if str(item).strip()
+        ][:5],
+    }
+
+
+async def _data_analyst_review_progress(
+    user_request: str,
+    selected_table: str,
+    analysis_goal: str,
+    analysis_plan: list[str],
+    success_criteria: list[str],
+    step_log: list[dict[str, Any]],
+    last_result_rows: list[dict[str, Any]],
+    knowledge_hits: list[dict[str, Any]],
+    max_steps: int,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+) -> dict[str, Any]:
+    prompt = f"""
+You are reviewing a ClickHouse Data Analyst investigation in progress.
+Your job is to decide whether the current evidence is already sufficient and what gap remains.
+
+Return JSON only:
+{{
+  "enough_evidence": true,
+  "review_summary": "short executive review",
+  "next_focus": "what the next step should test",
+  "recommended_action": "query|search_knowledge|finish"
+}}
+
+Rules:
+- Keep everything in English.
+- Be strict: only say `enough_evidence=true` if the core business question is already answered well enough for leadership.
+- Prefer `finish` only when the main goal and most success criteria are covered.
+- If there is still a meaningful gap, explain the next focus precisely.
+
+User request:
+{user_request}
+
+Selected table:
+{selected_table}
+
+Analysis goal:
+{analysis_goal}
+
+Investigation plan:
+{json.dumps(analysis_plan, ensure_ascii=False, indent=2)}
+
+Success criteria:
+{json.dumps(success_criteria, ensure_ascii=False, indent=2)}
+
+Completed steps:
+{_data_analyst_steps_context(step_log)}
+
+Latest query preview:
+{_data_analyst_result_preview_text(last_result_rows)}
+
+Knowledge hits:
+{json.dumps([
+    {"doc_name": item.get("doc_name"), "score": item.get("score")}
+    for item in knowledge_hits[:DATA_ANALYST_MAX_KNOWLEDGE_RESULTS]
+], ensure_ascii=False, indent=2)}
+
+Remaining credited actions:
+{max(0, max_steps - len(step_log))}
+""".strip()
+
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+    )
+    parsed = extract_json_object(raw)
+    return {
+        "enough_evidence": bool(parsed.get("enough_evidence")),
+        "review_summary": str(parsed.get("review_summary") or "").strip(),
+        "next_focus": str(parsed.get("next_focus") or "").strip(),
+        "recommended_action": str(parsed.get("recommended_action") or "").strip().lower(),
+    }
 
 
 def _data_analyst_step_label(action_type: str) -> str:
@@ -6922,10 +7147,14 @@ def _data_analyst_needs_more_evidence(
     user_request: str,
     step_log: list[dict[str, Any]],
     max_steps: int,
+    latest_review: str = "",
 ) -> bool:
     target_steps = _data_analyst_target_step_count(user_request, max_steps)
     successful_queries = sum(1 for step in step_log if step.get("ok") and step.get("type") == "query")
     successful_steps = sum(1 for step in step_log if step.get("ok"))
+    lowered_review = str(latest_review or "").lower()
+    if "enough evidence" in lowered_review or "ready to conclude" in lowered_review:
+        return False
     if successful_queries == 0:
         return True
     if target_steps >= 5 and successful_queries < 2:
@@ -7210,6 +7439,10 @@ async def plan_data_analyst_step(
     selected_table: str,
     schema: list[dict[str, Any]],
     conversation_memory: str,
+    analysis_goal: str,
+    analysis_plan: list[str],
+    success_criteria: list[str],
+    latest_review: str,
     step_log: list[dict[str, Any]],
     max_steps: int,
     used_steps: int,
@@ -7237,6 +7470,7 @@ Operate as a true ReAct analyst:
 - Observation: inspect the latest evidence and detect what is still unknown.
 - Hypothesis: decide what business question or driver to test next.
 - Action: choose exactly one next action that brings genuinely new evidence.
+- Review: before finishing, check whether the goal and success criteria are truly covered.
 
 You may use up to {max_steps} credited actions. Each action must add genuinely new evidence.
 For this request, aim for about {target_steps} credited actions before finishing unless the evidence becomes decisive earlier.
@@ -7279,11 +7513,23 @@ Schema:
 Schema profile:
 {_data_analyst_schema_brief(schema)}
 
+Analysis goal:
+{analysis_goal or "Not defined yet."}
+
+Investigation plan:
+{json.dumps(analysis_plan, ensure_ascii=False, indent=2)}
+
+Success criteria:
+{json.dumps(success_criteria, ensure_ascii=False, indent=2)}
+
 Recent conversation memory:
 {conversation_memory}
 
 Completed analytical steps:
 {_data_analyst_steps_context(step_log)}
+
+Latest review:
+{latest_review or "No formal review yet."}
 
 Latest query preview:
 {_data_analyst_result_preview_text(last_result_rows)}
@@ -7381,6 +7627,9 @@ Database error:
 async def synthesize_data_analyst_answer(
     user_request: str,
     selected_table: str,
+    analysis_goal: str,
+    success_criteria: list[str],
+    latest_review: str,
     conversation_memory: str,
     step_log: list[dict[str, Any]],
     last_result_meta: list[dict[str, Any]],
@@ -7423,6 +7672,15 @@ Rules:
 Selected table: {selected_table}
 Forced finish: {"yes" if forced_finish else "no"}
 
+Analysis goal:
+{analysis_goal or "Not defined explicitly."}
+
+Success criteria:
+{json.dumps(success_criteria, ensure_ascii=False, indent=2)}
+
+Latest review:
+{latest_review or "No formal review was captured."}
+
 Recent conversation memory:
 {conversation_memory}
 
@@ -7458,6 +7716,9 @@ User request:
 async def polish_data_analyst_answer(
     user_request: str,
     selected_table: str,
+    analysis_goal: str,
+    success_criteria: list[str],
+    latest_review: str,
     draft_answer: str,
     conversation_memory: str,
     step_log: list[dict[str, Any]],
@@ -7501,6 +7762,15 @@ Rules:
 
 Selected table: {selected_table}
 Forced finish: {"yes" if forced_finish else "no"}
+
+Analysis goal:
+{analysis_goal or "Not defined explicitly."}
+
+Success criteria:
+{json.dumps(success_criteria, ensure_ascii=False, indent=2)}
+
+Latest review:
+{latest_review or "No formal review was captured."}
 
 Recent conversation memory:
 {conversation_memory}
@@ -9787,6 +10057,10 @@ class DataAnalystAgentStateModel(BaseModel):
     table_schema: list[dict] = Field(default_factory=list)
     clarification_prompt: str = ""
     clarification_options: list[str] = Field(default_factory=list)
+    analysis_goal: str = ""
+    analysis_plan: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    latest_review: str = ""
     last_sqls: list[str] = Field(default_factory=list)
     last_result_meta: list[dict] = Field(default_factory=list)
     last_result_rows: list[dict] = Field(default_factory=list)
@@ -11977,6 +12251,10 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
     if state.get("selected_table") and explicit_table_switch and explicit_table_switch != state.get("selected_table"):
         state["selected_table"] = explicit_table_switch
         state["table_schema"] = []
+        state["analysis_goal"] = ""
+        state["analysis_plan"] = []
+        state["success_criteria"] = []
+        state["latest_review"] = ""
         state["last_sqls"] = []
         state["last_result_meta"] = []
         state["last_result_rows"] = []
@@ -12035,6 +12313,37 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         state["clarification_prompt"] = ""
         state["clarification_options"] = []
         user_message = state.get("pending_request") or user_message
+
+    if state.get("stage") == "awaiting_row_intent":
+        row_intent_options = state.get("clarification_options") or [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION]
+        row_intent_choice = resolve_user_choice(user_message, row_intent_options)
+        if not row_intent_choice:
+            return {
+                "answer": build_choice_markdown(
+                    "Row Request Clarification",
+                    state.get("clarification_prompt") or "Do you want the row count or a sample list of rows?",
+                    row_intent_options,
+                ),
+                "agent_state": state,
+                "steps": [
+                    {
+                        "id": "data-analyst-await-row-intent",
+                        "title": "Waiting for row intent clarification",
+                        "status": "running",
+                        "details": "The analysis needs to know whether to count rows or preview rows.",
+                    }
+                ],
+            }
+
+        original_request = str(state.get("pending_request") or "").strip()
+        if row_intent_choice == CLICKHOUSE_ROW_COUNT_OPTION:
+            state["pending_request"] = f"{original_request}\n\n[Resolved intent: row count]".strip()
+        else:
+            state["pending_request"] = f"{original_request}\n\n[Resolved intent: sample rows]".strip()
+        state["stage"] = "ready"
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        user_message = state["pending_request"]
 
     current_request = state.get("pending_request") or user_message
     if not state.get("selected_table"):
@@ -12095,6 +12404,31 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 }
 
     current_request = user_message or state.get("pending_request") or ""
+    if is_clickhouse_row_request_ambiguous(current_request):
+        state["pending_request"] = current_request
+        state["stage"] = "awaiting_row_intent"
+        state["clarification_prompt"] = (
+            "Your request can mean either **count the rows** or **show sample rows**. "
+            "Choose the output you want."
+        )
+        state["clarification_options"] = [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION]
+        return {
+            "answer": build_choice_markdown(
+                "Row Request Clarification",
+                state["clarification_prompt"],
+                state["clarification_options"],
+            ),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "data-analyst-row-intent",
+                    "title": "Need row intent clarification",
+                    "status": "running",
+                    "details": "The request is ambiguous between a row count and a sample row listing.",
+                }
+            ],
+        }
+
     if not current_request:
         return {
             "answer": (
@@ -12125,6 +12459,27 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
     if not state["table_schema"]:
         raise HTTPException(status_code=400, detail=f"Table '{state['selected_table']}' has no readable columns.")
 
+    if not state.get("analysis_goal"):
+        try:
+            mission = await _data_analyst_define_goal(
+                current_request,
+                str(state["selected_table"]),
+                state["table_schema"],
+                conversation_memory,
+                max_steps,
+                req.llm_base_url,
+                req.llm_model,
+                req.llm_provider,
+                req.llm_api_key,
+            )
+            state["analysis_goal"] = mission.get("analysis_goal") or "Explain the business question through a structured evidence-gathering analysis."
+            state["analysis_plan"] = mission.get("analysis_plan") or []
+            state["success_criteria"] = mission.get("success_criteria") or []
+        except Exception:
+            state["analysis_goal"] = state.get("analysis_goal") or "Explain the business question through a structured evidence-gathering analysis."
+            state["analysis_plan"] = state.get("analysis_plan") or []
+            state["success_criteria"] = state.get("success_criteria") or []
+
     persisted_state = await read_db_state()
     knowledge_enabled = _app_opensearch_config((persisted_state or {}).get("config") or {}) is not None
     export_requested = _data_analyst_export_requested(current_request)
@@ -12133,6 +12488,10 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
     last_result_meta = list(state.get("last_result_meta") or [])
     last_result_rows = list(state.get("last_result_rows") or [])
     knowledge_hits = list(state.get("knowledge_hits") or [])
+    analysis_goal = str(state.get("analysis_goal") or "").strip()
+    analysis_plan = list(state.get("analysis_plan") or [])
+    success_criteria = list(state.get("success_criteria") or [])
+    latest_review = str(state.get("latest_review") or "").strip()
     executed_sqls: list[str] = []
     step_log: list[dict[str, Any]] = []
     last_error = ""
@@ -12148,6 +12507,10 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
             str(state["selected_table"]),
             state["table_schema"],
             conversation_memory,
+            analysis_goal,
+            analysis_plan,
+            success_criteria,
+            latest_review,
             step_log,
             max_steps,
             used_steps,
@@ -12162,12 +12525,16 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
         action = str(planned.get("action") or "").strip().lower()
         reasoning = str(planned.get("reasoning") or "").strip() or "The local LLM selected the next analytical action."
 
-        if action == "finish" and _data_analyst_needs_more_evidence(current_request, step_log, max_steps) and len(step_log) + 1 < max_steps:
+        if action == "finish" and _data_analyst_needs_more_evidence(current_request, step_log, max_steps, latest_review) and len(step_log) + 1 < max_steps:
             planned = await plan_data_analyst_step(
                 current_request,
                 str(state["selected_table"]),
                 state["table_schema"],
                 conversation_memory,
+                analysis_goal,
+                analysis_plan,
+                success_criteria,
+                latest_review,
                 step_log,
                 max_steps,
                 used_steps,
@@ -12189,6 +12556,9 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 final_body = await synthesize_data_analyst_answer(
                     current_request,
                     str(state["selected_table"]),
+                    analysis_goal,
+                    success_criteria,
+                    latest_review,
                     conversation_memory,
                     step_log,
                     last_result_meta,
@@ -12203,6 +12573,9 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
             final_body = await polish_data_analyst_answer(
                 current_request,
                 str(state["selected_table"]),
+                analysis_goal,
+                success_criteria,
+                latest_review,
                 final_body,
                 conversation_memory,
                 step_log,
@@ -12371,7 +12744,10 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
             )
             continue
 
-        sql = enforce_query_limit(clean_sql_text(str(planned.get("sql") or "")), req.clickhouse.query_limit)
+        sql = enforce_query_limit(
+            clean_sql_text(str(planned.get("sql") or "")),
+            _data_analyst_dynamic_query_limit(current_request, str(planned.get("sql") or ""), req.clickhouse.query_limit),
+        )
         retried = False
         if not _data_analyst_sql_is_valid(sql, state["table_schema"]):
             repaired = await repair_data_analyst_sql(
@@ -12384,7 +12760,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 req.llm_model,
                 req.llm_provider,
                 req.llm_api_key,
-                req.clickhouse.query_limit,
+                _data_analyst_dynamic_query_limit(current_request, sql, req.clickhouse.query_limit),
             )
             sql = repaired["sql"]
             reasoning = repaired["reasoning"] or reasoning
@@ -12423,7 +12799,7 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
                 req.llm_model,
                 req.llm_provider,
                 req.llm_api_key,
-                req.clickhouse.query_limit,
+                _data_analyst_dynamic_query_limit(current_request, sql, req.clickhouse.query_limit),
             )
             repaired_sql = repaired["sql"]
             if not _data_analyst_sql_is_valid(repaired_sql, state["table_schema"]):
@@ -12489,9 +12865,40 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
             )
         )
 
+        if len(step_log) % DATA_ANALYST_REVIEW_INTERVAL == 0:
+            try:
+                review = await _data_analyst_review_progress(
+                    current_request,
+                    str(state["selected_table"]),
+                    analysis_goal,
+                    analysis_plan,
+                    success_criteria,
+                    step_log,
+                    last_result_rows,
+                    knowledge_hits,
+                    max_steps,
+                    req.llm_base_url,
+                    req.llm_model,
+                    req.llm_provider,
+                    req.llm_api_key,
+                )
+                latest_review = " | ".join(
+                    part for part in [
+                        str(review.get("review_summary") or "").strip(),
+                        f"Next focus: {str(review.get('next_focus') or '').strip()}" if str(review.get("next_focus") or "").strip() else "",
+                        "Enough evidence to conclude." if review.get("enough_evidence") else "",
+                    ] if part
+                ).strip()
+                state["latest_review"] = latest_review
+            except Exception:
+                pass
+
     final_body = await synthesize_data_analyst_answer(
         current_request,
         str(state["selected_table"]),
+        analysis_goal,
+        success_criteria,
+        latest_review,
         conversation_memory,
         step_log,
         last_result_meta,
@@ -12506,6 +12913,9 @@ async def chat_data_analyst_agent(req: DataAnalystAgentRequest):
     final_body = await polish_data_analyst_answer(
         current_request,
         str(state["selected_table"]),
+        analysis_goal,
+        success_criteria,
+        latest_review,
         final_body,
         conversation_memory,
         step_log,
