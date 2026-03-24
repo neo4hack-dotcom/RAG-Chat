@@ -5,6 +5,10 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Keep the Vite dependency cache outside node_modules.
+  // On some Windows setups, antivirus / indexing can lock node_modules/.vite
+  // during the rename from deps_temp_* to deps, which breaks `npm run dev`.
+  cacheDir: path.resolve(__dirname, '.vite-cache'),
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),
