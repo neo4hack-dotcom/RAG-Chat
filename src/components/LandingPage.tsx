@@ -8,6 +8,7 @@ type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 interface LandingPageProps {
   onNavigate: (page: Page) => void;
   documentationUrl?: string;
+  agenticDataVizUrl?: string;
   portalAppsCount?: number;
   settingsAccessPassword?: string;
   onOpenSettings: () => void;
@@ -69,10 +70,12 @@ function FeatureCard({
   card,
   index,
   onNavigate,
+  agenticDataVizUrl,
 }: {
   card: (typeof CARDS)[0];
   index: number;
   onNavigate: (page: Page) => void;
+  agenticDataVizUrl?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState(false);
@@ -102,6 +105,7 @@ function FeatureCard({
   };
 
   const { Icon } = card;
+  const datavizRedirectActive = card.id === 'dataviz' && Boolean(agenticDataVizUrl?.trim());
 
   return (
     <motion.div
@@ -113,7 +117,13 @@ function FeatureCard({
       onMouseMove={handleMouseMove}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={handleMouseLeave}
-      onClick={() => onNavigate(card.id)}
+      onClick={() => {
+        if (datavizRedirectActive) {
+          window.open(agenticDataVizUrl!.trim(), '_blank', 'noopener,noreferrer');
+          return;
+        }
+        onNavigate(card.id);
+      }}
       className="relative cursor-pointer select-none h-full"
     >
       {/* Outer glow ring */}
@@ -186,7 +196,13 @@ function FeatureCard({
           transition={{ duration: 0.3 }}
         >
           <span className="text-[14px] font-semibold" style={{ color: card.iconColor }}>
-            {card.id === 'chat' ? 'Get started' : card.id === 'agents' ? 'Open portal' : 'Learn more'}
+            {card.id === 'chat'
+              ? 'Get started'
+              : card.id === 'agents'
+                ? 'Open portal'
+                : datavizRedirectActive
+                  ? 'Open app'
+                  : 'Learn more'}
           </span>
           <motion.div animate={{ x: hovered ? 4 : 0 }} transition={{ duration: 0.25 }}>
             <ArrowRight size={16} style={{ color: card.iconColor }} />
@@ -264,7 +280,7 @@ function HeroHeadline() {
 }
 
 /* ---------- Main component ---------- */
-export function LandingPage({ onNavigate, documentationUrl, portalAppsCount = 0, settingsAccessPassword, onOpenSettings }: LandingPageProps) {
+export function LandingPage({ onNavigate, documentationUrl, agenticDataVizUrl, portalAppsCount = 0, settingsAccessPassword, onOpenSettings }: LandingPageProps) {
   const [contactOpen, setContactOpen] = useState(false);
   const [isAccessPromptOpen, setIsAccessPromptOpen] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
@@ -276,7 +292,12 @@ export function LandingPage({ onNavigate, documentationUrl, portalAppsCount = 0,
           ...card,
           tag: portalAppsCount > 0 ? `${portalAppsCount} App${portalAppsCount > 1 ? 's' : ''}` : 'App Portal',
         }
-      : card
+      : card.id === 'dataviz'
+        ? {
+            ...card,
+            tag: agenticDataVizUrl?.trim() ? 'External App' : card.tag,
+          }
+        : card
   );
 
   const submitSettingsAccess = () => {
@@ -363,7 +384,7 @@ export function LandingPage({ onNavigate, documentationUrl, portalAppsCount = 0,
       <section className="relative z-10 px-6 pb-28 max-w-6xl mx-auto">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {cards.map((card, i) => (
-            <FeatureCard key={card.id} card={card} index={i} onNavigate={onNavigate} />
+            <FeatureCard key={card.id} card={card} index={i} onNavigate={onNavigate} agenticDataVizUrl={agenticDataVizUrl} />
           ))}
         </div>
       </section>

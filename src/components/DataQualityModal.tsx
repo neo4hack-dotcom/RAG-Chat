@@ -22,6 +22,7 @@ type DataQualityModalProps = {
   onRowFilterChange: (rowFilter: string) => void;
   onTimeColumnChange: (timeColumn: string | null) => void;
   onSubmit: () => Promise<void>;
+  onStop?: () => void;
 };
 
 const SAMPLE_PRESETS = [
@@ -81,6 +82,7 @@ export function DataQualityModal({
   onRowFilterChange,
   onTimeColumnChange,
   onSubmit,
+  onStop,
 }: DataQualityModalProps) {
   const [search, setSearch] = useState("");
 
@@ -430,17 +432,28 @@ export function DataQualityModal({
                 </div>
 
                 <div className="flex flex-col items-stretch gap-2 lg:min-w-[220px]">
-                  <button
-                    type="button"
-                    onClick={() => void onSubmit()}
-                    disabled={launchDisabled}
-                    className="inline-flex items-center justify-center gap-2 rounded-[1.35rem] bg-black px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    <BarChart3 className="w-4 h-4" />
-                    {isBusy ? "Launching..." : "Launch"}
-                  </button>
+                  {isBusy ? (
+                    <button
+                      type="button"
+                      onClick={onStop}
+                      className="inline-flex items-center justify-center gap-2 rounded-[1.35rem] bg-rose-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-rose-700"
+                    >
+                      <X className="w-4 h-4" />
+                      Stop
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void onSubmit()}
+                      disabled={launchDisabled}
+                      className="inline-flex items-center justify-center gap-2 rounded-[1.35rem] bg-black px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <BarChart3 className="w-4 h-4" />
+                      Launch
+                    </button>
+                  )}
                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Select a table and at least one column to enable the launch action.
+                    {isBusy ? "The profiling run is in progress. You can stop it at any time." : "Select a table and at least one column to enable the launch action."}
                   </p>
                 </div>
               </div>

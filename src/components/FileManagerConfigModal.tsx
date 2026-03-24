@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { FolderOpen, Shield, Sparkles, X } from "lucide-react";
+import { CheckCircle2, FolderOpen, Loader2, Shield, Sparkles, X, XCircle } from "lucide-react";
 import { FileManagerAgentConfig } from "../lib/utils";
 
 interface FileManagerConfigModalProps {
@@ -26,12 +26,58 @@ export function FileManagerConfigModal({
   onSave,
 }: FileManagerConfigModalProps) {
   const [localConfig, setLocalConfig] = useState<FileManagerAgentConfig>(() => normalizeLocalConfig(config));
+  const [isTestingPath, setIsTestingPath] = useState(false);
+  const [pathTestResult, setPathTestResult] = useState<null | {
+    status: "ok" | "error";
+    message: string;
+    resolvedPath?: string;
+    entryCount?: number;
+  }>(null);
 
   useEffect(() => {
     setLocalConfig(normalizeLocalConfig(config));
+    setIsTestingPath(false);
+    setPathTestResult(null);
   }, [config, isOpen]);
 
   if (!isOpen) return null;
+
+  const handleTestPath = async () => {
+    setIsTestingPath(true);
+    setPathTestResult(null);
+    try {
+      const response = await fetch("/api/file-manager/test-path", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          file_manager_config: {
+            base_path: localConfig.basePath,
+            max_iterations: localConfig.maxIterations,
+            system_prompt: localConfig.systemPrompt,
+          },
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || `HTTP ${response.status}`);
+      }
+      setPathTestResult({
+        status: "ok",
+        message: localConfig.basePath
+          ? "The configured folder is accessible."
+          : "The default workspace access is available.",
+        resolvedPath: payload.resolvedPath,
+        entryCount: payload.entryCount,
+      });
+    } catch (error) {
+      setPathTestResult({
+        status: "error",
+        message: error instanceof Error ? error.message : "Unable to access the configured folder.",
+      });
+    } finally {
+      setIsTestingPath(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-[90] bg-black/45 backdrop-blur-sm flex items-center justify-center p-4">
@@ -46,7 +92,7 @@ export function FileManagerConfigModal({
               Agent configuration
             </h2>
             <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Configure the sandbox path, ReAct iteration budget, and the local-system prompt.
+              Configure the access root, ReAct iteration budget, and the local-system prompt.
             </p>
           </div>
           <button
@@ -65,7 +111,7 @@ export function FileManagerConfigModal({
               <div className="text-sm text-emerald-900 dark:text-emerald-200 space-y-1">
                 <p className="font-medium">Safe by default</p>
                 <p className="text-emerald-800/85 dark:text-emerald-300/85">
-                  Destructive actions still require confirmation. Set a sandbox base path if you want to restrict all file operations to a specific directory.
+                  Destructive actions still require confirmation. Set an access root if you want to limit all file operations to a specific directory.
                 </p>
               </div>
             </div>
@@ -73,18 +119,63 @@ export function FileManagerConfigModal({
 
           <label className="block space-y-2">
             <span className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
-              Sandbox base path
+              Access root
             </span>
-            <input
-              type="text"
-              value={localConfig.basePath}
-              onChange={(e) => setLocalConfig((prev) => ({ ...prev, basePath: e.target.value }))}
-              placeholder="/Users/mathieumasson/Documents/Shared"
-              className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-emerald-400"
-            />
+            <div className="flex flex-col gap-3 md:flex-row">
+              <input
+                type="text"
+                value={localConfig.basePath}
+                onChange={(e) => {
+                  setLocalConfig((prev) => ({ ...prev, basePath: e.target.value }));
+                  setPathTestResult(null);
+                }}
+                placeholder="/path/to/shared-folder"
+                className="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none focus:border-emerald-400"
+              />
+              <button
+                type="button"
+                onClick={handleTestPath}
+                disabled={isTestingPath}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/15 px-4 py-3 text-sm font-medium text-emerald-900 dark:text-emerald-200 transition-colors hover:bg-emerald-100 dark:hover:bg-emerald-900/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isTestingPath ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                Test folder access
+              </button>
+            </div>
             <p className="text-xs text-gray-500 dark:text-gray-400">
               Leave empty to allow access to the full server-visible workspace.
             </p>
+            {pathTestResult && (
+              <div
+                className={[
+                  "rounded-2xl border px-4 py-3 text-sm",
+                  pathTestResult.status === "ok"
+                    ? "border-emerald-200 bg-emerald-50/90 text-emerald-900 dark:border-emerald-700/60 dark:bg-emerald-900/15 dark:text-emerald-200"
+                    : "border-rose-200 bg-rose-50/90 text-rose-900 dark:border-rose-700/60 dark:bg-rose-900/15 dark:text-rose-200",
+                ].join(" ")}
+              >
+                <div className="flex items-start gap-2">
+                  {pathTestResult.status === "ok" ? (
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                  ) : (
+                    <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  )}
+                  <div className="space-y-1">
+                    <p className="font-medium">{pathTestResult.message}</p>
+                    {pathTestResult.resolvedPath && (
+                      <p className="text-xs opacity-80">
+                        Resolved path: <span className="font-mono">{pathTestResult.resolvedPath}</span>
+                      </p>
+                    )}
+                    {typeof pathTestResult.entryCount === "number" && (
+                      <p className="text-xs opacity-80">
+                        Visible entries: {pathTestResult.entryCount}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </label>
 
           <label className="block space-y-2">

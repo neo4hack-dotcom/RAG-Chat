@@ -386,6 +386,7 @@ export default function App() {
             <LandingPage
               onNavigate={navigate}
               documentationUrl={appState.config.documentationUrl}
+              agenticDataVizUrl={appState.config.agenticDataVizUrl}
               portalAppsCount={appState.config.portalApps.filter((app) => app.name.trim() && app.url.trim()).length}
               settingsAccessPassword={appState.config.settingsAccessPassword}
               onOpenSettings={() => setIsSettingsOpen(true)}
