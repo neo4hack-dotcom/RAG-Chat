@@ -1,13 +1,13 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge } from "lucide-react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge, Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, DataQualitySchemaColumn, DataQualityState, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeDataQualityState, normalizeAppConfig } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeFeatureEngineerAgentState, normalizeAutoMlAgentState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
 import { AgentConsoleModal } from "./AgentConsoleModal";
 import { FileManagerConfigModal } from "./FileManagerConfigModal";
-import { DataQualityModal } from "./DataQualityModal";
+import { AgentGuideModal, type GuideSchemaColumn } from "./AgentGuideModal";
 import { SqlDraftModal } from "./SqlDraftModal";
 import { downloadMarkdownPdf } from "../lib/pdf";
 
@@ -36,7 +36,8 @@ const AGENT_INTRO_MARKERS = {
   file_management: "<!-- agent-intro:file_management -->",
   pdf_creator: "<!-- agent-intro:pdf_creator -->",
   oracle_analyst: "<!-- agent-intro:oracle_analyst -->",
-  data_quality_tables: "<!-- agent-intro:data_quality_tables -->",
+  feature_engineer: "<!-- agent-intro:feature_engineer -->",
+  auto_ml: "<!-- agent-intro:auto_ml -->",
 } as const;
 
 function getAgentIntroContent(agentRole: AgentRole): string | null {
@@ -46,7 +47,7 @@ function getAgentIntroContent(agentRole: AgentRole): string | null {
 
 This manager works in English and can orchestrate the available specialist agents.
 
-- It routes requests to Clickhouse SQL, Data analyst, File management, Oracle SQL, or Data quality - Tables when needed.
+- It routes requests to Clickhouse SQL, Data Analyst, Feature Engineer, Auto-ML, File management, or Oracle SQL when needed.
 - It can also route export-ready results to PDF creator when you want a polished document.
 - It keeps the conversation context while delegated agents ask follow-up questions.
 - It answers directly when no specialist tool is required.`;
@@ -74,6 +75,28 @@ This agent works in English and handles deeper ClickHouse investigations through
 - It keeps one primary table in focus, asks you to choose only when the table stays ambiguous, and preserves the latest analytical context in the same conversation.
 - It can look into the knowledge base when configured, repair failed SQL automatically with a simpler fallback, and export the latest dataset to CSV when you explicitly ask for it.
 - It returns a business-facing markdown answer while keeping analytical steps available from the thinking panel.`;
+  }
+
+  if (agentRole === 'feature_engineer') {
+    return `${AGENT_INTRO_MARKERS.feature_engineer}
+## Feature Engineer Agent
+
+This agent works in English and proposes predictive variables from your ClickHouse tables.
+
+- It inspects the schema and a live sample before suggesting engineered features.
+- It returns practical ideas such as calendar features, ratios, recency flags, and derived attributes.
+- Each recommendation includes a rationale and a SQL expression you can reuse in ClickHouse.`;
+  }
+
+  if (agentRole === 'auto_ml') {
+    return `${AGENT_INTRO_MARKERS.auto_ml}
+## Auto-ML Agent
+
+This agent works in English and benchmarks several machine-learning models on a ClickHouse dataset.
+
+- It selects a table and a prediction target, asks only when those points remain ambiguous, and then prepares a trainable sample.
+- It compares linear/logistic regression, Random Forest, and XGBoost when available on the server.
+- It returns a comparison table of model performance and a practical recommendation on which model to keep as a baseline.`;
   }
 
   if (agentRole === 'file_management') {
@@ -110,17 +133,6 @@ This agent works in English and queries Oracle safely from natural language.
 - Configure one or more Oracle connections in Settings, then ask a business question directly.`;
   }
 
-  if (agentRole === 'data_quality_tables') {
-    return `${AGENT_INTRO_MARKERS.data_quality_tables}
-## Data Quality - Tables Agent
-
-This agent works in English and runs structured profiling through a dedicated form.
-
-- Use the form to select the table, columns, sample size, row filter, and optional time column.
-- It computes SQL statistics first, then asks the local LLM to score quality issues and recommend fixes.
-- The final report includes an executive summary, per-column findings, and optional volumetric analysis.`;
-  }
-
   return null;
 }
 
@@ -132,14 +144,16 @@ function hasAgentIntroMessage(messages: Message[], agentRole: AgentRole): boolea
         ? AGENT_INTRO_MARKERS.clickhouse_query
         : agentRole === 'data_analyst'
           ? AGENT_INTRO_MARKERS.data_analyst
+        : agentRole === 'feature_engineer'
+          ? AGENT_INTRO_MARKERS.feature_engineer
+        : agentRole === 'auto_ml'
+          ? AGENT_INTRO_MARKERS.auto_ml
         : agentRole === 'file_management'
           ? AGENT_INTRO_MARKERS.file_management
           : agentRole === 'pdf_creator'
             ? AGENT_INTRO_MARKERS.pdf_creator
           : agentRole === 'oracle_analyst'
             ? AGENT_INTRO_MARKERS.oracle_analyst
-          : agentRole === 'data_quality_tables'
-            ? AGENT_INTRO_MARKERS.data_quality_tables
           : null;
   if (!marker) return false;
   return messages.some((message) => message.role === 'assistant' && message.content.includes(marker));
@@ -155,14 +169,6 @@ function createAgentIntroMessage(agentRole: AgentRole): Message | null {
     timestamp: Date.now(),
   };
 }
-
-type DataQualityFormState = {
-  table: string;
-  columns: string[];
-  sampleSize: number;
-  rowFilter: string;
-  timeColumn: string | null;
-};
 
 type MentionTargetDefinition = {
   id: string;
@@ -200,6 +206,25 @@ type SqlDraftPreviewResult = {
   rowCount: number;
   shownRows: number;
   rowLimit: number;
+};
+
+type FeatureEngineerGuideForm = {
+  table: string;
+  goal: string;
+  notes: string;
+};
+
+type AutoMlGuideForm = {
+  table: string;
+  targetColumn: string;
+  goal: string;
+  notes: string;
+};
+
+type ClickHouseGuideMetadata = {
+  availableTables: string[];
+  schema: GuideSchemaColumn[];
+  targetCandidates: string[];
 };
 
 const CHAT_ZOOM_MIN = 0.85;
@@ -264,6 +289,51 @@ function compactMessagePreview(content: string, maxLength = 132): string {
   return plain.length > maxLength ? `${plain.slice(0, maxLength - 1)}…` : plain;
 }
 
+type AgentStateMetricCard = {
+  label: string;
+  value: string;
+  helper: string;
+  toneClass: string;
+};
+
+type AgentStatePanelSummary = {
+  eyebrow: string;
+  headline: string;
+  detail: string;
+  statusLabel: string;
+  statusToneClass: string;
+  progressValue: number;
+  facts: string[];
+  nextLabel: string;
+  nextValue: string;
+  metricCards: AgentStateMetricCard[];
+};
+
+function humanizeStage(stage: string | null | undefined): string {
+  if (!stage) return 'idle';
+  return stage.replace(/^awaiting_/i, 'awaiting ').replace(/_/g, ' ').trim();
+}
+
+function pluralize(count: number, singular: string, plural?: string): string {
+  return `${count} ${count === 1 ? singular : (plural ?? `${singular}s`)}`;
+}
+
+function getStateField<T = unknown>(state: Record<string, unknown> | null | undefined, ...keys: string[]): T | undefined {
+  if (!state) return undefined;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(state, key)) {
+      return state[key] as T;
+    }
+  }
+  return undefined;
+}
+
+function pathTail(path: string): string {
+  if (!path) return '';
+  const segments = path.split(/[\\/]/).filter(Boolean);
+  return segments.slice(-2).join('/') || path;
+}
+
 function inferSqlDraftEngine(workflow: WorkflowMode, agentRole: AgentRole, sql: string): "clickhouse" | "oracle" {
   const cleaned = String(sql || "").toLowerCase();
   if (
@@ -272,78 +342,68 @@ function inferSqlDraftEngine(workflow: WorkflowMode, agentRole: AgentRole, sql: 
   ) {
     return "oracle";
   }
-  if (workflow === "AGENT" && (agentRole === "clickhouse_query" || agentRole === "data_analyst" || agentRole === "data_quality_tables")) {
+  if (workflow === "AGENT" && (agentRole === "clickhouse_query" || agentRole === "data_analyst")) {
     return "clickhouse";
   }
   return "clickhouse";
+}
+
+function normalizeGuideMetadata(payload: any): ClickHouseGuideMetadata {
+  const schema = Array.isArray(payload?.schema_info)
+    ? payload.schema_info
+        .filter(Boolean)
+        .map((column: any) => ({
+          name: String(column?.name ?? ""),
+          type: String(column?.type ?? ""),
+          category:
+            column?.category === "numeric" || column?.category === "string" || column?.category === "date" || column?.category === "other"
+              ? column.category
+              : "other",
+        }))
+        .filter((column: GuideSchemaColumn) => Boolean(column.name))
+    : [];
+  return {
+    availableTables: Array.isArray(payload?.available_tables) ? payload.available_tables.filter(Boolean) : [],
+    schema,
+    targetCandidates: Array.isArray(payload?.target_candidates) ? payload.target_candidates.filter(Boolean) : [],
+  };
 }
 
 function clampChatZoom(value: number): number {
   return Math.min(CHAT_ZOOM_MAX, Math.max(CHAT_ZOOM_MIN, Number(value) || CHAT_ZOOM_DEFAULT));
 }
 
-function buildDataQualityFormState(state?: Partial<DataQualityState> | null): DataQualityFormState {
-  return {
-    table: state?.table ?? "",
-    columns: Array.isArray(state?.columns) ? state.columns.filter(Boolean) : [],
-    sampleSize: state?.sampleSize === 0 ? 0 : (state?.sampleSize ?? 50_000),
-    rowFilter: state?.rowFilter ?? "",
-    timeColumn: state?.timeColumn ?? null,
-  };
-}
-
-function keepColumnsInSchema(columns: string[], schema: DataQualitySchemaColumn[]): string[] {
-  const available = new Set(schema.map((column) => column.name));
-  return columns.filter((column) => available.has(column));
-}
-
-function summarizeDataQualityRun(form: DataQualityFormState): string {
-  const lines = [
-    `Run data quality analysis on table \`${form.table}\`.`,
-    `Columns selected: ${form.columns.length}.`,
-  ];
-  if (form.rowFilter.trim()) {
-    lines.push(`Row filter: \`${form.rowFilter.trim()}\`.`);
-  }
-  if (form.timeColumn) {
-    lines.push(`Volumetric analysis on \`${form.timeColumn}\`.`);
-  }
-  lines.push(
-    form.sampleSize === 0
-      ? "Sample size: full scan capped at 2,000,000 rows."
-      : `Sample size: ${form.sampleSize.toLocaleString()} rows.`
-  );
-  return lines.join("\n");
-}
-
 const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
   manager: 'Agent Manager',
   clickhouse_query: 'Clickhouse SQL',
   data_analyst: 'Data Analyst',
+  feature_engineer: 'Feature Engineer',
+  auto_ml: 'Auto-ML',
   file_management: 'File management',
   pdf_creator: 'PDF creator',
   oracle_analyst: 'Oracle SQL',
-  data_quality_tables: 'Data quality - Tables',
 };
 
 const AGENT_ROLE_SHORT_LABELS: Record<AgentRole, string> = {
   manager: 'MGR',
   clickhouse_query: 'CLICK',
   data_analyst: 'ANALYST',
+  feature_engineer: 'FEATURE',
+  auto_ml: 'AUTO-ML',
   file_management: 'FILES',
   pdf_creator: 'PDF',
   oracle_analyst: 'ORACLE',
-  data_quality_tables: 'QUALITY',
 };
 
 const AGENT_MENTION_TARGETS: MentionTargetDefinition[] = [
   { id: 'manager', label: 'Agent Manager', shortLabel: 'MGR', aliases: ['manager', 'planner', 'planificateur'], role: 'manager', icon: Star, tone: 'from-amber-500 to-orange-500' },
   { id: 'clickhouse', label: 'Clickhouse SQL', shortLabel: 'CLICK', aliases: ['clickhouse', 'clickhousesql'], role: 'clickhouse_query', icon: Database, tone: 'from-cyan-500 to-sky-500' },
   { id: 'data_analyst', label: 'Data Analyst', shortLabel: 'ANALYST', aliases: ['analyst', 'dataanalyst'], role: 'data_analyst', icon: Cpu, tone: 'from-violet-500 to-fuchsia-500' },
+  { id: 'feature_engineer', label: 'Feature Engineer', shortLabel: 'FEATURE', aliases: ['featureengineer', 'features'], role: 'feature_engineer', icon: BrainCircuit, tone: 'from-lime-500 to-emerald-500' },
+  { id: 'auto_ml', label: 'Auto-ML', shortLabel: 'AUTO-ML', aliases: ['automl', 'ml'], role: 'auto_ml', icon: BrainCircuit, tone: 'from-rose-500 to-orange-500' },
   { id: 'oracle', label: 'Oracle SQL', shortLabel: 'ORACLE', aliases: ['oracle', 'oraclesql'], role: 'oracle_analyst', icon: Database, tone: 'from-orange-500 to-amber-500' },
   { id: 'files', label: 'File management', shortLabel: 'FILES', aliases: ['file', 'files', 'filemanager'], role: 'file_management', icon: FolderOpen, tone: 'from-emerald-500 to-teal-500' },
   { id: 'pdf', label: 'PDF creator', shortLabel: 'PDF', aliases: ['pdf', 'pdfcreator'], role: 'pdf_creator', icon: File, tone: 'from-slate-600 to-slate-800' },
-  { id: 'quality', label: 'Data quality - Tables', shortLabel: 'QUALITY', aliases: ['quality', 'dataquality'], role: 'data_quality_tables', icon: BarChart3, tone: 'from-fuchsia-500 to-pink-500' },
   { id: 'designer', label: 'Designer', shortLabel: 'DESIGN', aliases: ['designer'], icon: FilePenLine, tone: 'from-pink-500 to-rose-500' },
   { id: 'writer', label: 'Writer', shortLabel: 'WRITER', aliases: ['writer', 'redacteur', 'rédacteur'], icon: FilePenLine, tone: 'from-indigo-500 to-blue-500' },
   { id: 'strategist', label: 'Strategist', shortLabel: 'STRAT', aliases: ['strategist', 'stratege', 'stratège'], icon: BrainCircuit, tone: 'from-purple-500 to-indigo-500' },
@@ -487,7 +547,7 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 
 - C'est l'agent **chef d'orchestre**.
 - Tu peux lui décrire directement un objectif métier, par exemple : **"analyse les ventes puis exporte le résultat en CSV"**.
-- Il peut déléguer à d'autres agents comme **Clickhouse SQL**, **Data Analyst**, **Oracle SQL**, **File management**, **PDF creator** ou **Data quality - Tables** quand c'est pertinent.
+- Il peut déléguer à d'autres agents comme **Clickhouse SQL**, **Data Analyst**, **Feature Engineer**, **Auto-ML**, **Oracle SQL**, **File management** ou **PDF creator** quand c'est pertinent.
 - C'est le bon choix si tu ne sais pas encore quel agent utiliser.
 
 ### Clickhouse SQL
@@ -523,13 +583,6 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 - Il peut reprendre le **dernier résultat utile du chat** ou un contenu que tu colles manuellement.
 - Utilise-le quand tu veux un **livrable PDF clair et partageable**, avec une mise en page cohérente avec l'app.
 
-### Data quality - Tables
-
-- Cet agent sert à faire de la **data quality** et du **profiling statistique** sur une table.
-- Il s'utilise via un **formulaire guidé** où tu choisis la table, les colonnes, le sample size, le filtre éventuel et la colonne temporelle.
-- Il calcule des statistiques, détecte les anomalies, puis produit une **synthèse structurée** avec recommandations.
-- Utilise-le pour des demandes comme : **"check data quality on customers"** ou **"profile the sales table"**.
-
 ## Autres modes utiles
 
 - **RAG Knowledge** : interroger ta base documentaire avec recherche sémantique.
@@ -545,7 +598,6 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 - Si tu veux analyser des données Oracle, choisis **Oracle SQL**.
 - Si tu veux produire ou manipuler un fichier, choisis **File management**.
 - Si tu veux transformer un résultat en document prêt à partager, choisis **PDF creator**.
-- Si tu veux auditer la qualité d'une table, choisis **Data quality - Tables** puis **Open form**.
 - Si tu veux automatiser un scénario récurrent, utilise **LangGraph Planning**.
 
 Si tu veux, je peux aussi te proposer **quel agent utiliser selon ton besoin exact**.`;
@@ -559,7 +611,7 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 
 - This is the **orchestrator** agent.
 - You can give it a business outcome such as **"analyze sales and export the result to CSV"**.
-- It can delegate to **Clickhouse SQL**, **Data Analyst**, **Oracle SQL**, **File management**, **PDF creator**, or **Data quality - Tables** when needed.
+- It can delegate to **Clickhouse SQL**, **Data Analyst**, **Feature Engineer**, **Auto-ML**, **Oracle SQL**, **File management**, or **PDF creator** when needed.
 - Use it when you want the app to decide the best path for you.
 
 ### Clickhouse SQL
@@ -595,13 +647,6 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 - It can reuse the **latest useful assistant result in the chat** or work from content you paste manually.
 - Use it when you want a **shareable PDF deliverable** with a clean layout aligned with the app.
 
-### Data quality - Tables
-
-- This agent runs **data-quality profiling and statistical diagnostics** on a table.
-- It opens a **guided form** where you choose the table, columns, sample size, optional row filter, and optional time column.
-- It computes metrics, detects anomalies, and returns a **structured quality summary** with recommendations.
-- Use it for requests like **"profile the customers table"** or **"check the data quality of sales records"**.
-
 ## Other useful modes
 
 - **RAG Knowledge**: query your document base with semantic retrieval.
@@ -617,7 +662,6 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 - Pick **Oracle SQL** when your goal is to analyze data from Oracle.
 - Pick **File management** when your goal is to create, inspect, or export files.
 - Pick **PDF creator** when your goal is to turn an analysis into a polished PDF deliverable.
-- Pick **Data quality - Tables** and click **Open form** when you want a guided table-quality analysis.
 - Use **LangGraph Planning** when you want an automated recurring workflow.
 
 If you want, I can also tell you **which mode or agent to use for your exact task**.`;
@@ -663,8 +707,8 @@ export function ChatInterface({
   const lastAssistantMessageRef = useRef<HTMLDivElement>(null);
   const zoomControlRef = useRef<HTMLDivElement>(null);
   const agentIntroBootstrapRef = useRef<string | null>(null);
-  const dataQualityAutoOpenRef = useRef(false);
-  const dataQualityMetadataRequestRef = useRef(0);
+  const featureEngineerGuideAutoOpenRef = useRef(false);
+  const autoMlGuideAutoOpenRef = useRef(false);
   const toolsIslandRef = useRef<HTMLDivElement>(null);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
   const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -673,11 +717,12 @@ export function ChatInterface({
   const managerAgentState = normalizeManagerAgentState((currentConversation?.agentState as any)?.manager);
   const clickhouseAgentState = currentConversation?.agentState?.clickhouse;
   const dataAnalystAgentState = normalizeDataAnalystAgentState((currentConversation?.agentState as any)?.dataAnalyst);
+  const featureEngineerAgentState = normalizeFeatureEngineerAgentState((currentConversation?.agentState as any)?.featureEngineer);
+  const autoMlAgentState = normalizeAutoMlAgentState((currentConversation?.agentState as any)?.autoMl);
   const planningAgentState = normalizePlanningAgentState((currentConversation?.agentState as any)?.planning, browserTimeZone);
   const fileManagerAgentState = normalizeFileManagerAgentState((currentConversation?.agentState as any)?.fileManager);
   const pdfCreatorAgentState = normalizePdfCreatorAgentState((currentConversation?.agentState as any)?.pdfCreator);
   const oracleAnalystAgentState = normalizeOracleAnalystAgentState((currentConversation?.agentState as any)?.oracleAnalyst);
-  const dataQualityAgentState = normalizeDataQualityState((currentConversation?.agentState as any)?.dataQuality);
   const fallbackMessages = currentConversation?.messages || [
     {
       id: "1",
@@ -740,14 +785,28 @@ export function ChatInterface({
   const [isToolsIslandOpen, setIsToolsIslandOpen] = useState(false);
   const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
   const [isMcpMenuExpanded, setIsMcpMenuExpanded] = useState(workflow === 'MCP');
-  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables');
+  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'feature_engineer' || agentRole === 'auto_ml' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
-  const [isDataQualityModalOpen, setIsDataQualityModalOpen] = useState(false);
-  const [isDataQualityMetadataLoading, setIsDataQualityMetadataLoading] = useState(false);
-  const [dataQualityFormError, setDataQualityFormError] = useState<string | null>(null);
-  const [dataQualityForm, setDataQualityForm] = useState<DataQualityFormState>(() => buildDataQualityFormState(dataQualityAgentState));
-  const [dataQualityTables, setDataQualityTables] = useState<string[]>(dataQualityAgentState.availableTables);
-  const [dataQualitySchema, setDataQualitySchema] = useState<DataQualitySchemaColumn[]>(dataQualityAgentState.schemaInfo);
+  const [isFeatureEngineerGuideOpen, setIsFeatureEngineerGuideOpen] = useState(false);
+  const [isAutoMlGuideOpen, setIsAutoMlGuideOpen] = useState(false);
+  const [isGuideMetadataLoading, setIsGuideMetadataLoading] = useState(false);
+  const [guideFormError, setGuideFormError] = useState<string | null>(null);
+  const [featureEngineerGuideForm, setFeatureEngineerGuideForm] = useState<FeatureEngineerGuideForm>({
+    table: featureEngineerAgentState.selectedTable ?? "",
+    goal: "",
+    notes: "",
+  });
+  const [autoMlGuideForm, setAutoMlGuideForm] = useState<AutoMlGuideForm>({
+    table: autoMlAgentState.selectedTable ?? "",
+    targetColumn: autoMlAgentState.targetColumn ?? "",
+    goal: "",
+    notes: "",
+  });
+  const [featureEngineerGuideTables, setFeatureEngineerGuideTables] = useState<string[]>(featureEngineerAgentState.availableTables);
+  const [featureEngineerGuideSchema, setFeatureEngineerGuideSchema] = useState<GuideSchemaColumn[]>(featureEngineerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
+  const [autoMlGuideTables, setAutoMlGuideTables] = useState<string[]>(autoMlAgentState.availableTables);
+  const [autoMlGuideSchema, setAutoMlGuideSchema] = useState<GuideSchemaColumn[]>(autoMlAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
+  const [autoMlTargetCandidates, setAutoMlTargetCandidates] = useState<string[]>([]);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const persistedPlanningDraftKey = JSON.stringify((currentConversation?.agentState as any)?.planning?.draft ?? null);
 
@@ -764,7 +823,8 @@ export function ChatInterface({
     activeRequestControllerRef.current?.abort();
     activeRequestControllerRef.current = null;
     agentIntroBootstrapRef.current = null;
-    dataQualityAutoOpenRef.current = false;
+    featureEngineerGuideAutoOpenRef.current = false;
+    autoMlGuideAutoOpenRef.current = false;
     onCurrentIdChange(null);
     setInput("");
     setAttachments([]);
@@ -773,8 +833,9 @@ export function ChatInterface({
     setIsPlanningModalOpen(false);
     setIsPlanningMonitorOpen(false);
     setIsFileManagerConfigOpen(false);
-    setIsDataQualityModalOpen(false);
-    setDataQualityFormError(null);
+    setIsFeatureEngineerGuideOpen(false);
+    setIsAutoMlGuideOpen(false);
+    setGuideFormError(null);
     setIsConsoleOpen(false);
     setIsAgentStatePanelOpen(false);
   };
@@ -1028,6 +1089,87 @@ export function ChatInterface({
     }
   };
 
+  const fetchClickHouseGuideMetadata = async (table?: string) => {
+    const response = await fetch('/api/clickhouse/guide-metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        table: table?.trim() || undefined,
+        clickhouse: {
+          host: config.clickhouseHost,
+          port: config.clickhousePort,
+          database: config.clickhouseDatabase,
+          username: config.clickhouseUsername,
+          password: config.clickhousePassword,
+          secure: config.clickhouseSecure,
+          verify_ssl: config.disableSslVerification ? false : (config.clickhouseVerifySsl ?? true),
+          http_path: config.clickhouseHttpPath,
+          query_limit: config.clickhouseQueryLimit,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || `ClickHouse metadata error: ${response.status}`);
+    }
+
+    return normalizeGuideMetadata(await response.json());
+  };
+
+  const loadFeatureEngineerGuideMetadata = async (nextTable?: string) => {
+    setIsGuideMetadataLoading(true);
+    setGuideFormError(null);
+    try {
+      const metadata = await fetchClickHouseGuideMetadata(nextTable);
+      setFeatureEngineerGuideTables(metadata.availableTables);
+      setFeatureEngineerGuideSchema(metadata.schema);
+      setFeatureEngineerGuideForm((prev) => ({
+        ...prev,
+        table: nextTable?.trim() ?? prev.table,
+      }));
+    } catch (error) {
+      setGuideFormError(error instanceof Error ? error.message : 'Unable to load ClickHouse metadata.');
+    } finally {
+      setIsGuideMetadataLoading(false);
+    }
+  };
+
+  const loadAutoMlGuideMetadata = async (nextTable?: string) => {
+    setIsGuideMetadataLoading(true);
+    setGuideFormError(null);
+    try {
+      const metadata = await fetchClickHouseGuideMetadata(nextTable);
+      setAutoMlGuideTables(metadata.availableTables);
+      setAutoMlGuideSchema(metadata.schema);
+      setAutoMlTargetCandidates(metadata.targetCandidates);
+      setAutoMlGuideForm((prev) => {
+        const nextTarget = metadata.targetCandidates.includes(prev.targetColumn) ? prev.targetColumn : '';
+        return {
+          ...prev,
+          table: nextTable?.trim() ?? prev.table,
+          targetColumn: nextTarget,
+        };
+      });
+    } catch (error) {
+      setGuideFormError(error instanceof Error ? error.message : 'Unable to load ClickHouse metadata.');
+    } finally {
+      setIsGuideMetadataLoading(false);
+    }
+  };
+
+  const openFeatureEngineerGuide = async () => {
+    setIsFeatureEngineerGuideOpen(true);
+    setIsAutoMlGuideOpen(false);
+    await loadFeatureEngineerGuideMetadata(featureEngineerGuideForm.table || featureEngineerAgentState.selectedTable || undefined);
+  };
+
+  const openAutoMlGuide = async () => {
+    setIsAutoMlGuideOpen(true);
+    setIsFeatureEngineerGuideOpen(false);
+    await loadAutoMlGuideMetadata(autoMlGuideForm.table || autoMlAgentState.selectedTable || undefined);
+  };
+
   useEffect(() => {
     if (workflow === 'CREWAI' || isPlanningModalOpen || isPlanningMonitorOpen) {
       void loadPlanningState();
@@ -1035,10 +1177,67 @@ export function ChatInterface({
   }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen]);
 
   useEffect(() => {
-    if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst' || agentRole === 'data_quality_tables')) {
+    if (isFeatureEngineerGuideOpen) return;
+    setFeatureEngineerGuideForm((prev) => ({
+      ...prev,
+      table: featureEngineerAgentState.selectedTable ?? prev.table ?? "",
+    }));
+    setFeatureEngineerGuideTables(featureEngineerAgentState.availableTables);
+    if (featureEngineerAgentState.schemaInfo.length > 0) {
+      setFeatureEngineerGuideSchema(
+        featureEngineerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const }))
+      );
+    }
+  }, [featureEngineerAgentState, isFeatureEngineerGuideOpen]);
+
+  useEffect(() => {
+    if (isAutoMlGuideOpen) return;
+    setAutoMlGuideForm((prev) => ({
+      ...prev,
+      table: autoMlAgentState.selectedTable ?? prev.table ?? "",
+      targetColumn: autoMlAgentState.targetColumn ?? prev.targetColumn ?? "",
+    }));
+    setAutoMlGuideTables(autoMlAgentState.availableTables);
+    if (autoMlAgentState.schemaInfo.length > 0) {
+      const nextSchema = autoMlAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const }));
+      setAutoMlGuideSchema(nextSchema);
+      setAutoMlTargetCandidates(nextSchema.map((column) => column.name));
+    }
+  }, [autoMlAgentState, isAutoMlGuideOpen]);
+
+  useEffect(() => {
+    if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'feature_engineer' || agentRole === 'auto_ml' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst')) {
       setIsOtherAgentsOpen(true);
     }
   }, [workflow, agentRole, isAgentMenuExpanded]);
+
+  useEffect(() => {
+    if (workflow === 'AGENT' && agentRole === 'feature_engineer' && !isLoading) {
+      if (!featureEngineerGuideAutoOpenRef.current && !hasMeaningfulConversationMessages(currentConversation?.messages ?? [])) {
+        featureEngineerGuideAutoOpenRef.current = true;
+        void openFeatureEngineerGuide();
+      }
+      return;
+    }
+    featureEngineerGuideAutoOpenRef.current = false;
+    if (agentRole !== 'feature_engineer') {
+      setIsFeatureEngineerGuideOpen(false);
+    }
+  }, [workflow, agentRole, isLoading, currentConversation]);
+
+  useEffect(() => {
+    if (workflow === 'AGENT' && agentRole === 'auto_ml' && !isLoading) {
+      if (!autoMlGuideAutoOpenRef.current && !hasMeaningfulConversationMessages(currentConversation?.messages ?? [])) {
+        autoMlGuideAutoOpenRef.current = true;
+        void openAutoMlGuide();
+      }
+      return;
+    }
+    autoMlGuideAutoOpenRef.current = false;
+    if (agentRole !== 'auto_ml') {
+      setIsAutoMlGuideOpen(false);
+    }
+  }, [workflow, agentRole, isLoading, currentConversation]);
 
   useEffect(() => {
     if (workflow !== 'AGENT') {
@@ -1055,7 +1254,7 @@ export function ChatInterface({
 
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
-    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst' && agentRole !== 'data_quality_tables') return;
+    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'feature_engineer' && agentRole !== 'auto_ml' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst') return;
     if (hasMeaningfulConversationMessages(currentConversation.messages)) return;
     if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
 
@@ -1079,274 +1278,6 @@ export function ChatInterface({
       )
     );
   }, [workflow, agentRole, currentConversation, isLoading, onConversationsChange]);
-
-  useEffect(() => {
-    if (isDataQualityModalOpen) {
-      return;
-    }
-    setDataQualityForm(buildDataQualityFormState(dataQualityAgentState));
-    setDataQualityTables(dataQualityAgentState.availableTables);
-    setDataQualitySchema(dataQualityAgentState.schemaInfo);
-  }, [dataQualityAgentState, isDataQualityModalOpen]);
-
-  const loadDataQualityMetadata = async (nextTable?: string, preferredColumns?: string[]) => {
-    const requestId = ++dataQualityMetadataRequestRef.current;
-    const normalizedTable = String(nextTable ?? '').trim();
-    setIsDataQualityMetadataLoading(true);
-    setDataQualityFormError(null);
-    try {
-      const response = await fetch('/api/data-quality/options', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          table: normalizedTable || undefined,
-          clickhouse: {
-            host: config.clickhouseHost,
-            port: config.clickhousePort,
-            database: config.clickhouseDatabase,
-            username: config.clickhouseUsername,
-            password: config.clickhousePassword,
-            secure: config.clickhouseSecure,
-            verify_ssl: config.disableSslVerification ? false : (config.clickhouseVerifySsl ?? true),
-            http_path: config.clickhouseHttpPath,
-            query_limit: config.clickhouseQueryLimit,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.detail || `Data quality metadata error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (requestId !== dataQualityMetadataRequestRef.current) return;
-
-      const normalizedState = normalizeDataQualityState({
-        table: normalizedTable || null,
-        schemaInfo: data.schema_info,
-        availableTables: data.available_tables,
-        availableColumns: data.available_columns,
-        dateColumns: data.date_columns,
-      });
-
-      setDataQualityTables(normalizedState.availableTables);
-      setDataQualitySchema(normalizedState.schemaInfo);
-      setDataQualityForm((prev) => {
-        const explicitColumnsProvided = Array.isArray(preferredColumns);
-        const preservedColumns = keepColumnsInSchema(preferredColumns ?? prev.columns, normalizedState.schemaInfo);
-        const nextColumns = normalizedTable
-          ? (
-              preservedColumns.length > 0
-                ? preservedColumns
-                : explicitColumnsProvided
-                  ? []
-                  : normalizedState.schemaInfo.map((column) => column.name)
-            )
-          : [];
-        const nextTimeColumn =
-          prev.timeColumn && normalizedState.dateColumns.includes(prev.timeColumn)
-            ? prev.timeColumn
-            : null;
-
-        return {
-          ...prev,
-          table: normalizedTable,
-          columns: nextColumns,
-          timeColumn: nextTimeColumn,
-        };
-      });
-    } catch (error) {
-      if (requestId !== dataQualityMetadataRequestRef.current) return;
-      setDataQualityTables([]);
-      setDataQualitySchema([]);
-      setDataQualityForm((prev) => ({
-        ...prev,
-        table: normalizedTable,
-        columns: [],
-        timeColumn: null,
-      }));
-      setDataQualityFormError(error instanceof Error ? error.message : 'Unable to load data-quality metadata.');
-    } finally {
-      if (requestId === dataQualityMetadataRequestRef.current) {
-        setIsDataQualityMetadataLoading(false);
-      }
-    }
-  };
-
-  const openDataQualityModal = async () => {
-    setIsDataQualityModalOpen(true);
-    setDataQualityFormError(null);
-    await loadDataQualityMetadata(dataQualityForm.table, dataQualityForm.columns);
-  };
-
-  useEffect(() => {
-    if (workflow === 'AGENT' && agentRole === 'data_quality_tables') {
-      if (isLoading) {
-        return;
-      }
-      if (!dataQualityAutoOpenRef.current) {
-        dataQualityAutoOpenRef.current = true;
-        void openDataQualityModal();
-      }
-      return;
-    }
-
-    dataQualityAutoOpenRef.current = false;
-    setIsDataQualityModalOpen(false);
-    setDataQualityFormError(null);
-  }, [
-    workflow,
-    agentRole,
-    isLoading,
-  ]);
-
-  const handleDataQualityRun = async () => {
-    const table = dataQualityForm.table.trim();
-    const columns = keepColumnsInSchema(dataQualityForm.columns, dataQualitySchema);
-    if (!table) {
-      setDataQualityFormError('Choose a table before running the analysis.');
-      return;
-    }
-    if (columns.length === 0) {
-      setDataQualityFormError('Select at least one column to profile.');
-      return;
-    }
-
-    const selectedTimeColumn =
-      dataQualityForm.timeColumn && dataQualitySchema.some((column) => column.name === dataQualityForm.timeColumn && column.category === 'date')
-        ? dataQualityForm.timeColumn
-        : null;
-    const payload = {
-      __dq__: true,
-      table,
-      columns,
-      sample_size: dataQualityForm.sampleSize,
-      ...(dataQualityForm.rowFilter.trim() ? { row_filter: dataQualityForm.rowFilter.trim() } : {}),
-      ...(selectedTimeColumn ? { time_column: selectedTimeColumn } : {}),
-    };
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: summarizeDataQualityRun({
-        ...dataQualityForm,
-        table,
-        columns,
-        timeColumn: selectedTimeColumn,
-      }),
-      timestamp: Date.now(),
-    };
-    const baseMessages = currentConversation?.messages ?? messages;
-    const nextMessages = [...baseMessages, userMsg];
-
-    setDataQualityFormError(null);
-    setIsLoading(true);
-    const controller = new AbortController();
-    activeRequestControllerRef.current = controller;
-
-    try {
-      const response = await fetch('/api/chat/data-quality-agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          message: JSON.stringify(payload, null, 2),
-          history: buildConversationMemory(nextMessages).steps.map((step) => ({
-            role: step.role,
-            content: step.content,
-          })),
-          agent_state: dataQualityAgentState ?? undefined,
-          clickhouse: {
-            host: config.clickhouseHost,
-            port: config.clickhousePort,
-            database: config.clickhouseDatabase,
-            username: config.clickhouseUsername,
-            password: config.clickhousePassword,
-            secure: config.clickhouseSecure,
-            verify_ssl: config.disableSslVerification ? false : (config.clickhouseVerifySsl ?? true),
-            http_path: config.clickhouseHttpPath,
-            query_limit: config.clickhouseQueryLimit,
-          },
-          llm_base_url: config.baseUrl,
-          llm_model: config.model,
-          llm_api_key: config.apiKey || undefined,
-          llm_provider: config.provider,
-          disable_ssl_verification: config.disableSslVerification ?? false,
-        }),
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.detail || `Data Quality Agent error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const nextState = normalizeDataQualityState(data.agent_state);
-      const assistantDataQualityMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: data.answer,
-        timestamp: Date.now(),
-        steps: data.steps,
-        actions: data.actions,
-      };
-      const conversationMessages = [...nextMessages, assistantDataQualityMsg];
-
-      if (!currentId) {
-        const conversationId = Date.now().toString();
-        const newConversation: Conversation = {
-          id: conversationId,
-          title: `Data quality · ${table}`,
-          messages: conversationMessages,
-          memory: buildConversationMemory(conversationMessages),
-          updatedAt: Date.now(),
-          agentState: {
-            dataQuality: nextState,
-          },
-        };
-        onConversationsChange((prev) => [newConversation, ...prev]);
-        onCurrentIdChange(conversationId);
-      } else {
-        onConversationsChange((prev) => {
-          const idx = prev.findIndex((conversation) => conversation.id === currentId);
-          if (idx === -1) return prev;
-          const updated = [...prev];
-          updated[idx] = {
-            ...updated[idx],
-            messages: conversationMessages,
-            memory: buildConversationMemory(conversationMessages),
-            updatedAt: Date.now(),
-            agentState: {
-              ...(updated[idx].agentState ?? {}),
-              dataQuality: nextState,
-            },
-          };
-          const [conversation] = updated.splice(idx, 1);
-          updated.unshift(conversation);
-          return updated;
-        });
-      }
-
-      setIsConnected(true);
-      setDataQualityForm(buildDataQualityFormState(nextState));
-      setDataQualityTables(nextState.availableTables);
-      setDataQualitySchema(nextState.schemaInfo);
-      setIsDataQualityModalOpen(false);
-    } catch (error) {
-      if ((error as any)?.name === 'AbortError') {
-        setIsConnected(true);
-        setDataQualityFormError('Run stopped.');
-        return;
-      }
-      setIsConnected(false);
-      setDataQualityFormError(error instanceof Error ? error.message : 'Unable to run the data-quality analysis.');
-    } finally {
-      if (activeRequestControllerRef.current === controller) {
-        activeRequestControllerRef.current = null;
-      }
-      setIsLoading(false);
-    }
-  };
 
   const openPlanningModal = (nextDraft?: Partial<CrewPlanDraft> | null) => {
     if (nextDraft) {
@@ -1658,6 +1589,47 @@ export function ChatInterface({
     setIsLoading(false);
   };
 
+  const launchFeatureEngineerGuide = async () => {
+    if (!featureEngineerGuideForm.table.trim()) {
+      setGuideFormError('Choose a ClickHouse table before launching Feature Engineer.');
+      return;
+    }
+    setGuideFormError(null);
+    setIsFeatureEngineerGuideOpen(false);
+    const prompt = [
+      `Generate predictive feature ideas for the ClickHouse table \`${featureEngineerGuideForm.table.trim()}\`.`,
+      featureEngineerGuideForm.goal.trim() ? `Business objective: ${featureEngineerGuideForm.goal.trim()}` : "",
+      featureEngineerGuideForm.notes.trim() ? `Additional guidance: ${featureEngineerGuideForm.notes.trim()}` : "",
+      "Return the best engineered variables, explain why they matter, and include reusable SQL expressions.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    await handleSend(prompt);
+  };
+
+  const launchAutoMlGuide = async () => {
+    if (!autoMlGuideForm.table.trim()) {
+      setGuideFormError('Choose a ClickHouse table before launching Auto-ML.');
+      return;
+    }
+    if (!autoMlGuideForm.targetColumn.trim()) {
+      setGuideFormError('Choose the prediction target column before launching Auto-ML.');
+      return;
+    }
+    setGuideFormError(null);
+    setIsAutoMlGuideOpen(false);
+    const prompt = [
+      `Benchmark machine-learning models on the ClickHouse table \`${autoMlGuideForm.table.trim()}\`.`,
+      `Use \`${autoMlGuideForm.targetColumn.trim()}\` as the prediction target.`,
+      autoMlGuideForm.goal.trim() ? `Business objective: ${autoMlGuideForm.goal.trim()}` : "",
+      autoMlGuideForm.notes.trim() ? `Additional guidance: ${autoMlGuideForm.notes.trim()}` : "",
+      "Compare several baseline models and return a practical recommendation with a comparison table.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    await handleSend(prompt);
+  };
+
   const handleMentionSelect = (target: MentionTargetDefinition) => {
     const cursor = textareaRef.current?.selectionStart ?? inputCursor ?? input.length;
     const nextValue = replaceMentionToken(input, cursor, `@${target.aliases[0]}`);
@@ -1702,10 +1674,6 @@ export function ChatInterface({
           ? 'manager'
           : agentRole;
 
-    if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'data_quality_tables') {
-      void openDataQualityModal();
-      return;
-    }
     if ((!text.trim() && attachments.length === 0) || isLoading) return;
 
     // Construct the user message object
@@ -1777,11 +1745,12 @@ export function ChatInterface({
       let nextManagerAgentState = managerAgentState;
       let nextClickhouseAgentState = clickhouseAgentState;
       let nextDataAnalystAgentState = dataAnalystAgentState;
+      let nextFeatureEngineerAgentState = featureEngineerAgentState;
+      let nextAutoMlAgentState = autoMlAgentState;
       let nextPlanningAgentState = planningAgentState;
       let nextFileManagerAgentState = fileManagerAgentState;
       let nextPdfCreatorAgentState = pdfCreatorAgentState;
       let nextOracleAnalystAgentState = oracleAnalystAgentState;
-      let nextDataQualityAgentState = dataQualityAgentState;
       const disableSslVerification = config.disableSslVerification ?? false;
       const effectiveEmbeddingVerifySsl = disableSslVerification ? false : (config.embeddingVerifySsl ?? true);
       const effectiveClickhouseVerifySsl = disableSslVerification ? false : (config.clickhouseVerifySsl ?? true);
@@ -1804,6 +1773,34 @@ export function ChatInterface({
           text: hit.text,
           score: hit.score,
         })),
+      };
+      const serializedFeatureEngineerState = {
+        stage: featureEngineerAgentState.stage,
+        pending_request: featureEngineerAgentState.pendingRequest,
+        available_tables: featureEngineerAgentState.availableTables,
+        selected_table: featureEngineerAgentState.selectedTable,
+        schema_info: featureEngineerAgentState.schemaInfo,
+        clarification_prompt: featureEngineerAgentState.clarificationPrompt,
+        clarification_options: featureEngineerAgentState.clarificationOptions,
+        feature_ideas: featureEngineerAgentState.featureIdeas,
+        final_answer: featureEngineerAgentState.finalAnswer,
+        last_error: featureEngineerAgentState.lastError,
+      };
+      const serializedAutoMlState = {
+        stage: autoMlAgentState.stage,
+        pending_request: autoMlAgentState.pendingRequest,
+        available_tables: autoMlAgentState.availableTables,
+        selected_table: autoMlAgentState.selectedTable,
+        schema_info: autoMlAgentState.schemaInfo,
+        target_column: autoMlAgentState.targetColumn,
+        feature_columns: autoMlAgentState.featureColumns,
+        clarification_prompt: autoMlAgentState.clarificationPrompt,
+        clarification_options: autoMlAgentState.clarificationOptions,
+        comparison_rows: autoMlAgentState.comparisonRows,
+        problem_type: autoMlAgentState.problemType,
+        recommended_model: autoMlAgentState.recommendedModel,
+        final_answer: autoMlAgentState.finalAnswer,
+        last_error: autoMlAgentState.lastError,
       };
 
       // Route the request based on the selected workflow
@@ -1966,10 +1963,11 @@ export function ChatInterface({
             manager_state: managerAgentState ?? undefined,
             clickhouse_state: clickhouseAgentState ?? undefined,
             data_analyst_state: serializedDataAnalystState,
+            feature_engineer_state: serializedFeatureEngineerState,
+            auto_ml_state: serializedAutoMlState,
             file_manager_state: fileManagerAgentState ?? undefined,
             pdf_creator_state: pdfCreatorAgentState ?? undefined,
             oracle_analyst_state: oracleAnalystAgentState ?? undefined,
-            data_quality_state: dataQualityAgentState ?? undefined,
             clickhouse: {
               host: config.clickhouseHost,
               port: config.clickhousePort,
@@ -2024,10 +2022,11 @@ export function ChatInterface({
         nextManagerAgentState = normalizeManagerAgentState((data.agent_state as any)?.manager);
         nextClickhouseAgentState = (data.agent_state as any)?.clickhouse ?? nextClickhouseAgentState;
         nextDataAnalystAgentState = normalizeDataAnalystAgentState((data.agent_state as any)?.dataAnalyst);
+        nextFeatureEngineerAgentState = normalizeFeatureEngineerAgentState((data.agent_state as any)?.featureEngineer);
+        nextAutoMlAgentState = normalizeAutoMlAgentState((data.agent_state as any)?.autoMl);
         nextFileManagerAgentState = normalizeFileManagerAgentState((data.agent_state as any)?.fileManager);
         nextPdfCreatorAgentState = normalizePdfCreatorAgentState((data.agent_state as any)?.pdfCreator);
         nextOracleAnalystAgentState = normalizeOracleAnalystAgentState((data.agent_state as any)?.oracleAnalyst);
-        nextDataQualityAgentState = normalizeDataQualityState((data.agent_state as any)?.dataQuality);
         setIsConnected(true);
 
         const assistantManagerMsg: Message = {
@@ -2051,10 +2050,11 @@ export function ChatInterface({
               manager: nextManagerAgentState,
               clickhouse: nextClickhouseAgentState,
               dataAnalyst: nextDataAnalystAgentState,
+              featureEngineer: nextFeatureEngineerAgentState,
+              autoMl: nextAutoMlAgentState,
               fileManager: nextFileManagerAgentState,
               pdfCreator: nextPdfCreatorAgentState,
               oracleAnalyst: nextOracleAnalystAgentState,
-              dataQuality: nextDataQualityAgentState,
             },
             messages: [...updated[idx].messages, assistantManagerMsg],
             memory: buildConversationMemory([...updated[idx].messages, assistantManagerMsg]),
@@ -2123,6 +2123,134 @@ export function ChatInterface({
             },
             messages: [...updated[idx].messages, assistantDataAnalystMsg],
             memory: buildConversationMemory([...updated[idx].messages, assistantDataAnalystMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'feature_engineer') {
+        const response = await fetch('/api/chat/feature-engineer-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: serializedFeatureEngineerState,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: effectiveClickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Feature Engineer Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextFeatureEngineerAgentState = normalizeFeatureEngineerAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantFeatureEngineerMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              featureEngineer: nextFeatureEngineerAgentState,
+            },
+            messages: [...updated[idx].messages, assistantFeatureEngineerMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantFeatureEngineerMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'auto_ml') {
+        const response = await fetch('/api/chat/auto-ml-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: serializedAutoMlState,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: effectiveClickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Auto-ML Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextAutoMlAgentState = normalizeAutoMlAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantAutoMlMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              autoMl: nextAutoMlAgentState,
+            },
+            messages: [...updated[idx].messages, assistantAutoMlMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantAutoMlMsg]),
             updatedAt: Date.now(),
           };
           return updated;
@@ -2555,14 +2683,16 @@ export function ChatInterface({
         ? "Ask a ClickHouse question or request a chart..."
       : workflow === 'AGENT' && agentRole === 'data_analyst'
         ? "Ask for a deeper multi-step ClickHouse investigation..."
+      : workflow === 'AGENT' && agentRole === 'feature_engineer'
+        ? "Ask for predictive features or engineered variables from a ClickHouse table..."
+      : workflow === 'AGENT' && agentRole === 'auto_ml'
+        ? "Ask to benchmark ML models on a ClickHouse target..."
       : workflow === 'AGENT' && agentRole === 'file_management'
         ? "Ask to list, read, create, move, edit, or delete files..."
         : workflow === 'AGENT' && agentRole === 'pdf_creator'
-          ? "Ask to turn the latest analysis or pasted content into a PDF..."
+        ? "Ask to turn the latest analysis or pasted content into a PDF..."
         : workflow === 'AGENT' && agentRole === 'oracle_analyst'
           ? "Ask an Oracle business question and I will translate it into SQL..."
-        : workflow === 'AGENT' && agentRole === 'data_quality_tables'
-          ? "Open the Data Quality form to configure a profiling run..."
         : workflow === 'AGENT' && agentRole === 'manager'
           ? "Describe the outcome you want, and the Manager will route it if needed..."
         : workflow === 'MCP'
@@ -2598,15 +2728,19 @@ export function ChatInterface({
         ? 'Agent Manager'
         : agentRole === 'clickhouse_query'
           ? 'Clickhouse SQL'
-          : agentRole === 'data_analyst'
-            ? 'Data Analyst'
+        : agentRole === 'data_analyst'
+          ? 'Data Analyst'
+          : agentRole === 'feature_engineer'
+            ? 'Feature Engineer'
+            : agentRole === 'auto_ml'
+              ? 'Auto-ML'
             : agentRole === 'file_management'
               ? 'File management'
               : agentRole === 'pdf_creator'
                 ? 'PDF creator'
                 : agentRole === 'oracle_analyst'
                   ? 'Oracle SQL'
-                  : 'Data quality'
+                  : 'Agent'
       : workflow === 'MCP'
         ? activeMcpToolLabel
       : workflow === 'RAG'
@@ -2642,6 +2776,24 @@ export function ChatInterface({
               eyebrowClass: 'text-violet-700 dark:text-violet-300',
               buttonClass: 'border-violet-400/60 bg-violet-500 text-white shadow-[0_18px_40px_rgba(139,92,246,0.28)] hover:bg-violet-400 dark:border-violet-300/20 dark:bg-violet-500 dark:hover:bg-violet-400',
             }
+          : agentRole === 'feature_engineer'
+            ? {
+                eyebrow: 'Agent',
+                label: 'Feature Engineer',
+                icon: BrainCircuit,
+                iconWrapClass: 'bg-lime-50 text-lime-600 ring-1 ring-lime-200 dark:bg-lime-900/25 dark:text-lime-300 dark:ring-lime-800/70',
+                eyebrowClass: 'text-lime-700 dark:text-lime-300',
+                buttonClass: 'border-lime-400/60 bg-lime-500 text-white shadow-[0_18px_40px_rgba(132,204,22,0.28)] hover:bg-lime-400 dark:border-lime-300/20 dark:bg-lime-500 dark:hover:bg-lime-400',
+              }
+            : agentRole === 'auto_ml'
+              ? {
+                  eyebrow: 'Agent',
+                  label: 'Auto-ML',
+                  icon: BrainCircuit,
+                  iconWrapClass: 'bg-rose-50 text-rose-600 ring-1 ring-rose-200 dark:bg-rose-900/25 dark:text-rose-300 dark:ring-rose-800/70',
+                  eyebrowClass: 'text-rose-700 dark:text-rose-300',
+                  buttonClass: 'border-rose-400/60 bg-rose-500 text-white shadow-[0_18px_40px_rgba(244,63,94,0.28)] hover:bg-rose-400 dark:border-rose-300/20 dark:bg-rose-500 dark:hover:bg-rose-400',
+                }
           : agentRole === 'file_management'
             ? {
                 eyebrow: 'Agent',
@@ -2671,11 +2823,11 @@ export function ChatInterface({
                   }
                 : {
                     eyebrow: 'Agent',
-                    label: 'Data quality - Tables',
-                    icon: BarChart3,
-                    iconWrapClass: 'bg-fuchsia-50 text-fuchsia-600 ring-1 ring-fuchsia-200 dark:bg-fuchsia-900/25 dark:text-fuchsia-300 dark:ring-fuchsia-800/70',
-                    eyebrowClass: 'text-fuchsia-700 dark:text-fuchsia-300',
-                    buttonClass: 'border-fuchsia-400/60 bg-fuchsia-500 text-white shadow-[0_18px_40px_rgba(217,70,239,0.28)] hover:bg-fuchsia-400 dark:border-fuchsia-300/20 dark:bg-fuchsia-500 dark:hover:bg-fuchsia-400',
+                    label: 'Agent',
+                    icon: Star,
+                    iconWrapClass: 'bg-slate-100 text-slate-700 ring-1 ring-slate-200 dark:bg-slate-800/70 dark:text-slate-200 dark:ring-slate-700/70',
+                    eyebrowClass: 'text-slate-600 dark:text-slate-300',
+                    buttonClass: 'border-slate-400/60 bg-slate-700 text-white shadow-[0_18px_40px_rgba(51,65,85,0.28)] hover:bg-slate-600 dark:border-slate-300/20 dark:bg-slate-700 dark:hover:bg-slate-600',
                   }
     : workflow === 'MCP'
       ? {
@@ -2764,13 +2916,15 @@ export function ChatInterface({
             ? FolderOpen
             : delegateRole === 'data_analyst'
               ? Cpu
+              : delegateRole === 'feature_engineer'
+                ? BrainCircuit
+                : delegateRole === 'auto_ml'
+                  ? BrainCircuit
               : delegateRole === 'oracle_analyst'
                 ? Database
                 : delegateRole === 'pdf_creator'
                   ? File
-                  : delegateRole === 'data_quality_tables'
-                    ? BarChart3
-                    : Database;
+                  : Database;
         nodes.push({
           id: delegateRole,
           label: AGENT_ROLE_LABELS[delegateRole],
@@ -2850,58 +3004,644 @@ export function ChatInterface({
     }
     return null;
   }, [messages, latestTraceSteps]);
-  const confidenceBadge = useMemo(() => {
+  const latestTraceStats = useMemo(() => {
+    const successCount = latestTraceSteps.filter((step) => step.status === 'success').length;
+    const errorCount = latestTraceSteps.filter((step) => step.status === 'error').length;
+    const runningCount = latestTraceSteps.filter((step) => step.status === 'running').length;
+    return { successCount, errorCount, runningCount };
+  }, [latestTraceSteps]);
+  const confidenceSummary = useMemo(() => {
     if (latestConfidence === null || latestConfidence === undefined) {
       return {
-        label: 'Estimated',
-        value: 'Unknown',
-        tone: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+        label: 'Unrated',
+        helper: 'No explicit confidence signal from the latest reply.',
+        toneClass: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
       };
     }
-    const percent = Math.round(latestConfidence * 100);
     if (latestConfidence >= 0.72) {
       return {
-        label: 'Confidence',
-        value: `${percent}% · High`,
-        tone: 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
+        label: 'High',
+        helper: 'The latest answer looks well-grounded and internally consistent.',
+        toneClass: 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
       };
     }
     if (latestConfidence >= 0.45) {
       return {
-        label: 'Confidence',
-        value: `${percent}% · Medium`,
-        tone: 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
+        label: 'Medium',
+        helper: 'The answer is usable but may still rely on assumptions or incomplete evidence.',
+        toneClass: 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
       };
     }
     return {
-      label: 'Confidence',
-      value: `${percent}% · Low`,
-      tone: 'border-rose-200/80 bg-rose-50/80 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
+      label: 'Low',
+      helper: 'The latest answer likely needs validation or another pass.',
+      toneClass: 'border-rose-200/80 bg-rose-50/80 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
     };
   }, [latestConfidence]);
-  const activityIndicators = useMemo(() => {
-    const labels = workflow === 'AGENT'
-      ? agentRole === 'manager'
-        ? ['routing specialists', 'reviewing prior context', 'preparing next hand-off']
-        : agentRole === 'clickhouse_query'
-          ? ['reviewing schema', 'planning SQL variants', 'formatting result']
-          : agentRole === 'data_analyst'
-            ? ['probing data patterns', 'comparing query variants', 'writing executive summary']
-            : agentRole === 'file_management'
-              ? ['inspecting files', 'checking safe operations', 'preparing output']
-              : agentRole === 'oracle_analyst'
-                ? ['inspecting Oracle schema', 'checking SQL safety', 'summarizing findings']
-                : ['preparing specialist workflow', 'reviewing context', 'packaging response']
-      : workflow === 'RAG'
-        ? ['vectorizing request', 'retrieving context', 'grounding answer']
-        : workflow === 'MCP'
-          ? ['connecting tool session', 'calling MCP tool', 'formatting tool output']
-          : workflow === 'CREWAI'
-            ? ['reviewing schedule draft', 'checking triggers', 'assembling execution plan']
-            : ['consulting prompt context', 'generating variants', 'writing final answer'];
-    return labels;
-  }, [workflow, agentRole]);
-  const activityProgressValue = isLoading ? 72 : latestTraceSteps.length > 0 ? Math.min(100, 28 + latestTraceSteps.length * 14) : 16;
+  const agentStateSummary = useMemo<AgentStatePanelSummary>(() => {
+    const lastAssistantPreview = compactMessagePreview(lastAssistantMessage?.content ?? '', 120);
+    const latestRows = lastAssistantMessage?.sources?.length ?? 0;
+    const defaultMetricCards: AgentStateMetricCard[] = [
+      {
+        label: 'Recent execution',
+        value: latestTraceSteps.length > 0
+          ? `${pluralize(latestTraceSteps.length, 'step')}`
+          : 'No trace yet',
+        helper: latestTraceSteps.length > 0
+          ? `${latestTraceStats.successCount} successful · ${latestTraceStats.errorCount} blocked`
+          : 'No recorded specialist execution in this conversation yet.',
+        toneClass: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+      },
+      {
+        label: 'Answer posture',
+        value: confidenceSummary.label,
+        helper: confidenceSummary.helper,
+        toneClass: confidenceSummary.toneClass,
+      },
+    ];
+
+    if (workflow === 'AGENT') {
+      if (agentRole === 'manager') {
+        const routeTarget = managerAgentState.lastDelegateLabel || 'direct answer mode';
+        const pipeline = managerAgentState.pendingPipeline;
+        const facts = [
+          managerAgentState.activeDelegate
+            ? `Current delegate: ${managerAgentState.lastDelegateLabel || managerAgentState.activeDelegate.replace(/_/g, ' ')}.`
+            : 'No specialist currently locked in.',
+          managerAgentState.lastRoutingReason
+            ? `Routing logic: ${compactMessagePreview(managerAgentState.lastRoutingReason, 104)}`
+            : 'Routing reason will appear after the first delegated decision.',
+          pipeline
+            ? `Pipeline: ${pipeline.kind === 'clickhouse_to_file' ? 'ClickHouse to file export' : 'ClickHouse to PDF export'} (${humanizeStage(pipeline.stage)}).`
+            : 'No multi-agent pipeline is pending.',
+        ].filter(Boolean) as string[];
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Coordinating ${routeTarget}`
+            : managerAgentState.activeDelegate
+              ? `Monitoring ${routeTarget}`
+              : 'Ready to route the next request',
+          detail: managerAgentState.lastRoutingReason
+            ? compactMessagePreview(managerAgentState.lastRoutingReason, 160)
+            : 'The manager decides whether to answer directly or hand work to a specialist, then keeps the conversation stitched together.',
+          statusLabel: isLoading ? 'Delegating' : managerAgentState.activeDelegate ? 'Monitoring' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+            : managerAgentState.activeDelegate
+              ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 82 : pipeline ? 58 : 16,
+          facts: facts.slice(0, 4),
+          nextLabel: 'Next best action',
+          nextValue: pipeline
+            ? 'Let the specialist finish, or provide the missing export detail if the manager asks for one.'
+            : managerAgentState.activeDelegate
+              ? 'Wait for the delegated agent to finish or answer its follow-up question.'
+              : 'Send a request in plain language. The manager will decide whether specialist routing is needed.',
+          metricCards: [
+            {
+              label: 'Specialist focus',
+              value: managerAgentState.lastDelegateLabel || 'Direct answer',
+              helper: pipeline ? `Pipeline stage: ${humanizeStage(pipeline.stage)}.` : 'No export chain is waiting in the background.',
+              toneClass: 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200',
+            },
+            ...defaultMetricCards.slice(1),
+          ],
+        };
+      }
+
+      if (agentRole === 'clickhouse_query') {
+        const selectedTable = String(getStateField(clickhouseAgentState as Record<string, unknown>, 'selectedTable', 'selected_table') ?? '');
+        const stage = String(getStateField(clickhouseAgentState as Record<string, unknown>, 'stage') ?? 'idle');
+        const clarificationPrompt = String(getStateField(clickhouseAgentState as Record<string, unknown>, 'clarificationPrompt', 'clarification_prompt') ?? '');
+        const clarificationOptions = (getStateField<string[]>(clickhouseAgentState as Record<string, unknown>, 'clarificationOptions', 'clarification_options') ?? []).length;
+        const schema = getStateField<Array<Record<string, unknown>>>(clickhouseAgentState as Record<string, unknown>, 'schema') ?? [];
+        const lastSql = String(getStateField(clickhouseAgentState as Record<string, unknown>, 'lastSql', 'last_sql') ?? '');
+        const lastRows = (getStateField<Record<string, unknown>[]>(clickhouseAgentState as Record<string, unknown>, 'lastResultRows', 'last_result_rows') ?? []).length;
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Working on ${selectedTable || 'the next ClickHouse request'}`
+            : selectedTable
+              ? `Focused on table ${selectedTable}`
+              : 'Ready for the next ClickHouse question',
+          detail: clarificationPrompt
+            ? compactMessagePreview(clarificationPrompt, 160)
+            : lastSql
+              ? `The latest SQL run is available and the last visible answer is: ${lastAssistantPreview}`
+              : 'This agent answers operational SQL questions, table lookups, sample rows, counts, and light charting on ClickHouse.',
+          statusLabel: isLoading ? 'Querying' : stage.startsWith('awaiting_') ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-200'
+            : stage.startsWith('awaiting_')
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 78 : stage.startsWith('awaiting_') ? 52 : lastSql ? 34 : 14,
+          facts: [
+            selectedTable ? `Selected table: ${selectedTable}.` : 'No table is locked yet.',
+            `Stage: ${humanizeStage(stage)}.`,
+            schema.length > 0 ? `Known schema: ${pluralize(schema.length, 'column')}.` : 'Schema is not cached yet.',
+            clarificationOptions > 0 ? `Open clarification choices: ${clarificationOptions}.` : `Last result size: ${pluralize(lastRows, 'row')}.`,
+          ],
+          nextLabel: 'Next best action',
+          nextValue: stage.startsWith('awaiting_')
+            ? 'Choose one of the clarification options in the chat so the SQL can continue.'
+            : selectedTable
+              ? 'Ask for a count, sample rows, field list, a filtered SQL question, or a chart.'
+              : 'Ask about tables, fields, counts, or example rows and the agent will infer the right ClickHouse path.',
+          metricCards: [
+            {
+              label: 'Selected table',
+              value: selectedTable || 'Not fixed yet',
+              helper: selectedTable ? `Current stage: ${humanizeStage(stage)}.` : 'The agent will infer a table or ask only if the request stays ambiguous.',
+              toneClass: 'border-cyan-200/80 bg-cyan-50/80 text-cyan-700 dark:border-cyan-800/70 dark:bg-cyan-950/20 dark:text-cyan-200',
+            },
+            {
+              label: 'Latest query output',
+              value: lastSql ? `${pluralize(lastRows, 'row')} returned` : 'No SQL yet',
+              helper: lastSql ? compactMessagePreview(lastSql, 96) : 'A SQL preview appears here after the first executed request.',
+              toneClass: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+            },
+          ],
+        };
+      }
+
+      if (agentRole === 'data_analyst') {
+        const sqlCount = dataAnalystAgentState.lastSqls.length;
+        const lastRows = dataAnalystAgentState.lastResultRows.length;
+        const facts = [
+          dataAnalystAgentState.selectedTable ? `Primary table: ${dataAnalystAgentState.selectedTable}.` : 'No primary table fixed yet.',
+          sqlCount > 0 ? `Executed probes: ${pluralize(sqlCount, 'SQL')}.` : 'No analytical SQL executed yet.',
+          dataAnalystAgentState.knowledgeHits.length > 0 ? `Knowledge hits: ${pluralize(dataAnalystAgentState.knowledgeHits.length, 'document')}.` : 'No knowledge-base evidence added yet.',
+          dataAnalystAgentState.clarificationOptions.length > 0 ? `Pending clarification choices: ${dataAnalystAgentState.clarificationOptions.length}.` : `Latest dataset preview: ${pluralize(lastRows, 'row')}.`,
+        ];
+        return {
+          eyebrow: 'Analysis mission',
+          headline: isLoading
+            ? `Building the next analytical step${dataAnalystAgentState.selectedTable ? ` on ${dataAnalystAgentState.selectedTable}` : ''}`
+            : dataAnalystAgentState.finalAnswer
+              ? 'Analysis complete and ready to review'
+              : dataAnalystAgentState.pendingRequest
+                ? compactMessagePreview(dataAnalystAgentState.pendingRequest, 82)
+                : 'Ready for a deeper ClickHouse investigation',
+          detail: dataAnalystAgentState.finalAnswer
+            ? compactMessagePreview(dataAnalystAgentState.finalAnswer, 170)
+            : dataAnalystAgentState.clarificationPrompt
+              ? compactMessagePreview(dataAnalystAgentState.clarificationPrompt, 170)
+              : 'This analyst chains several SQL probes, compares evidence, and then turns the result into a business-facing narrative.',
+          statusLabel: isLoading ? 'Investigating' : dataAnalystAgentState.clarificationOptions.length > 0 ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-200'
+            : dataAnalystAgentState.clarificationOptions.length > 0
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 84 : sqlCount > 0 ? Math.min(88, 34 + sqlCount * 10) : 18,
+          facts: facts.slice(0, 4),
+          nextLabel: 'Next best action',
+          nextValue: dataAnalystAgentState.clarificationOptions.length > 0
+            ? 'Confirm the requested direction so the analysis can stop looping and finish the narrative.'
+            : dataAnalystAgentState.finalAnswer
+              ? 'Review the functional synthesis, then ask for a deeper drill-down or an export if needed.'
+              : 'Ask a business question, trend explanation, comparison, or anomaly investigation on ClickHouse.',
+          metricCards: [
+            {
+              label: 'Analytical depth',
+              value: sqlCount > 0 ? `${pluralize(sqlCount, 'query')} executed` : 'No probes yet',
+              helper: sqlCount > 0 ? `${pluralize(lastRows, 'row')} in the latest result set.` : 'The analyst will build step-by-step evidence before concluding.',
+              toneClass: 'border-violet-200/80 bg-violet-50/80 text-violet-700 dark:border-violet-800/70 dark:bg-violet-950/20 dark:text-violet-200',
+            },
+            {
+              label: 'Evidence posture',
+              value: dataAnalystAgentState.knowledgeHits.length > 0 ? `${pluralize(dataAnalystAgentState.knowledgeHits.length, 'KB source')}` : confidenceSummary.label,
+              helper: dataAnalystAgentState.knowledgeHits.length > 0 ? 'Knowledge hits are supplementing the SQL evidence.' : confidenceSummary.helper,
+              toneClass: dataAnalystAgentState.knowledgeHits.length > 0
+                ? 'border-fuchsia-200/80 bg-fuchsia-50/80 text-fuchsia-700 dark:border-fuchsia-800/70 dark:bg-fuchsia-950/20 dark:text-fuchsia-200'
+                : confidenceSummary.toneClass,
+            },
+          ],
+        };
+      }
+
+      if (agentRole === 'feature_engineer') {
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Designing predictive features${featureEngineerAgentState.selectedTable ? ` on ${featureEngineerAgentState.selectedTable}` : ''}`
+            : featureEngineerAgentState.selectedTable
+              ? `Feature ideas ready for ${featureEngineerAgentState.selectedTable}`
+              : 'Ready to propose engineered features',
+          detail: featureEngineerAgentState.finalAnswer
+            ? compactMessagePreview(featureEngineerAgentState.finalAnswer, 170)
+            : featureEngineerAgentState.clarificationPrompt
+              ? compactMessagePreview(featureEngineerAgentState.clarificationPrompt, 170)
+              : 'This agent turns a ClickHouse schema into practical engineered variables with reusable SQL expressions.',
+          statusLabel: isLoading ? 'Designing' : featureEngineerAgentState.clarificationOptions.length > 0 ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-lime-100 text-lime-700 dark:bg-lime-900/30 dark:text-lime-200'
+            : featureEngineerAgentState.clarificationOptions.length > 0
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 74 : featureEngineerAgentState.featureIdeas.length > 0 ? 42 : 14,
+          facts: [
+            featureEngineerAgentState.selectedTable ? `Selected table: ${featureEngineerAgentState.selectedTable}.` : 'No table selected yet.',
+            featureEngineerAgentState.schemaInfo.length > 0 ? `Schema in memory: ${pluralize(featureEngineerAgentState.schemaInfo.length, 'column')}.` : 'No schema cached yet.',
+            featureEngineerAgentState.featureIdeas.length > 0 ? `Feature ideas prepared: ${featureEngineerAgentState.featureIdeas.length}.` : 'No engineered features generated yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: featureEngineerAgentState.clarificationOptions.length > 0
+            ? 'Pick the target table in the chat so the feature proposal can continue.'
+            : 'Ask for predictive variables, derived features, or SQL-ready transformations on a ClickHouse table.',
+          metricCards: [
+            {
+              label: 'Feature set',
+              value: featureEngineerAgentState.featureIdeas.length > 0 ? `${pluralize(featureEngineerAgentState.featureIdeas.length, 'idea')}` : 'No ideas yet',
+              helper: featureEngineerAgentState.selectedTable ? `Working table: ${featureEngineerAgentState.selectedTable}.` : 'A table selection will unlock the feature proposal.',
+              toneClass: 'border-lime-200/80 bg-lime-50/80 text-lime-700 dark:border-lime-800/70 dark:bg-lime-950/20 dark:text-lime-200',
+            },
+            defaultMetricCards[1],
+          ],
+        };
+      }
+
+      if (agentRole === 'auto_ml') {
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Benchmarking models${autoMlAgentState.selectedTable ? ` on ${autoMlAgentState.selectedTable}` : ''}`
+            : autoMlAgentState.recommendedModel
+              ? `Model benchmark ready for ${autoMlAgentState.selectedTable || 'the selected table'}`
+              : 'Ready to compare ML models',
+          detail: autoMlAgentState.finalAnswer
+            ? compactMessagePreview(autoMlAgentState.finalAnswer, 170)
+            : autoMlAgentState.clarificationPrompt
+              ? compactMessagePreview(autoMlAgentState.clarificationPrompt, 170)
+              : 'This agent benchmarks several models on a ClickHouse dataset and returns a practical comparison table.',
+          statusLabel: isLoading ? 'Training' : autoMlAgentState.clarificationOptions.length > 0 ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-200'
+            : autoMlAgentState.clarificationOptions.length > 0
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 80 : autoMlAgentState.comparisonRows.length > 0 ? 50 : 12,
+          facts: [
+            autoMlAgentState.selectedTable ? `Selected table: ${autoMlAgentState.selectedTable}.` : 'No training table selected yet.',
+            autoMlAgentState.targetColumn ? `Target column: ${autoMlAgentState.targetColumn}.` : 'No target column fixed yet.',
+            autoMlAgentState.problemType ? `Problem type: ${autoMlAgentState.problemType}.` : 'Problem type not inferred yet.',
+            autoMlAgentState.recommendedModel ? `Recommended model: ${autoMlAgentState.recommendedModel}.` : 'No model recommendation yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: autoMlAgentState.clarificationOptions.length > 0
+            ? 'Pick the missing table or target column so the benchmark can start.'
+            : 'Ask to benchmark models, compare predictive baselines, or score a target on ClickHouse data.',
+          metricCards: [
+            {
+              label: 'Model benchmark',
+              value: autoMlAgentState.comparisonRows.length > 0 ? `${pluralize(autoMlAgentState.comparisonRows.length, 'model')}` : 'No results yet',
+              helper: autoMlAgentState.recommendedModel ? `Winner: ${autoMlAgentState.recommendedModel}.` : 'The winning model appears here after the benchmark.',
+              toneClass: 'border-rose-200/80 bg-rose-50/80 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
+            },
+            defaultMetricCards[1],
+          ],
+        };
+      }
+
+      if (agentRole === 'file_management') {
+        const pendingAction = fileManagerAgentState.pendingConfirmation?.toolName ?? '';
+        const lastPath = fileManagerAgentState.lastVisitedPath;
+        const lastResult = fileManagerAgentState.lastToolResult;
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? 'Executing the next file operation'
+            : pendingAction
+              ? `Waiting for confirmation on ${pendingAction.replace(/_/g, ' ')}`
+              : 'Ready to inspect or manipulate files',
+          detail: pendingAction
+            ? compactMessagePreview(fileManagerAgentState.pendingConfirmation?.summary ?? '', 170)
+            : lastResult
+              ? compactMessagePreview(lastResult, 170)
+              : 'This agent can inspect folders, read supported files, create assets, edit spreadsheets, and move or delete files with confirmation.',
+          statusLabel: isLoading ? 'Working' : pendingAction ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-200'
+            : pendingAction
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 74 : pendingAction ? 48 : lastResult ? 26 : 12,
+          facts: [
+            lastPath ? `Current folder focus: ${pathTail(lastPath)}.` : 'No folder focus cached yet.',
+            pendingAction ? `Pending confirmation: ${pendingAction.replace(/_/g, ' ')}.` : 'No destructive action is waiting for approval.',
+            lastResult ? `Latest outcome: ${compactMessagePreview(lastResult, 96)}` : 'No file result cached yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: pendingAction
+            ? 'Confirm or cancel the pending action in the chat so the file workflow can finish cleanly.'
+            : 'Ask to browse, read, create, move, rename, sort, or export files from the configured access root.',
+          metricCards: [
+            {
+              label: 'Folder focus',
+              value: lastPath ? pathTail(lastPath) : 'Not visited yet',
+              helper: lastPath ? 'The agent keeps the latest working path in memory.' : 'The first navigation request will establish the working context.',
+              toneClass: 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
+            },
+            {
+              label: 'Last operation',
+              value: pendingAction ? pendingAction.replace(/_/g, ' ') : 'No pending action',
+              helper: pendingAction ? 'User confirmation is required before execution continues.' : (lastResult ? compactMessagePreview(lastResult, 92) : 'The last successful file action will appear here.'),
+              toneClass: pendingAction
+                ? 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200'
+                : 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+            },
+          ],
+        };
+      }
+
+      if (agentRole === 'pdf_creator') {
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? 'Assembling a polished PDF package'
+            : pdfCreatorAgentState.lastOutputPath
+              ? `Latest PDF ready: ${pathTail(pdfCreatorAgentState.lastOutputPath)}`
+              : 'Ready to turn content into a clean PDF',
+          detail: pdfCreatorAgentState.pendingConfirmation?.summary
+            ? compactMessagePreview(pdfCreatorAgentState.pendingConfirmation.summary, 165)
+            : pdfCreatorAgentState.lastTitle
+              ? `Latest title: ${pdfCreatorAgentState.lastTitle}`
+              : 'This agent packages analysis results, summaries, and longer outputs into a polished PDF document.',
+          statusLabel: isLoading ? 'Generating' : pdfCreatorAgentState.stage.startsWith('awaiting_') ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-100'
+            : pdfCreatorAgentState.stage.startsWith('awaiting_')
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 76 : pdfCreatorAgentState.lastOutputPath ? 42 : 14,
+          facts: [
+            `Stage: ${humanizeStage(pdfCreatorAgentState.stage)}.`,
+            pdfCreatorAgentState.lastTitle ? `Latest document title: ${pdfCreatorAgentState.lastTitle}.` : 'No PDF title cached yet.',
+            pdfCreatorAgentState.lastOutputPath ? `Latest output path: ${pathTail(pdfCreatorAgentState.lastOutputPath)}.` : 'No PDF has been exported yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: pdfCreatorAgentState.stage.startsWith('awaiting_')
+            ? 'Provide the missing source content or confirm the pending overwrite so the PDF can be produced.'
+            : 'Ask for a polished PDF from the latest analysis, a summary, or any long-form result.',
+          metricCards: [
+            {
+              label: 'Latest export',
+              value: pdfCreatorAgentState.lastOutputPath ? pathTail(pdfCreatorAgentState.lastOutputPath) : 'No PDF yet',
+              helper: pdfCreatorAgentState.lastTitle ? `Document title: ${pdfCreatorAgentState.lastTitle}` : 'The output file will appear here after generation.',
+              toneClass: 'border-slate-300/80 bg-slate-100/80 text-slate-700 dark:border-slate-700/80 dark:bg-slate-900/30 dark:text-slate-200',
+            },
+            defaultMetricCards[1],
+          ],
+        };
+      }
+
+      if (agentRole === 'oracle_analyst') {
+        const rows = oracleAnalystAgentState.lastResultRows.length;
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Querying Oracle${oracleAnalystAgentState.selectedTable ? ` on ${oracleAnalystAgentState.selectedTable}` : ''}`
+            : oracleAnalystAgentState.selectedTable
+              ? `Focused on Oracle table ${oracleAnalystAgentState.selectedTable}`
+              : 'Ready for the next Oracle question',
+          detail: oracleAnalystAgentState.clarificationPrompt
+            ? compactMessagePreview(oracleAnalystAgentState.clarificationPrompt, 170)
+            : oracleAnalystAgentState.finalAnswer
+              ? compactMessagePreview(oracleAnalystAgentState.finalAnswer, 170)
+              : 'This agent translates natural language into Oracle SQL, checks the query plan, and returns a narrative answer.',
+          statusLabel: isLoading ? 'Querying' : oracleAnalystAgentState.stage.startsWith('awaiting_') ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-200'
+            : oracleAnalystAgentState.stage.startsWith('awaiting_')
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 76 : oracleAnalystAgentState.lastSql ? 36 : 14,
+          facts: [
+            oracleAnalystAgentState.selectedTable ? `Selected table: ${oracleAnalystAgentState.selectedTable}.` : 'No Oracle table fixed yet.',
+            `Schema cache: ${pluralize(oracleAnalystAgentState.schemaInfo.length, 'column')}.`,
+            oracleAnalystAgentState.lastSql ? `Latest result size: ${pluralize(rows, 'row')}.` : 'No Oracle SQL has run yet.',
+            oracleAnalystAgentState.actionLog.length > 0 ? `Action log entries: ${oracleAnalystAgentState.actionLog.length}.` : 'No action log yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: oracleAnalystAgentState.clarificationOptions.length > 0
+            ? 'Pick one of the clarification options so the Oracle query can continue.'
+            : 'Ask an Oracle SQL question, a schema lookup, a sample rows request, or a narrative business query.',
+          metricCards: [
+            {
+              label: 'Oracle focus',
+              value: oracleAnalystAgentState.selectedTable || 'No table yet',
+              helper: oracleAnalystAgentState.selectedTable ? `Current stage: ${humanizeStage(oracleAnalystAgentState.stage)}.` : 'The analyst can list tables or infer the best table from the request.',
+              toneClass: 'border-orange-200/80 bg-orange-50/80 text-orange-700 dark:border-orange-800/70 dark:bg-orange-950/20 dark:text-orange-200',
+            },
+            {
+              label: 'Latest query output',
+              value: oracleAnalystAgentState.lastSql ? `${pluralize(rows, 'row')} returned` : 'No SQL yet',
+              helper: oracleAnalystAgentState.lastSql ? compactMessagePreview(oracleAnalystAgentState.lastSql, 92) : 'A checked Oracle SQL statement will appear here after execution.',
+              toneClass: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+            },
+          ],
+        };
+      }
+
+    }
+
+    if (workflow === 'RAG') {
+      return {
+        eyebrow: 'Current mission',
+        headline: isLoading ? 'Retrieving supporting context' : 'Ready to answer with retrieved context',
+        detail: latestRows > 0
+          ? `${pluralize(latestRows, 'source')} attached to the latest answer.`
+          : 'This mode retrieves relevant document chunks first, then grounds the answer with them.',
+        statusLabel: isLoading ? 'Retrieving' : 'Ready',
+        statusToneClass: isLoading
+          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-200'
+          : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+        progressValue: isLoading ? 74 : latestRows > 0 ? 34 : 12,
+        facts: [
+          config.elasticsearchIndex ? `Index: ${config.elasticsearchIndex}.` : 'No OpenSearch index configured.',
+          `KNN neighbors: ${config.knnNeighbors}.`,
+          latestRows > 0 ? `Latest grounded answer used ${pluralize(latestRows, 'source')}.` : 'No grounded answer has been returned yet.',
+        ],
+        nextLabel: 'Next best action',
+        nextValue: 'Ask a question against your documents, or ingest new files from Settings to enrich the retrieval base.',
+        metricCards: [
+          {
+            label: 'Retrieval setup',
+            value: config.elasticsearchIndex || 'Index not configured',
+            helper: `Embedding neighbors currently set to ${config.knnNeighbors}.`,
+            toneClass: 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200',
+          },
+          {
+            label: 'Latest grounding',
+            value: latestRows > 0 ? `${pluralize(latestRows, 'source')}` : 'No sources yet',
+            helper: latestRows > 0 ? 'The latest reply carried retrieved source support.' : 'Sources will appear here after the first grounded answer.',
+            toneClass: 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+          },
+        ],
+      };
+    }
+
+    if (workflow === 'MCP') {
+      return {
+        eyebrow: 'Current mission',
+        headline: isLoading
+          ? `Running ${activeMcpToolLabel || 'the selected MCP tool'}`
+          : activeMcpToolLabel
+            ? `${activeMcpToolLabel} is ready`
+            : 'No MCP tool selected yet',
+        detail: activeMcpToolLabel
+          ? 'This mode opens a Python MCP client session, calls the selected tool, then formats the answer back into chat.'
+          : 'Select an MCP connector from Tools to start a tool-backed conversation.',
+        statusLabel: isLoading ? 'Calling tool' : activeMcpToolLabel ? 'Ready' : 'Idle',
+        statusToneClass: isLoading
+          ? 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-200'
+          : activeMcpToolLabel
+            ? 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200'
+            : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+        progressValue: isLoading ? 72 : activeMcpToolLabel ? 26 : 8,
+        facts: [
+          activeMcpToolLabel ? `Selected connector: ${activeMcpToolLabel}.` : 'Connector selection is still empty.',
+          latestTraceSteps.length > 0 ? `Latest MCP trace depth: ${pluralize(latestTraceSteps.length, 'step')}.` : 'No MCP execution trace recorded yet.',
+          lastAssistantMessage ? `Latest response: ${lastAssistantPreview}` : 'No MCP answer returned yet.',
+        ],
+        nextLabel: 'Next best action',
+        nextValue: activeMcpToolLabel
+          ? 'Ask the tool-backed question directly in chat, or switch MCP connector from the Tools overlay.'
+          : 'Open Tools, choose MCP, then select a connector to start using it.',
+        metricCards: [
+          {
+            label: 'Connector',
+            value: activeMcpToolLabel || 'Not selected',
+            helper: activeMcpToolLabel ? 'The connector stays pinned until you switch tools.' : 'Choose a configured MCP connector first.',
+            toneClass: 'border-teal-200/80 bg-teal-50/80 text-teal-700 dark:border-teal-800/70 dark:bg-teal-950/20 dark:text-teal-200',
+          },
+          defaultMetricCards[1],
+        ],
+      };
+    }
+
+    if (workflow === 'CREWAI') {
+      const latestRun = planningState.runs[0];
+      return {
+        eyebrow: 'Planning mission',
+        headline: isLoading
+          ? 'Reviewing the scheduling request'
+          : planningAgentState.readyToReview
+            ? 'Draft plan is ready for review'
+            : 'Ready to schedule an automated workflow',
+        detail: planningAgentState.lastQuestion
+          ? compactMessagePreview(planningAgentState.lastQuestion, 165)
+          : latestRun?.summary
+            ? compactMessagePreview(latestRun.summary, 165)
+            : 'This mode turns natural language into a multi-agent schedule, then executes saved plans with LangGraph.',
+        statusLabel: isLoading ? 'Planning' : planningAgentState.readyToReview ? 'Review' : 'Ready',
+        statusToneClass: isLoading
+          ? 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-200'
+          : planningAgentState.readyToReview
+            ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-200'
+            : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+        progressValue: isLoading ? 70 : planningAgentState.readyToReview ? 58 : 14,
+        facts: [
+          `Saved plans: ${planningState.plans.length}.`,
+          `Recent runs: ${planningState.runs.length}.`,
+          planningAgentState.missingFields.length > 0 ? `Still missing: ${planningAgentState.missingFields.join(', ')}.` : 'The current draft has all required inputs.',
+          planningAgentState.draft.agents.length > 0 ? `Draft agents: ${planningAgentState.draft.agents.map((agent) => AGENT_ROLE_LABELS[agent]).join(', ')}.` : 'No agent selected in the current draft yet.',
+        ],
+        nextLabel: 'Next best action',
+        nextValue: planningAgentState.readyToReview
+          ? 'Open the planning form to review and save the schedule, or ask for one more adjustment in chat.'
+          : 'Describe the recurring workflow in natural language, or open the planner form for a guided setup.',
+        metricCards: [
+          {
+            label: 'Planning draft',
+            value: planningAgentState.draft.name || 'Untitled draft',
+            helper: planningAgentState.draft.trigger.kind ? `Trigger: ${planningAgentState.draft.trigger.kind.replace(/_/g, ' ')}.` : 'A trigger will be attached once the draft is configured.',
+            toneClass: 'border-sky-200/80 bg-sky-50/80 text-sky-700 dark:border-sky-800/70 dark:bg-sky-950/20 dark:text-sky-200',
+          },
+          {
+            label: 'Latest run',
+            value: latestRun ? latestRun.status : 'No run yet',
+            helper: latestRun ? compactMessagePreview(latestRun.summary, 92) : 'Execution summaries appear here after the first automated run.',
+            toneClass: latestRun?.status === 'error'
+              ? 'border-rose-200/80 bg-rose-50/80 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200'
+              : 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200',
+          },
+        ],
+      };
+    }
+
+    return {
+      eyebrow: 'Current mission',
+      headline: isLoading ? 'Drafting the next answer' : 'Ready for a direct LLM exchange',
+      detail: lastAssistantMessage ? lastAssistantPreview : 'This mode answers directly from the LLM without retrieval or specialist tooling.',
+      statusLabel: isLoading ? 'Thinking' : 'Ready',
+      statusToneClass: isLoading
+        ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-200'
+        : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+      progressValue: isLoading ? 68 : 12,
+      facts: [
+        `Model: ${config.model || 'Not configured'}.`,
+        latestUserMessage ? `Latest user ask: ${compactMessagePreview(latestUserMessage.content, 96)}` : 'No user prompt yet.',
+        lastAssistantMessage ? `Latest answer: ${lastAssistantPreview}` : 'No assistant answer returned yet.',
+      ],
+      nextLabel: 'Next best action',
+      nextValue: 'Ask anything directly, or request a table, bullets, a summary, or a polished markdown answer.',
+      metricCards: [
+        {
+          label: 'Direct LLM mode',
+          value: config.model || 'Model not set',
+          helper: 'No retrieval or specialist routing is added in this mode.',
+          toneClass: 'border-blue-200/80 bg-blue-50/80 text-blue-700 dark:border-blue-800/70 dark:bg-blue-950/20 dark:text-blue-200',
+        },
+        defaultMetricCards[1],
+      ],
+    };
+  }, [
+    workflow,
+    agentRole,
+    isLoading,
+    lastAssistantMessage,
+    latestTraceSteps,
+    latestTraceStats,
+    latestConfidence,
+    confidenceSummary,
+    latestUserMessage,
+    managerAgentState,
+    clickhouseAgentState,
+    dataAnalystAgentState,
+    featureEngineerAgentState,
+    autoMlAgentState,
+    fileManagerAgentState,
+    pdfCreatorAgentState,
+    oracleAnalystAgentState,
+    planningAgentState,
+    planningState.plans,
+    planningState.runs,
+    activeMcpToolLabel,
+    config.model,
+    config.elasticsearchIndex,
+    config.knnNeighbors,
+  ]);
+  const activityProgressValue = agentStateSummary.progressValue;
+  const activityIndicators = agentStateSummary.facts.slice(0, 4);
+  const confidenceBadge = {
+    label: 'Confidence',
+    value:
+      latestConfidence === null || latestConfidence === undefined
+        ? 'Unrated'
+        : `${Math.round(latestConfidence * 100)}%`,
+    tone:
+      latestConfidence === null || latestConfidence === undefined
+        ? 'border-slate-200/80 bg-white/80 text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200'
+        : latestConfidence >= 0.72
+          ? 'border-emerald-200/80 bg-emerald-50/80 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/20 dark:text-emerald-200'
+          : latestConfidence >= 0.45
+            ? 'border-amber-200/80 bg-amber-50/80 text-amber-700 dark:border-amber-800/70 dark:bg-amber-950/20 dark:text-amber-200'
+            : 'border-rose-200/80 bg-rose-50/80 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
+  };
 
   return (
     <div className="flex h-screen relative overflow-hidden bg-[#f5f5f5] dark:bg-[#0f0f13] transition-colors duration-300">
@@ -3390,6 +4130,18 @@ export function ChatInterface({
                           <Cpu className="h-3.5 w-3.5" /> Data Analyst
                         </button>
                         <button
+                          onClick={() => handleAgentRoleSelection('feature_engineer')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'feature_engineer' ? 'bg-lime-500 text-white shadow-md shadow-lime-500/20' : 'bg-white/85 text-gray-700 border border-lime-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-lime-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <BrainCircuit className="h-3.5 w-3.5" /> Feature Engineer
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('auto_ml')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'auto_ml' ? 'bg-rose-500 text-white shadow-md shadow-rose-500/20' : 'bg-white/85 text-gray-700 border border-rose-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-rose-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <BrainCircuit className="h-3.5 w-3.5" /> Auto-ML
+                        </button>
+                        <button
                           onClick={() => handleAgentRoleSelection('file_management')}
                           onDoubleClick={() => setIsFileManagerConfigOpen(true)}
                           title="Double-click to configure"
@@ -3409,38 +4161,46 @@ export function ChatInterface({
                         >
                           <Database className="h-3.5 w-3.5" /> Oracle SQL
                         </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('data_quality_tables')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'data_quality_tables' ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/20' : 'bg-white/85 text-gray-700 border border-fuchsia-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-fuchsia-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <BarChart3 className="h-3.5 w-3.5" /> Data quality - Tables
-                        </button>
                       </div>
                     </div>
                   </div>
 
-                  {(agentRole === 'file_management' || agentRole === 'data_quality_tables') && (
+                  {agentRole === 'file_management' && (
                     <div className="flex flex-wrap gap-2">
-                      {agentRole === 'file_management' && (
-                        <button
-                          type="button"
-                          onClick={() => setIsFileManagerConfigOpen(true)}
-                          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
-                        >
-                          <Settings className="h-3.5 w-3.5" />
-                          Configure
-                        </button>
-                      )}
-                      {agentRole === 'data_quality_tables' && (
-                        <button
-                          type="button"
-                          onClick={openDataQualityModal}
-                          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
-                        >
-                          <BarChart3 className="h-3.5 w-3.5" />
-                          Open form
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => setIsFileManagerConfigOpen(true)}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800"
+                      >
+                        <Settings className="h-3.5 w-3.5" />
+                        Configure
+                      </button>
+                    </div>
+                  )}
+
+                  {agentRole === 'feature_engineer' && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void openFeatureEngineerGuide()}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-full bg-lime-500 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-lime-400"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Open guide
+                      </button>
+                    </div>
+                  )}
+
+                  {agentRole === 'auto_ml' && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void openAutoMlGuide()}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-full bg-rose-500 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-rose-400"
+                      >
+                        <BrainCircuit className="h-3.5 w-3.5" />
+                        Open guide
+                      </button>
                     </div>
                   )}
                 </div>
@@ -3528,14 +4288,17 @@ export function ChatInterface({
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
-                      Cognitive load
+                      {agentStateSummary.eyebrow}
                     </div>
                     <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
-                      {isLoading ? 'Agent actively working' : 'Idle but ready'}
+                      {agentStateSummary.headline}
+                    </div>
+                    <div className="mt-1 max-w-[22rem] text-xs text-gray-500 dark:text-gray-400">
+                      {agentStateSummary.detail}
                     </div>
                   </div>
-                  <div className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${isLoading ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200'}`}>
-                    {isLoading ? 'LIVE' : 'READY'}
+                  <div className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${agentStateSummary.statusToneClass}`}>
+                    {agentStateSummary.statusLabel}
                   </div>
                 </div>
                 <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-black/8 dark:bg-white/10">
@@ -3988,46 +4751,61 @@ export function ChatInterface({
           setIsFileManagerConfigOpen(false);
         }}
       />
-      <DataQualityModal
-        isOpen={isDataQualityModalOpen}
+      <AgentGuideModal
+        isOpen={isFeatureEngineerGuideOpen}
+        mode="feature_engineer"
         isBusy={isLoading}
-        isLoadingMetadata={isDataQualityMetadataLoading}
-        error={dataQualityFormError}
-        tables={dataQualityTables}
-        schema={dataQualitySchema}
-        selectedTable={dataQualityForm.table}
-        selectedColumns={dataQualityForm.columns}
-        sampleSize={dataQualityForm.sampleSize}
-        rowFilter={dataQualityForm.rowFilter}
-        timeColumn={dataQualityForm.timeColumn}
-        onClose={() => setIsDataQualityModalOpen(false)}
-        onRefreshMetadata={() => loadDataQualityMetadata(dataQualityForm.table, dataQualityForm.columns)}
+        isLoadingMetadata={isGuideMetadataLoading}
+        error={guideFormError}
+        tables={featureEngineerGuideTables}
+        schema={featureEngineerGuideSchema}
+        selectedTable={featureEngineerGuideForm.table}
+        goalText={featureEngineerGuideForm.goal}
+        notesText={featureEngineerGuideForm.notes}
+        onClose={() => setIsFeatureEngineerGuideOpen(false)}
+        onRefreshMetadata={() => void loadFeatureEngineerGuideMetadata(featureEngineerGuideForm.table || undefined)}
         onTableChange={(table) => {
-          setDataQualityForm((prev) => ({
-            ...prev,
-            table,
-            columns: [],
-            timeColumn: null,
-          }));
-          void loadDataQualityMetadata(table);
+          setFeatureEngineerGuideForm((prev) => ({ ...prev, table }));
+          void loadFeatureEngineerGuideMetadata(table);
         }}
-        onColumnsChange={(columns) => {
-          const uniqueColumns = Array.from(new Set(columns));
-          setDataQualityForm((prev) => ({
-            ...prev,
-            columns: uniqueColumns,
-          }));
+        onGoalTextChange={(value) => {
+          setFeatureEngineerGuideForm((prev) => ({ ...prev, goal: value }));
         }}
-        onSampleSizeChange={(sampleSize) => {
-          setDataQualityForm((prev) => ({ ...prev, sampleSize }));
+        onNotesTextChange={(value) => {
+          setFeatureEngineerGuideForm((prev) => ({ ...prev, notes: value }));
         }}
-        onRowFilterChange={(rowFilter) => {
-          setDataQualityForm((prev) => ({ ...prev, rowFilter }));
+        onSubmit={() => void launchFeatureEngineerGuide()}
+        onStop={stopCurrentExecution}
+      />
+      <AgentGuideModal
+        isOpen={isAutoMlGuideOpen}
+        mode="auto_ml"
+        isBusy={isLoading}
+        isLoadingMetadata={isGuideMetadataLoading}
+        error={guideFormError}
+        tables={autoMlGuideTables}
+        schema={autoMlGuideSchema}
+        selectedTable={autoMlGuideForm.table}
+        targetColumn={autoMlGuideForm.targetColumn}
+        targetCandidates={autoMlTargetCandidates}
+        goalText={autoMlGuideForm.goal}
+        notesText={autoMlGuideForm.notes}
+        onClose={() => setIsAutoMlGuideOpen(false)}
+        onRefreshMetadata={() => void loadAutoMlGuideMetadata(autoMlGuideForm.table || undefined)}
+        onTableChange={(table) => {
+          setAutoMlGuideForm((prev) => ({ ...prev, table, targetColumn: '' }));
+          void loadAutoMlGuideMetadata(table);
         }}
-        onTimeColumnChange={(timeColumn) => {
-          setDataQualityForm((prev) => ({ ...prev, timeColumn }));
+        onTargetColumnChange={(value) => {
+          setAutoMlGuideForm((prev) => ({ ...prev, targetColumn: value }));
         }}
-        onSubmit={handleDataQualityRun}
+        onGoalTextChange={(value) => {
+          setAutoMlGuideForm((prev) => ({ ...prev, goal: value }));
+        }}
+        onNotesTextChange={(value) => {
+          setAutoMlGuideForm((prev) => ({ ...prev, notes: value }));
+        }}
+        onSubmit={() => void launchAutoMlGuide()}
         onStop={stopCurrentExecution}
       />
       <SqlDraftModal

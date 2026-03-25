@@ -16,10 +16,11 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - [RAG Pipeline](#rag-pipeline)
 - [ClickHouse SQL Agent](#clickhouse-sql-agent)
 - [Data Analyst Agent](#data-analyst-agent)
+- [Feature Engineer Agent](#feature-engineer-agent)
+- [Auto-ML Agent](#auto-ml-agent)
 - [Oracle SQL Agent](#oracle-sql-agent)
 - [File Management Agent](#file-management-agent)
 - [PDF Creator Agent](#pdf-creator-agent)
-- [Data Quality - Tables Agent](#data-quality---tables-agent)
 - [Agents & Tools App Portal](#agents--tools-app-portal)
 - [MCP Integration](#mcp-integration)
 - [Configuration](#configuration)
@@ -33,17 +34,18 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | Category | Details |
 |----------|---------|
 | **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, CrewAI - Planning |
-| **7 agent roles** | Agent Manager, ClickHouse SQL, Data Analyst, Oracle SQL, File management, PDF creator, Data quality - Tables |
+| **8 agent roles** | Agent Manager, ClickHouse SQL, Data Analyst, Feature Engineer, Auto-ML, Oracle SQL, File management, PDF creator |
 | **Manager orchestration** | Agent Manager can delegate to every specialist agent and keep follow-up context across clarifications and confirmations |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
 | **Data Analyst agent** | Multi-step ClickHouse investigations with iterative evidence gathering, optional knowledge-base search, automatic SQL simplification retry, and CSV export on demand |
+| **Feature Engineer agent** | Guided ClickHouse feature ideation with schema preview, business objective capture, and reusable SQL expressions |
+| **Auto-ML agent** | Guided model benchmarking flow with target-column selection, comparison table, and baseline recommendation |
 | **Oracle agent** | Natural-language Oracle analysis, schema discovery, SQL validation, automatic repair on query errors, narrative Markdown output |
 | **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions, with early stop once the requested filesystem change is complete |
 | **PDF creator agent** | Backend Python-only PDF export agent to turn the latest useful analysis or pasted content into a polished document |
-| **Data quality agent** | Statistical profiling + LLM scoring for ClickHouse tables, launched from an overlay form above the chat |
 | **Planner / scheduler** | Schedule existing agents on fixed frequency, ClickHouse watch, or file-arrival trigger |
-| **MCP tools** | Connect any MCP server via FastMCP, test connection, real agentic tool-call loop over SSE or streamable HTTP |
+| **MCP tools** | Connect any MCP server via the Python MCP SDK, test connection, real agentic tool-call loop over SSE or streamable HTTP |
 | **Backend persistence** | Shared app config plus user-isolated conversations and preferences stored in backend-managed `DB.json` |
 | **Multi-user isolation** | Each browser/client keeps its own conversations and UI state while everyone shares the same server configuration |
 | **Backup workflow** | Export/import DB backups and force a resync from the latest backend state in Settings |
@@ -98,8 +100,9 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
                            │  │  /api/chat/pdf-creator-agent │
                            │  │  /api/oracle/test            │
                            │  │  /api/chat/oracle-analyst... │
-                           │  │  /api/data-quality/options   │
-                           │  │  /api/chat/data-quality-agent│
+                           │  │  /api/clickhouse/guide-metadata │
+                           │  │  /api/chat/feature-engineer...│
+                           │  │  /api/chat/auto-ml-agent     │
                            │  │  /api/chat/manager-agent     │
                            │  │  /api/planning/state         │
                            │  │  /api/planning/plans/*       │
@@ -124,7 +127,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 ```
 
 - **Frontend** — React 19 + TypeScript + Tailwind CSS, bundled with Vite.
-- **Backend** — Python FastAPI (`server.py`) — multi-user state persistence, RAG pipeline, agent orchestration, ClickHouse agent, file-management agent, data-quality agent, planner, MCP client, OpenSearch management.
+- **Backend** — Python FastAPI (`server.py`) — multi-user state persistence, RAG pipeline, agent orchestration, ClickHouse specialists, file-management agent, planner, MCP client, and OpenSearch management.
 - **Vector store** — OpenSearch with `opensearch-py`.
 - **Analytics store** — ClickHouse over HTTP for the SQL agent.
 - **Oracle store** — Oracle via Python `oracledb` for the Oracle SQL agent.
@@ -213,17 +216,18 @@ Answers include cited sources `[1]`, `[2]` and a confidence score.
 
 ### Agents
 
-Multi-agent orchestration with seven roles:
+Multi-agent orchestration with eight roles:
 
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
 | **ClickHouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL, can produce charts, and can show result sets or schema lists as Markdown tables on demand |
 | **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, can export the latest dataset to CSV, and can surface a visible result table when requested |
+| **Feature Engineer** | Opens a guided setup to choose the ClickHouse table and business objective, then proposes engineered predictive variables with reusable SQL expressions |
+| **Auto-ML** | Opens a guided setup to choose the ClickHouse table, target column, and business objective, then benchmarks baseline models and returns a comparison table |
 | **Oracle SQL** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries, answers in business-facing Markdown, and preserves a readable data table in the final answer |
 | **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations and tabular output when a file summary is naturally table-shaped |
 | **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
-| **Data quality - Tables** | Profiles ClickHouse tables and generates an English Markdown quality report from a dedicated overlay form |
 
 #### ClickHouse SQL agent quick flow
 
@@ -259,6 +263,35 @@ The ClickHouse agent uses the backend only and always relies on the configured l
    - export the latest dataset to CSV when explicitly requested,
    - and return a business-facing Markdown answer with a visible result table when you ask for one.
 
+#### Feature Engineer quick flow
+
+1. Configure ClickHouse once in **Settings → ClickHouse SQL**.
+2. Switch to **Agents** mode and select **Feature Engineer**.
+3. A guided setup opens automatically on a fresh conversation.
+4. Choose:
+   - the source table,
+   - the business objective,
+   - optional analyst notes.
+5. Launch the run to receive:
+   - engineered feature ideas,
+   - the business rationale for each idea,
+   - reusable ClickHouse SQL expressions.
+
+#### Auto-ML quick flow
+
+1. Configure ClickHouse once in **Settings → ClickHouse SQL**.
+2. Switch to **Agents** mode and select **Auto-ML**.
+3. A guided setup opens automatically on a fresh conversation.
+4. Choose:
+   - the training table,
+   - the target column,
+   - the benchmark objective,
+   - optional analyst notes.
+5. Launch the run to receive:
+   - a model comparison table,
+   - the recommended baseline model,
+   - a practical narrative on how to proceed.
+
 #### Oracle SQL quick flow
 
 1. Configure Oracle in **Settings → Oracle SQL**.
@@ -289,19 +322,6 @@ The ClickHouse agent uses the backend only and always relies on the configured l
 2. Ask to export the latest useful analysis, or paste the content to turn into a PDF.
 3. The backend Python agent prepares a clean export with a professional layout.
 4. If the target PDF path already exists, the agent asks for explicit confirmation before overwrite.
-
-#### Data quality quick flow
-
-1. Configure ClickHouse once in **Settings → ClickHouse SQL**.
-2. Switch to **Agents** mode and select **Data quality - Tables**.
-3. A dedicated form opens above the chat.
-4. Select:
-   - the table,
-   - the columns to profile,
-   - the sample size,
-   - an optional row filter,
-   - an optional time column for volumetric analysis.
-5. Launch the run and receive an English Markdown report with executive summary, per-column findings, recommendations, and optional volumetric analysis.
 
 ### CrewAI Planning
 
@@ -488,6 +508,46 @@ When enough evidence is gathered, the agent writes the final answer in English
 
 ---
 
+## Feature Engineer Agent
+
+The Feature Engineer agent is a ClickHouse specialist focused on turning an existing dataset into better model-ready variables.
+
+### Guided UX
+
+- A dedicated guide opens over the chat on a fresh session.
+- The user chooses the source table through clickable tiles.
+- A live schema preview appears on the right to help pick the correct dataset.
+- The user can frame the business objective and add optional notes before launching the analysis.
+
+### Backend endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/clickhouse/guide-metadata` | Load ClickHouse tables, schema preview, and candidate targets for guided agent setup |
+| `POST /api/chat/feature-engineer-agent` | Generate engineered feature ideas and reusable SQL expressions from a ClickHouse table |
+
+---
+
+## Auto-ML Agent
+
+The Auto-ML agent benchmarks several baseline models on top of a ClickHouse dataset and returns a practical recommendation.
+
+### Guided UX
+
+- A dedicated guide opens over the chat on a fresh session.
+- The user chooses the source table and then the prediction target column.
+- A live schema preview helps the user understand the available fields before launching the benchmark.
+- Business framing and analyst notes can be added before running the comparison.
+
+### Backend endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/clickhouse/guide-metadata` | Load ClickHouse tables, schema preview, and candidate targets for guided agent setup |
+| `POST /api/chat/auto-ml-agent` | Benchmark baseline models on ClickHouse data and return a comparison table with recommendation |
+
+---
+
 ## Oracle SQL Agent
 
 The Oracle SQL agent is designed for Oracle-specific natural-language analytics with a narrative business-facing answer.
@@ -579,44 +639,6 @@ The PDF Creator agent is a backend Python-only export agent built to turn chat r
 
 ---
 
-## Data Quality - Tables Agent
-
-The Data Quality agent profiles ClickHouse tables and then asks the local LLM to score data quality and explain risks in English.
-
-### Workflow
-
-```text
-User selects agent
-    ↓
-Overlay form opens above the chat
-    ↓
-Frontend loads tables + schema from backend
-    ↓
-User selects table, columns, sample size, optional row filter and optional time column
-    ↓
-Backend computes SQL statistics
-    ↓
-Local LLM scores issues and writes recommendations
-    ↓
-Final Markdown report returned in chat
-```
-
-### Output
-
-- Executive summary with overall score
-- Per-column findings
-- Prioritised recommendations
-- Optional volumetric section when a time column is provided
-
-### Backend endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/data-quality/options` | Load tables and schema metadata for the Data Quality form |
-| `POST /api/chat/data-quality-agent` | Execute a full data-quality run from structured parameters |
-
----
-
 ## Agents & Tools App Portal
 
 The **Agents & Tools** card on the landing page now opens a dynamic application portal instead of a placeholder page.
@@ -643,7 +665,7 @@ The **Agents & Tools** card on the landing page now opens a dynamic application 
 
 ## MCP Integration
 
-The backend uses **FastMCP** on the Python side to communicate with MCP servers.
+The backend uses the **Python MCP SDK** on the Python side to communicate with MCP servers.
 
 ### Backend endpoints
 
@@ -666,7 +688,7 @@ http://my-mcp-server:8080/mcp
 ### Tool call flow
 
 ```
-1. Backend connects to the MCP server via FastMCP
+1. Backend connects to the MCP server via the Python MCP SDK
 2. Lists available tools → converts to OpenAI function-calling format
 3. Sends user message + tool list to LLM
 4. LLM returns tool_calls → backend calls each tool via MCP
@@ -695,6 +717,7 @@ All settings are available in-app (no `.env` file needed).
 - Technical sections in many agent / LLM answers are automatically folded into expandable details blocks when possible.
 - When a new assistant answer arrives, the chat scrolls to the **top of that last answer** instead of the bottom of the full thread.
 - The mode selector is opened from a compact **Tools** hammer button in the right-side floating utility dock and expands as a centered overlay.
+- `Feature Engineer` and `Auto-ML` now open a guided launch overlay to help users pick the right table, target, and business framing before the first run.
 
 ### LLM Settings
 
@@ -835,7 +858,7 @@ ODIN AI Portal is designed to be **100% local**:
 | Backend | Python 3.11, FastAPI, Uvicorn |
 | Vector store | OpenSearch (`opensearch-py`) |
 | SQL analytics | ClickHouse over HTTP (`httpx`) |
-| MCP client | FastMCP Python client (`fastmcp`) |
+| MCP client | Python MCP SDK (`mcp`) |
 | HTTP client | `httpx` (async) |
 | Oracle driver | `oracledb` |
 | LLM / Embeddings | Ollama or any OpenAI-compatible API |
