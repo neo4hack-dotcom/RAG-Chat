@@ -113,6 +113,21 @@ function buildLocalConfig(config: AppConfig): AppConfig {
   };
 }
 
+function inferUrlScheme(rawUrl: string): 'http' | 'https' {
+  return String(rawUrl || '').trim().toLowerCase().startsWith('https://') ? 'https' : 'http';
+}
+
+function rewriteUrlScheme(rawUrl: string, scheme: 'http' | 'https'): string {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) {
+    return `${scheme}://`;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/^https?:\/\//i, `${scheme}://`);
+  }
+  return `${scheme}://${trimmed.replace(/^\/+/, '')}`;
+}
+
 /**
  * SettingsModal Component
  * Provides a UI for configuring application settings, including LLM provider details,
@@ -182,6 +197,7 @@ export function SettingsModal({
   const [dbStatus, setDbStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
   const [dbMessage, setDbMessage] = useState('');
   const isDirectEmbeddingEndpoint = /(?:\/embeddings|:embeddings)$/i.test((localConfig.embeddingBaseUrl || '').trim());
+  const embeddingUrlScheme = inferUrlScheme(localConfig.embeddingBaseUrl);
 
   useEffect(() => {
     currentDraftFingerprintRef.current = JSON.stringify(localConfig);
@@ -568,7 +584,7 @@ export function SettingsModal({
         body: JSON.stringify({
           base_url: localConfig.embeddingBaseUrl,
           api_key: localConfig.embeddingApiKey || undefined,
-          disable_ssl_verification: localConfig.disableSslVerification ?? false,
+          disable_ssl_verification: (localConfig.disableSslVerification ?? false) || !localConfig.embeddingVerifySsl,
         }),
       });
       if (!response.ok) {
@@ -584,7 +600,8 @@ export function SettingsModal({
       }
     } catch (err) {
       console.error("Error fetching embedding models:", err);
-      setEmbeddingModelsMessage('');
+      setEmbeddingModels([]);
+      setEmbeddingModelsMessage(err instanceof Error ? err.message : 'Model discovery failed');
     } finally {
       setIsRefreshingEmbed(false);
     }
@@ -1913,6 +1930,32 @@ export function SettingsModal({
                     <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                       <Server className="w-4 h-4" /> Embedding endpoint URL
                     </label>
+                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                      {(['http', 'https'] as const).map((scheme) => {
+                        const active = embeddingUrlScheme === scheme;
+                        return (
+                          <button
+                            key={scheme}
+                            type="button"
+                            onClick={() => {
+                              setLocalConfig({
+                                ...localConfig,
+                                embeddingBaseUrl: rewriteUrlScheme(localConfig.embeddingBaseUrl, scheme),
+                              });
+                              setEmbeddingModels([]);
+                              setEmbeddingModelsMessage('');
+                            }}
+                            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+                              active
+                                ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                : 'bg-white/70 dark:bg-gray-800/70 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-blue-300'
+                            }`}
+                          >
+                            {scheme.toUpperCase()}
+                          </button>
+                        );
+                      })}
+                    </div>
                     <div className="flex gap-2">
                       <input
                         type="text"
@@ -1937,8 +1980,13 @@ export function SettingsModal({
                       Use either an OpenAI-compatible base URL such as <code>https://host/v1</code>, or a direct endpoint URL such as <code>https://host/v2:embeddings</code> or <code>https://host/v1/embeddings</code>.
                     </p>
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      The same endpoint is used for both document vectorization and user-query vectorization.
+                      The same endpoint is used for both document vectorization and user-query vectorization before searching your configured OpenSearch index.
                     </p>
+                    {isDirectEmbeddingEndpoint && (
+                      <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                        Direct embedding endpoint detected. RAGnarok will derive the sibling model discovery endpoint automatically when possible.
+                      </p>
+                    )}
                     <label className="flex items-center gap-2 mt-2 cursor-pointer select-none w-fit">
                       <input
                         type="checkbox"
@@ -1972,14 +2020,12 @@ export function SettingsModal({
                       <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
                         <Bot className="w-4 h-4" /> Model name
                       </label>
-                      {!isDirectEmbeddingEndpoint && (
-                        <button
-                          onClick={fetchEmbeddingModels}
-                          className="text-blue-500 hover:text-blue-400 flex items-center gap-1 text-xs font-medium"
-                        >
-                          <RefreshCw className={`w-3 h-3 ${isRefreshingEmbed ? 'animate-spin' : ''}`} /> Discover models
-                        </button>
-                      )}
+                      <button
+                        onClick={fetchEmbeddingModels}
+                        className="text-blue-500 hover:text-blue-400 flex items-center gap-1 text-xs font-medium"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isRefreshingEmbed ? 'animate-spin' : ''}`} /> Discover models
+                      </button>
                     </div>
                     {embeddingModels.length > 0 ? (
                       <select
@@ -2001,12 +2047,7 @@ export function SettingsModal({
                     <p className="text-xs text-gray-500 mt-1">
                       Optional when your embedding provider infers the model from the endpoint. Keep it filled when your provider still expects a model in the request body.
                     </p>
-                    {isDirectEmbeddingEndpoint && (
-                      <p className="text-xs text-gray-500 mt-1">
-                        Direct embedding endpoint detected: model discovery is disabled automatically.
-                      </p>
-                    )}
-                    {!isDirectEmbeddingEndpoint && embeddingModelsMessage && (
+                    {embeddingModelsMessage && (
                       <p className="text-xs text-gray-500 mt-1">{embeddingModelsMessage}</p>
                     )}
                   </div>
