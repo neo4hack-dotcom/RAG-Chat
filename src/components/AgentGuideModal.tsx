@@ -9,37 +9,34 @@ export type GuideSchemaColumn = {
   category: "numeric" | "string" | "date" | "other";
 };
 
-type AgentGuideMode = "feature_engineer" | "auto_ml";
-
 type AgentGuideModalProps = {
   isOpen: boolean;
-  mode: AgentGuideMode;
   isBusy: boolean;
   isLoadingMetadata: boolean;
+  isSuggestingRowFilter: boolean;
   error: string | null;
   tables: string[];
   schema: GuideSchemaColumn[];
   selectedTable: string;
   targetColumn?: string;
   targetCandidates?: string[];
+  rowFilter: string;
+  sampleRowLimit: number;
+  filterSuggestionRationale: string;
   goalText: string;
   notesText: string;
   onClose: () => void;
   onRefreshMetadata: () => void;
   onTableChange: (table: string) => void;
   onTargetColumnChange?: (value: string) => void;
+  onRowFilterChange: (value: string) => void;
+  onSampleRowLimitChange: (value: number) => void;
   onGoalTextChange: (value: string) => void;
   onNotesTextChange: (value: string) => void;
+  onSuggestRowFilter: () => void;
   onSubmit: () => void;
   onStop: () => void;
 };
-
-const FEATURE_GOAL_PRESETS = [
-  "Predict sales more accurately",
-  "Detect churn risk earlier",
-  "Rank high-value customers",
-  "Forecast operational incidents",
-];
 
 const AUTOML_GOAL_PRESETS = [
   "Find the strongest baseline model",
@@ -47,6 +44,8 @@ const AUTOML_GOAL_PRESETS = [
   "Score a binary target quickly",
   "Benchmark models before deeper feature work",
 ];
+
+const AUTO_ML_SAMPLE_PRESETS = [1000, 2500, 5000, 10000];
 
 function categoryTone(category: GuideSchemaColumn["category"]) {
   if (category === "numeric") return "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-800/70 dark:bg-cyan-950/30 dark:text-cyan-200";
@@ -57,35 +56,37 @@ function categoryTone(category: GuideSchemaColumn["category"]) {
 
 export function AgentGuideModal({
   isOpen,
-  mode,
   isBusy,
   isLoadingMetadata,
+  isSuggestingRowFilter,
   error,
   tables,
   schema,
   selectedTable,
   targetColumn = "",
   targetCandidates = [],
+  rowFilter,
+  sampleRowLimit,
+  filterSuggestionRationale,
   goalText,
   notesText,
   onClose,
   onRefreshMetadata,
   onTableChange,
   onTargetColumnChange,
+  onRowFilterChange,
+  onSampleRowLimitChange,
   onGoalTextChange,
   onNotesTextChange,
+  onSuggestRowFilter,
   onSubmit,
   onStop,
 }: AgentGuideModalProps) {
   if (!isOpen || typeof document === "undefined") return null;
-
-  const isFeatureGuide = mode === "feature_engineer";
-  const title = isFeatureGuide ? "Feature Engineer guide" : "Auto-ML guide";
-  const subtitle = isFeatureGuide
-    ? "Pick a table, frame the business objective, and launch a more focused feature-design pass."
-    : "Pick the training table, choose the prediction target, and benchmark models with the right business framing.";
-  const presets = isFeatureGuide ? FEATURE_GOAL_PRESETS : AUTOML_GOAL_PRESETS;
-  const canLaunch = isFeatureGuide ? Boolean(selectedTable) : Boolean(selectedTable && targetColumn);
+  const title = "Auto-ML guide";
+  const subtitle = "Pick the training table, choose the prediction target, and benchmark models with the right business framing.";
+  const presets = AUTOML_GOAL_PRESETS;
+  const canLaunch = Boolean(selectedTable && targetColumn);
 
   return createPortal(
     <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/20 px-4 py-6 backdrop-blur-sm">
@@ -105,12 +106,10 @@ export function AgentGuideModal({
               <div
                 className={cn(
                   "inline-flex h-11 w-11 items-center justify-center rounded-2xl border",
-                  isFeatureGuide
-                    ? "border-lime-200 bg-lime-50 text-lime-700 dark:border-lime-800/70 dark:bg-lime-950/30 dark:text-lime-200"
-                    : "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/30 dark:text-rose-200"
+                  "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/30 dark:text-rose-200"
                 )}
               >
-                {isFeatureGuide ? <Sparkles className="h-5 w-5" /> : <BrainCircuit className="h-5 w-5" />}
+                <BrainCircuit className="h-5 w-5" />
               </div>
               <div className="min-w-0">
                 <h2 className="truncate text-xl font-semibold text-gray-950 dark:text-white">{title}</h2>
@@ -168,44 +167,117 @@ export function AgentGuideModal({
               </div>
             </section>
 
-            {!isFeatureGuide && (
-              <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
-                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 2</div>
-                <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Choose the prediction target</h3>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Pick the column you ultimately want the model to predict. The benchmark will treat the rest as candidate features.</p>
-                <div className="mt-4 flex flex-wrap gap-2.5">
-                  {targetCandidates.map((candidate) => (
-                    <button
-                      key={candidate}
-                      type="button"
-                      onClick={() => onTargetColumnChange?.(candidate)}
-                      className={cn(
-                        "inline-flex items-center gap-2 rounded-2xl border px-3.5 py-2.5 text-sm font-medium transition-all",
-                        targetColumn === candidate
-                          ? "border-rose-300 bg-rose-500 text-white shadow-md shadow-rose-500/20"
-                          : "border-rose-200/80 bg-rose-50/80 text-rose-800 hover:bg-rose-100/80 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200 dark:hover:bg-rose-950/35"
-                      )}
-                    >
-                      <Target className="h-4 w-4" />
-                      {candidate}
-                    </button>
-                  ))}
+            <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 2</div>
+              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Choose the prediction target</h3>
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Pick the column you ultimately want the model to predict. The benchmark will treat the rest as candidate features.</p>
+              <div className="mt-4 flex flex-wrap gap-2.5">
+                {targetCandidates.map((candidate) => (
+                  <button
+                    key={candidate}
+                    type="button"
+                    onClick={() => onTargetColumnChange?.(candidate)}
+                    className={cn(
+                      "inline-flex items-center gap-2 rounded-2xl border px-3.5 py-2.5 text-sm font-medium transition-all",
+                      targetColumn === candidate
+                        ? "border-rose-300 bg-rose-500 text-white shadow-md shadow-rose-500/20"
+                        : "border-rose-200/80 bg-rose-50/80 text-rose-800 hover:bg-rose-100/80 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200 dark:hover:bg-rose-950/35"
+                    )}
+                  >
+                    <Target className="h-4 w-4" />
+                    {candidate}
+                  </button>
+                ))}
+              </div>
+              {targetCandidates.length === 0 && (
+                <div className="mt-4 rounded-2xl border border-dashed border-gray-200 px-4 py-3 text-xs text-gray-500 dark:border-white/10 dark:text-gray-400">
+                  Choose a table first to load candidate target columns.
                 </div>
-                {targetCandidates.length === 0 && (
-                  <div className="mt-4 rounded-2xl border border-dashed border-gray-200 px-4 py-3 text-xs text-gray-500 dark:border-white/10 dark:text-gray-400">
-                    Choose a table first to load candidate target columns.
-                  </div>
-                )}
-              </section>
-            )}
+              )}
+            </section>
 
             <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
-                {isFeatureGuide ? "Step 2" : "Step 3"}
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 3</div>
+              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Narrow the training scope</h3>
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Optional, but useful when you only want to benchmark on a business slice of the table or keep the run lightweight.
+              </p>
+              <div className="mt-4 grid gap-4">
+                <div className="rounded-[1.35rem] border border-cyan-100 bg-cyan-50/70 p-4 dark:border-cyan-900/60 dark:bg-cyan-950/15">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-700 dark:text-cyan-200">Row filter</div>
+                      <div className="mt-1 text-sm font-semibold text-cyan-950 dark:text-cyan-50">Scope the dataset with a safe WHERE clause</div>
+                      <div className="mt-1 text-xs text-cyan-800/80 dark:text-cyan-100/75">
+                        Example: <span className="font-mono">country = 'FR' AND order_date BETWEEN '2025-01-01' AND '2025-03-31'</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onSuggestRowFilter}
+                      disabled={isSuggestingRowFilter || !selectedTable}
+                      className="inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-white px-3.5 py-2 text-xs font-medium text-cyan-800 transition-colors hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-cyan-800/70 dark:bg-white/5 dark:text-cyan-100 dark:hover:bg-cyan-950/35"
+                    >
+                      {isSuggestingRowFilter ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                      Suggest with AI
+                    </button>
+                  </div>
+                  <textarea
+                    value={rowFilter}
+                    onChange={(event) => onRowFilterChange(event.target.value)}
+                    rows={3}
+                    className="mt-3 w-full rounded-2xl border border-cyan-200 bg-white px-4 py-3 font-mono text-sm text-gray-900 outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 dark:border-cyan-800/70 dark:bg-slate-950/50 dark:text-gray-100 dark:focus:border-cyan-500 dark:focus:ring-cyan-900/30"
+                    placeholder="Optional safe boolean expression, without the SELECT statement."
+                  />
+                  {filterSuggestionRationale && (
+                    <div className="mt-3 rounded-2xl border border-white/70 bg-white/80 px-4 py-3 text-xs text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+                      <span className="font-semibold text-gray-900 dark:text-white">AI suggestion rationale:</span> {filterSuggestionRationale}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-[1.35rem] border border-rose-100 bg-rose-50/70 p-4 dark:border-rose-900/60 dark:bg-rose-950/15">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-rose-700 dark:text-rose-200">Sample size</div>
+                  <div className="mt-1 text-sm font-semibold text-rose-950 dark:text-rose-50">Cap the number of rows used for training</div>
+                  <div className="mt-1 text-xs text-rose-800/80 dark:text-rose-100/75">
+                    Useful for quick iteration, budget control, or early experimentation before scaling the benchmark.
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {AUTO_ML_SAMPLE_PRESETS.map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => onSampleRowLimitChange(preset)}
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                          sampleRowLimit === preset
+                            ? "border-rose-300 bg-rose-500 text-white shadow-md shadow-rose-500/20"
+                            : "border-rose-200 bg-white text-rose-800 hover:bg-rose-100 dark:border-rose-800/70 dark:bg-white/5 dark:text-rose-100 dark:hover:bg-rose-950/35"
+                        )}
+                      >
+                        {preset.toLocaleString()} rows
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex max-w-[220px] items-center gap-3">
+                    <input
+                      type="number"
+                      min={100}
+                      max={10000}
+                      step={100}
+                      value={sampleRowLimit}
+                      onChange={(event) => onSampleRowLimitChange(Number(event.target.value) || 1000)}
+                      className="w-full rounded-2xl border border-rose-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100 dark:border-rose-800/70 dark:bg-slate-950/50 dark:text-gray-100 dark:focus:border-rose-500 dark:focus:ring-rose-900/30"
+                    />
+                    <span className="text-xs font-medium uppercase tracking-[0.14em] text-rose-700 dark:text-rose-200">Rows</span>
+                  </div>
+                </div>
               </div>
-              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">
-                {isFeatureGuide ? "Frame the feature objective" : "Frame the benchmark objective"}
-              </h3>
+            </section>
+
+            <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 4</div>
+              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Frame the benchmark objective</h3>
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 The more concrete the objective, the better the agent can focus the analysis and produce a usable recommendation.
               </p>
@@ -227,34 +299,38 @@ export function AgentGuideModal({
                   onChange={(event) => onGoalTextChange(event.target.value)}
                   rows={3}
                   className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-100 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:focus:border-blue-500 dark:focus:ring-blue-900/30"
-                  placeholder={isFeatureGuide ? "Example: help forecast weekly sales and explain seasonality drivers." : "Example: benchmark models to predict customer churn with a strong baseline F1-score."}
+                  placeholder="Example: benchmark models to predict customer churn with a strong baseline F1-score."
                 />
                 <textarea
                   value={notesText}
                   onChange={(event) => onNotesTextChange(event.target.value)}
                   rows={3}
                   className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-100 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:focus:border-blue-500 dark:focus:ring-blue-900/30"
-                  placeholder={isFeatureGuide ? "Optional notes: known leakage risks, preferred business angle, time granularity..." : "Optional notes: preferred business metric, class imbalance concern, baseline expectations..."}
+                  placeholder="Optional notes: preferred business metric, class imbalance concern, baseline expectations..."
                 />
               </div>
             </section>
 
             <section className="rounded-[1.7rem] border border-white/70 bg-gradient-to-br from-white via-white to-slate-50 p-4 shadow-sm dark:border-white/10 dark:bg-gradient-to-br dark:from-white/5 dark:via-white/[0.03] dark:to-slate-950/40">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
-                {isFeatureGuide ? "Step 3" : "Step 4"}
-              </div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 5</div>
               <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Review and launch</h3>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
                   <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Table</div>
                   <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{selectedTable || "Not selected yet"}</div>
                 </div>
-                {!isFeatureGuide && (
-                  <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
-                    <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Target</div>
-                    <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{targetColumn || "Not selected yet"}</div>
-                  </div>
-                )}
+                <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Target</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{targetColumn || "Not selected yet"}</div>
+                </div>
+                <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Scope</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{rowFilter || "Full table"}</div>
+                </div>
+                <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Sample size</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{sampleRowLimit.toLocaleString()} rows</div>
+                </div>
               </div>
               {error && (
                 <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200">
@@ -270,18 +346,14 @@ export function AgentGuideModal({
                     "inline-flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50",
                     isBusy
                       ? "bg-rose-500 hover:bg-rose-400"
-                      : isFeatureGuide
-                        ? "bg-lime-500 hover:bg-lime-400"
-                        : "bg-rose-500 hover:bg-rose-400"
+                      : "bg-rose-500 hover:bg-rose-400"
                   )}
                 >
                   {isBusy ? <X className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                   {isBusy ? "Stop" : "Launch"}
                 </button>
                 <div className="text-xs text-gray-500 dark:text-gray-400">
-                  {isFeatureGuide
-                    ? "The result will still appear in the main chat with suggested engineered features and reusable SQL."
-                    : "The benchmark result will appear in the main chat with a comparison table and a recommended baseline model."}
+                  The benchmark result will appear in the main chat with a comparison table and a recommended baseline model.
                 </div>
               </div>
             </section>

@@ -1,6 +1,6 @@
 # ODIN AI Portal — RAGnarok ⚡
 
-A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented Generation (RAG)** with OpenSearch, **specialist agents** orchestrated by an **Agent Manager**, **CrewAI-style planning**, and **MCP (Model Context Protocol)** tool integration — powered by Ollama or any OpenAI-compatible server, with durable app state persisted by the Python backend.
+A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented Generation (RAG)** with OpenSearch, **specialist agents** orchestrated by an **Agent Manager**, **LangGraph-based planning**, and **MCP (Model Context Protocol)** tool integration — powered by Ollama or any OpenAI-compatible server, with durable app state persisted by the Python backend.
 
 ---
 
@@ -16,11 +16,13 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 - [RAG Pipeline](#rag-pipeline)
 - [ClickHouse SQL Agent](#clickhouse-sql-agent)
 - [Data Analyst Agent](#data-analyst-agent)
-- [Feature Engineer Agent](#feature-engineer-agent)
 - [Auto-ML Agent](#auto-ml-agent)
+- [Data Cleaner Agent](#data-cleaner-agent)
+- [Anonymizer Agent](#anonymizer-agent)
 - [Oracle SQL Agent](#oracle-sql-agent)
 - [File Management Agent](#file-management-agent)
 - [PDF Creator Agent](#pdf-creator-agent)
+- [Custom Python Agents](#custom-python-agents)
 - [Agents & Tools App Portal](#agents--tools-app-portal)
 - [MCP Integration](#mcp-integration)
 - [Configuration](#configuration)
@@ -33,14 +35,16 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 
 | Category | Details |
 |----------|---------|
-| **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, CrewAI - Planning |
-| **8 agent roles** | Agent Manager, ClickHouse SQL, Data Analyst, Feature Engineer, Auto-ML, Oracle SQL, File management, PDF creator |
-| **Manager orchestration** | Agent Manager can delegate to every specialist agent and keep follow-up context across clarifications and confirmations |
+| **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, LangGraph Planning |
+| **9 built-in agents** | Agent Manager, ClickHouse SQL, Data Analyst, Auto-ML, Data Cleaner, Anonymizer, Oracle SQL, File management, PDF creator |
+| **Custom Python agents** | Paste Python code in Settings, let the local LLM generate a complete agent profile, then enable or disable the new agent from the UI |
+| **Manager orchestration** | Agent Manager can delegate to every built-in specialist plus enabled custom agents and keep follow-up context across clarifications and confirmations |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
 | **Data Analyst agent** | Multi-step ClickHouse investigations with iterative evidence gathering, optional knowledge-base search, automatic SQL simplification retry, and CSV export on demand |
-| **Feature Engineer agent** | Guided ClickHouse feature ideation with schema preview, business objective capture, and reusable SQL expressions |
-| **Auto-ML agent** | Guided model benchmarking flow with target-column selection, comparison table, and baseline recommendation |
+| **Auto-ML agent** | Guided model benchmarking flow with target-column selection, optional row scope / WHERE clause, sample-size cap, comparison table, and baseline recommendation |
+| **Data Cleaner agent** | ClickHouse data-quality audit for duplicates, missing values, empty strings, and inconsistent formats, with suggested SQL cleanup scripts |
+| **Anonymizer agent** | ClickHouse privacy scan for likely PII columns, with masking / hashing SQL suggestions and a governance-oriented summary |
 | **Oracle agent** | Natural-language Oracle analysis, schema discovery, SQL validation, automatic repair on query errors, narrative Markdown output |
 | **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions, with early stop once the requested filesystem change is complete |
 | **PDF creator agent** | Backend Python-only PDF export agent to turn the latest useful analysis or pasted content into a polished document |
@@ -60,7 +64,7 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **Stable agent intro cards** | Agent descriptions use higher-contrast cards in the chat and disappear on first typing without the previous visual shimmer |
 | **Floating tools island** | Pure LLM / RAG / Agents / MCP / LangGraph Planning are opened from a compact hammer button in the right-side utility dock |
 | **Discreet console access** | Agent Console is exposed as a minimal floating button in the right-side utility dock |
-| **Apple-inspired landing** | Animated cards, contact modal, page routing |
+| **Apple-inspired landing** | Light, modern black/white/slate cards with restrained accent colors, animated hover, contact modal, and page routing |
 | **Dark mode** | Full dark/light toggle persisted through backend state sync |
 | **File attachments** | Images, PDFs, text files alongside messages |
 | **Conversation history** | Multi-session sidebar, persisted in backend state with browser fallback cache |
@@ -103,6 +107,10 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
                            │  │  /api/clickhouse/guide-metadata │
                            │  │  /api/chat/feature-engineer...│
                            │  │  /api/chat/auto-ml-agent     │
+                           │  │  /api/chat/data-cleaner-agent│
+                           │  │  /api/chat/anonymizer-agent  │
+                           │  │  /api/custom-agent/analyze   │
+                           │  │  /api/chat/custom-agent      │
                            │  │  /api/chat/manager-agent     │
                            │  │  /api/planning/state         │
                            │  │  /api/planning/plans/*       │
@@ -216,18 +224,20 @@ Answers include cited sources `[1]`, `[2]` and a confidence score.
 
 ### Agents
 
-Multi-agent orchestration with eight roles:
+Multi-agent orchestration with built-in specialists plus optional custom Python agents:
 
 | Role | Behaviour |
 |------|-----------|
 | **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
 | **ClickHouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL, can produce charts, and can show result sets or schema lists as Markdown tables on demand |
 | **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, can export the latest dataset to CSV, and can surface a visible result table when requested |
-| **Feature Engineer** | Opens a guided setup to choose the ClickHouse table and business objective, then proposes engineered predictive variables with reusable SQL expressions |
-| **Auto-ML** | Opens a guided setup to choose the ClickHouse table, target column, and business objective, then benchmarks baseline models and returns a comparison table |
+| **Auto-ML** | Opens a guided setup to choose the ClickHouse table, target column, optional row scope and sample-size cap, then benchmarks baseline models and returns a comparison table |
+| **Data Cleaner** | Audits one ClickHouse table for duplicate risk, missing values, empty strings, and mixed date formats, then proposes practical SQL cleanup patterns |
+| **Anonymizer** | Scans one ClickHouse table for likely PII exposure and suggests masking or hashing SQL patterns |
 | **Oracle SQL** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries, answers in business-facing Markdown, and preserves a readable data table in the final answer |
 | **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations and tabular output when a file summary is naturally table-shaped |
 | **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
+| **Custom Agent** | Generated from pasted Python code in Settings, analyzed by the local LLM, optionally enabled in the Agents menu, and callable by the Agent Manager |
 
 #### ClickHouse SQL agent quick flow
 
@@ -263,20 +273,6 @@ The ClickHouse agent uses the backend only and always relies on the configured l
    - export the latest dataset to CSV when explicitly requested,
    - and return a business-facing Markdown answer with a visible result table when you ask for one.
 
-#### Feature Engineer quick flow
-
-1. Configure ClickHouse once in **Settings → ClickHouse SQL**.
-2. Switch to **Agents** mode and select **Feature Engineer**.
-3. A guided setup opens automatically on a fresh conversation.
-4. Choose:
-   - the source table,
-   - the business objective,
-   - optional analyst notes.
-5. Launch the run to receive:
-   - engineered feature ideas,
-   - the business rationale for each idea,
-   - reusable ClickHouse SQL expressions.
-
 #### Auto-ML quick flow
 
 1. Configure ClickHouse once in **Settings → ClickHouse SQL**.
@@ -285,6 +281,8 @@ The ClickHouse agent uses the backend only and always relies on the configured l
 4. Choose:
    - the training table,
    - the target column,
+   - an optional row scope (`WHERE`) that can be suggested with the local LLM,
+   - an explicit sample-row cap such as `1000`,
    - the benchmark objective,
    - optional analyst notes.
 5. Launch the run to receive:
@@ -508,26 +506,6 @@ When enough evidence is gathered, the agent writes the final answer in English
 
 ---
 
-## Feature Engineer Agent
-
-The Feature Engineer agent is a ClickHouse specialist focused on turning an existing dataset into better model-ready variables.
-
-### Guided UX
-
-- A dedicated guide opens over the chat on a fresh session.
-- The user chooses the source table through clickable tiles.
-- A live schema preview appears on the right to help pick the correct dataset.
-- The user can frame the business objective and add optional notes before launching the analysis.
-
-### Backend endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/clickhouse/guide-metadata` | Load ClickHouse tables, schema preview, and candidate targets for guided agent setup |
-| `POST /api/chat/feature-engineer-agent` | Generate engineered feature ideas and reusable SQL expressions from a ClickHouse table |
-
----
-
 ## Auto-ML Agent
 
 The Auto-ML agent benchmarks several baseline models on top of a ClickHouse dataset and returns a practical recommendation.
@@ -544,7 +522,57 @@ The Auto-ML agent benchmarks several baseline models on top of a ClickHouse data
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/clickhouse/guide-metadata` | Load ClickHouse tables, schema preview, and candidate targets for guided agent setup |
+| `POST /api/auto-ml/filter-suggestion` | Ask the local LLM to suggest a safe row-scope clause (`WHERE`) for the Auto-ML run |
 | `POST /api/chat/auto-ml-agent` | Benchmark baseline models on ClickHouse data and return a comparison table with recommendation |
+
+---
+
+## Data Cleaner Agent
+
+The Data Cleaner agent is a ClickHouse-focused audit specialist for practical cleanup work.
+
+### What it checks
+
+- duplicate risk based on likely business keys,
+- null-heavy or empty-string-heavy columns,
+- mixed string date conventions such as `YYYY-MM-DD` vs `DD/MM/YYYY`,
+- and a sampled preview of the table under review.
+
+### Output
+
+- a business-facing quality summary,
+- prioritized findings,
+- and suggested SQL cleanup scripts kept in technical details.
+
+### Backend endpoint
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/chat/data-cleaner-agent` | Run a guided ClickHouse data-quality audit and return findings plus suggested cleanup SQL |
+
+---
+
+## Anonymizer Agent
+
+The Anonymizer agent helps assess privacy risk before data is shared or reused.
+
+### What it does
+
+- inspects schema and sampled values,
+- flags likely PII candidates such as emails, phone numbers, names, addresses, dates of birth, IP addresses, and identifiers,
+- and proposes hashing / masking SQL patterns adapted to the detected signal.
+
+### Output
+
+- a privacy-oriented narrative in English,
+- a list of PII findings,
+- and suggested masking / hashing SQL patterns in technical details.
+
+### Backend endpoint
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/chat/anonymizer-agent` | Scan a ClickHouse table for likely PII exposure and return masking guidance plus suggested SQL |
 
 ---
 
@@ -639,6 +667,40 @@ The PDF Creator agent is a backend Python-only export agent built to turn chat r
 
 ---
 
+## Custom Python Agents
+
+RAGnarok can extend itself with additional Python-defined agents from the Settings panel.
+
+### Workflow
+
+1. Open **Settings → Custom Agents**.
+2. Add a custom agent and paste the Python code that describes its behavior.
+3. Click **Analyze & build**.
+4. The local LLM generates:
+   - a title,
+   - a user-facing description,
+   - a dedicated system prompt,
+   - a manager routing hint,
+   - and an implementation status message.
+5. Review or edit the generated metadata.
+6. Enable the agent to expose it in **Agents → Other agents**.
+
+### Runtime behavior
+
+- Custom agents stay backend-only and use the configured local/application LLM.
+- Their chat intro is generated from the saved title and description.
+- The Agent Manager can delegate to them when their routing hint or title matches the user’s request.
+- They can be disabled at any time to hide them from the agent picker without deleting their implementation draft.
+
+### Backend endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/custom-agent/analyze` | Analyze pasted Python code with the local LLM and generate a coherent custom-agent profile |
+| `POST /api/chat/custom-agent` | Execute the selected custom agent against the current conversation using its saved Python specification |
+
+---
+
 ## Agents & Tools App Portal
 
 The **Agents & Tools** card on the landing page now opens a dynamic application portal instead of a placeholder page.
@@ -717,7 +779,8 @@ All settings are available in-app (no `.env` file needed).
 - Technical sections in many agent / LLM answers are automatically folded into expandable details blocks when possible.
 - When a new assistant answer arrives, the chat scrolls to the **top of that last answer** instead of the bottom of the full thread.
 - The mode selector is opened from a compact **Tools** hammer button in the right-side floating utility dock and expands as a centered overlay.
-- `Feature Engineer` and `Auto-ML` now open a guided launch overlay to help users pick the right table, target, and business framing before the first run.
+- `Auto-ML` now opens a guided launch overlay to help users pick the right table, target, and business framing before the first run.
+- `Data Cleaner`, `Anonymizer`, and custom Python agents use the same stable intro-card pattern as the other premium agent modes.
 
 ### LLM Settings
 
@@ -786,6 +849,20 @@ Each app tile entry contains:
 | Application name | Visible title on the Agents & Tools portal tile |
 | URL | External link opened in a new browser tab |
 | Hover description | Text revealed only when the tile is hovered |
+
+### Custom Agents Settings
+
+Each custom Python agent entry contains:
+
+| Field | Description |
+|-------|-------------|
+| Agent title | Name displayed in the sub-agent picker and chat intro |
+| User-facing description | Intro text shown when the agent is selected |
+| Python code | Implementation draft analyzed by the local LLM |
+| Generated system prompt | Final behavior prompt derived from the uploaded code |
+| Manager routing hint | Short hint used by Agent Manager to decide when to delegate |
+| Badge color | Visual tone used in the sub-agent menu |
+| Enabled | Controls whether the agent is visible in the agent picker |
 
 ### File Management Settings
 
