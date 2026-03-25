@@ -420,6 +420,11 @@ Cited generation  ── LLM answers with [1][2] citations
 Response + sources + confidence score
 ```
 
+Notes:
+- The same embedding endpoint is used for document chunk vectorization and live user-query vectorization.
+- Direct embedding URLs such as `https://host/v1/embeddings` are supported.
+- When possible, model discovery is derived automatically from the sibling `/models` endpoint.
+
 ---
 
 ## ClickHouse SQL Agent
@@ -813,11 +818,18 @@ All settings are available in-app (no `.env` file needed).
 | OpenSearch URL | `http://localhost:9200` | Cluster URL |
 | Index | `rag_documents` | Target index name |
 | Username / Password | — | Optional HTTP basic auth |
-| Embedding Base URL | `http://localhost:11434/v1` | OpenAI-compatible embedding endpoint |
+| Embedding Base URL | `http://localhost:11434/v1` | OpenAI-compatible embedding base URL or direct endpoint such as `https://host/v1/embeddings` |
+| HTTP / HTTPS toggle | `http` | Quickly rewrites the embedding endpoint scheme without editing the rest of the URL |
 | Embedding Model | `nomic-embed-text` | Embedding model name |
+| Verify SSL certificate | `true` | Per-embedding TLS verification toggle, still overridden by the global SSL disable switch |
 | Chunk Size | `512` | Max words per document chunk |
 | Chunk Overlap | `50` | Sentence overlap between chunks |
-| KNN Neighbors | `50` | Nearest neighbours to retrieve |
+| KNN Neighbors | `50` | Nearest neighbours to retrieve from OpenSearch during vector search |
+
+Embedding behavior:
+- You can configure either a base URL like `https://host/v1` or a direct endpoint like `https://host/v1/embeddings` or `https://host/v2:embeddings`.
+- The Settings modal can test the embedding connection against the real endpoint and verify compatibility with the configured OpenSearch index.
+- Model discovery stays available for direct `/embeddings` URLs by deriving the matching `/models` endpoint when the provider supports it.
 
 ### Oracle SQL Settings
 

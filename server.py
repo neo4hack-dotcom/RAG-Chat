@@ -3402,6 +3402,31 @@ async def get_embedding(
         ) from exc
 
 
+def _is_direct_embedding_endpoint(url: str) -> bool:
+    lowered = str(url or "").strip().rstrip("/").lower()
+    return lowered.endswith("/embeddings") or lowered.endswith(":embeddings")
+
+
+def _derive_embedding_models_endpoint(base_url: str) -> tuple[str, str]:
+    """Resolve the best `/models` URL for an embedding configuration.
+
+    The embedding setting may be either:
+    - a base URL such as `https://host/v1`
+    - a direct embedding endpoint such as `https://host/v1/embeddings`
+    - a provider-specific endpoint such as `https://host/v2:embeddings`
+
+    This helper returns the discovery endpoint plus a short explanation of how
+    the URL was interpreted so the UI can give clear feedback to the user.
+    """
+    normalized = _normalize_local_service_url(base_url).rstrip("/")
+    lowered = normalized.lower()
+    if lowered.endswith("/embeddings"):
+        return normalized[: -len("/embeddings")] + "/models", "derived from the direct `/embeddings` endpoint"
+    if lowered.endswith(":embeddings"):
+        return normalized[: -len(":embeddings")] + ":models", "derived from the direct `:embeddings` endpoint"
+    return normalized + "/models", "derived from the base embedding URL"
+
+
 # ── LLM helper ────────────────────────────────────────────────────────────────
 
 def _truncate_body_preview(value: str, limit: int = 260) -> str:
@@ -8032,7 +8057,7 @@ def _app_embedding_config(app_config: dict) -> dict[str, Any]:
         "embedding_api_key": str(app_config.get("embeddingApiKey") or "").strip() or None,
         "embedding_model": str(app_config.get("embeddingModel") or "nomic-embed-text").strip() or "nomic-embed-text",
         "embedding_verify_ssl": _effective_verify_ssl(bool(app_config.get("embeddingVerifySsl", True)), disable_ssl_verification),
-        "knn_neighbors": max(1, min(int(app_config.get("knnNeighbors") or 8), 12)),
+        "knn_neighbors": max(1, min(int(app_config.get("knnNeighbors") or 50), 100)),
     }
 
 
@@ -17272,17 +17297,7 @@ async def list_llm_models(req: LlmModelsRequest):
 
 @app.post("/api/embedding/models")
 async def list_embedding_models(req: EmbeddingModelsRequest):
-    normalized_base_url = _normalize_local_service_url(req.base_url)
-    lowered = normalized_base_url.rstrip("/").lower()
-    is_direct_endpoint = lowered.endswith("/embeddings") or lowered.endswith(":embeddings")
-    if is_direct_endpoint:
-        return {
-            "status": "skipped",
-            "models": [],
-            "model_count": 0,
-            "message": "Model discovery is unavailable when you provide a direct embedding endpoint URL.",
-        }
-    endpoint = normalized_base_url.rstrip("/") + "/models"
+    endpoint, resolution_message = _derive_embedding_models_endpoint(req.base_url)
     headers = {"Content-Type": "application/json"}
     if req.api_key:
         headers["Authorization"] = f"Bearer {req.api_key}"
@@ -17297,13 +17312,23 @@ async def list_embedding_models(req: EmbeddingModelsRequest):
         ) as client:
             response = await client.get(endpoint, headers=headers)
             response.raise_for_status()
-        data = response.json()
+        data = _parse_http_json_response(
+            response,
+            service_label="Embedding model discovery endpoint",
+            endpoint=endpoint,
+        )
         models = [str(model.get("id") or "").strip() for model in data.get("data", []) if str(model.get("id") or "").strip()]
         if not models and isinstance(data.get("models"), list):
             models = [str(model.get("name") or "").strip() for model in data.get("models", []) if str(model.get("name") or "").strip()]
-        return {"status": "ok", "models": models, "model_count": len(models)}
+        message = f"Model discovery used `{endpoint}` ({resolution_message})."
+        if not models:
+            message += " The endpoint responded, but no models were listed."
+        return {"status": "ok", "models": models, "model_count": len(models), "message": message, "models_endpoint": endpoint}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=f"Embedding model discovery failed via `{endpoint}` ({resolution_message}): {exc}",
+        ) from exc
 
 @app.post("/api/mcp/test")
 async def test_mcp_connection(req: MCPTestRequest):
@@ -17705,7 +17730,16 @@ async def chat_rag(req: ChatRequest):
             req.embedding_api_key, verify_ssl=req.embedding_verify_ssl
         )
         embed_elapsed = _time.time() - start_embed
-        _emit_log("decision", "rag", f"Query embedded ({embed_elapsed:.2f}s)", {"vector_len": len(query_vector)})
+        _emit_log(
+            "decision",
+            "rag",
+            f"Query embedded ({embed_elapsed:.2f}s)",
+            {
+                "vector_len": len(query_vector),
+                "target_index": req.opensearch.index,
+                "knn_neighbors": req.knn_neighbors,
+            },
+        )
     except Exception as e:
         _emit_log("error", "rag", f"Embedding failed", {"error": str(e)})
         raise HTTPException(status_code=500, detail=f"Embedding error: {e}")
