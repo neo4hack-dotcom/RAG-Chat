@@ -67,6 +67,14 @@ export function PlanningMonitorModal({
       return leftTime - rightTime;
     })
     .slice(0, 8);
+  const recentRunsByPlan = planningState.runs.reduce<Record<string, CrewPlanRun[]>>((acc, run) => {
+    if (!run.planId) return acc;
+    acc[run.planId] = acc[run.planId] || [];
+    if (acc[run.planId].length < 5) {
+      acc[run.planId].push(run);
+    }
+    return acc;
+  }, {});
 
   return createPortal(
     <>
@@ -343,6 +351,40 @@ export function PlanningMonitorModal({
                           {plan.lastSummary.replace(/^##\s+/gm, "").slice(0, 240)}
                         </p>
                       )}
+
+                      <div className="mt-4">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                          Last 5 results
+                        </div>
+                        <div className="mt-2 space-y-2">
+                          {(recentRunsByPlan[plan.id] || []).length === 0 ? (
+                            <div className="rounded-xl border border-dashed border-gray-200 px-3 py-2 text-xs text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                              No execution result yet for this plan.
+                            </div>
+                          ) : (
+                            (recentRunsByPlan[plan.id] || []).map((run) => (
+                              <div
+                                key={`${plan.id}-${run.id}`}
+                                className="rounded-xl border border-gray-200/80 bg-gray-50/80 px-3 py-2 dark:border-gray-700 dark:bg-gray-900/60"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="text-xs font-medium text-gray-800 dark:text-gray-200">
+                                    {formatDateLabel(run.startedAt)}
+                                  </div>
+                                  <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium", statusTone(run.status))}>
+                                    {run.status}
+                                  </span>
+                                </div>
+                                <div className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                                  {(run.summary || run.outputs.map((output) => `${output.agent}: ${output.status}`).join(" · ") || "No summary captured yet.")
+                                    .replace(/^##\s+/gm, "")
+                                    .slice(0, 180)}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
                     </div>
                   ))}
                 </div>
