@@ -130,6 +130,8 @@ export type CrewPlanDraft = {
   name: string;
   prompt: string;
   agents: AgentRole[];
+  mcpToolIds: string[];
+  useMcpOrchestrator: boolean;
   status: 'active' | 'paused';
   trigger: CrewPlanTrigger;
 };
@@ -146,7 +148,7 @@ export type CrewPlan = CrewPlanDraft & {
 };
 
 export type CrewPlanRunOutput = {
-  agent: AgentRole;
+  agent: string;
   status: 'success' | 'error';
   content: string;
 };
@@ -441,6 +443,8 @@ export type McpTool = {
   url: string;
 };
 
+export const MCP_ORCHESTRATOR_ID = '__mcp_orchestrator__';
+
 export type PortalApp = {
   id: string;
   name: string;
@@ -640,6 +644,8 @@ export function createEmptyCrewPlanDraft(timezone = 'UTC'): CrewPlanDraft {
     name: '',
     prompt: '',
     agents: [],
+    mcpToolIds: [],
+    useMcpOrchestrator: false,
     status: 'active',
     trigger: {
       kind: 'daily',
@@ -668,6 +674,10 @@ export function normalizeCrewPlanDraft(
     ...base,
     ...(draft ?? {}),
     agents: Array.isArray(draft?.agents) ? draft!.agents.filter(isValidAgentRole) : [],
+    mcpToolIds: Array.isArray((draft as any)?.mcpToolIds)
+      ? ((draft as any).mcpToolIds as unknown[]).filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [],
+    useMcpOrchestrator: Boolean((draft as any)?.useMcpOrchestrator),
     trigger: {
       ...base.trigger,
       ...incomingTrigger,
@@ -726,7 +736,8 @@ export function normalizePlanningBackendState(
       outputs: Array.isArray(run.outputs)
         ? run.outputs.filter((output): output is CrewPlanRunOutput => (
             Boolean(output)
-            && isValidAgentRole((output as CrewPlanRunOutput).agent)
+            && typeof (output as CrewPlanRunOutput).agent === 'string'
+            && (output as CrewPlanRunOutput).agent.trim().length > 0
             && ((output as CrewPlanRunOutput).status === 'success' || (output as CrewPlanRunOutput).status === 'error')
           ))
         : [],

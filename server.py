@@ -318,6 +318,7 @@ DEFAULT_PREFERENCES = {
 
 AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_analyst", "auto_ml", "data_cleaner", "anonymizer", "custom_agent"}
 PLANNER_AGENT_ROLES = {"manager", "clickhouse_query", "file_management"}
+MCP_ORCHESTRATOR_ID = "__mcp_orchestrator__"
 PLANNER_TRIGGER_KINDS = {
     "once",
     "daily",
@@ -437,6 +438,8 @@ def _normalize_planning_plan(plan: Optional[dict]) -> dict:
         "name": "",
         "prompt": "",
         "agents": [],
+        "mcpToolIds": [],
+        "useMcpOrchestrator": False,
         "status": "active",
         "trigger": _default_planning_trigger(),
         "createdAt": "",
@@ -459,6 +462,14 @@ def _normalize_planning_plan(plan: Optional[dict]) -> dict:
             agent for agent in agents
             if isinstance(agent, str) and agent in PLANNER_AGENT_ROLES
         ]
+    mcp_tool_ids = plan.get("mcpToolIds")
+    if isinstance(mcp_tool_ids, list):
+        normalized["mcpToolIds"] = [
+            str(tool_id).strip()
+            for tool_id in mcp_tool_ids
+            if isinstance(tool_id, str) and str(tool_id).strip()
+        ]
+    normalized["useMcpOrchestrator"] = bool(plan.get("useMcpOrchestrator", False))
     status = plan.get("status")
     normalized["status"] = status if status in {"active", "paused"} else "active"
     normalized["trigger"] = _normalize_planning_trigger(plan.get("trigger"))
@@ -2096,6 +2107,17 @@ def _extract_auto_ml_row_filter(user_request: str) -> str:
 
 def _extract_guided_row_filter(user_request: str) -> str:
     return _extract_auto_ml_row_filter(user_request)
+
+
+def _clickhouse_sql_is_valid(sql: str, schema: Optional[list[dict[str, Any]]] = None) -> bool:
+    cleaned = clean_sql_text(sql)
+    if not is_safe_read_only_sql(cleaned):
+        return False
+    if _data_analyst_has_forbidden_date_functions(cleaned):
+        return False
+    if schema and _data_analyst_uses_date_literals_without_between(cleaned, schema):
+        return False
+    return True
 
 
 def _extract_auto_ml_sample_row_limit(user_request: str) -> Optional[int]:
@@ -6889,6 +6911,8 @@ Constraints:
 - Add a LIMIT when returning raw rows.
 - Keep the SQL compatible with ClickHouse.
 - If a date column is selected, prefer it when time filtering, grouping or ordering matters.
+- For date filtering, always use explicit date literals with BETWEEN when you filter a date or datetime column.
+- Do not use toStartOf..., year(), month(), day(), dateDiff(), addDays(), toDate(), toDateTime(), today(), or yesterday() for filter logic.
 
 Selected field: {selected_field or "None"}
 Selected date field: {selected_date_field or "None"}
@@ -9871,6 +9895,8 @@ def _default_planning_draft(timezone_name: str = "UTC") -> dict:
         "name": "",
         "prompt": "",
         "agents": [],
+        "mcpToolIds": [],
+        "useMcpOrchestrator": False,
         "status": "active",
         "trigger": {
             "kind": "daily",
@@ -9929,6 +9955,16 @@ def _merge_planning_draft(current_draft: Optional[dict], updates: Optional[dict]
                 existing_agents.append(normalized_agent)
         current["agents"] = existing_agents
 
+    if isinstance(updates.get("mcpToolIds"), list):
+        current["mcpToolIds"] = [
+            str(tool_id).strip()
+            for tool_id in updates["mcpToolIds"]
+            if isinstance(tool_id, str) and str(tool_id).strip()
+        ]
+
+    if "useMcpOrchestrator" in updates:
+        current["useMcpOrchestrator"] = bool(updates.get("useMcpOrchestrator"))
+
     if updates.get("status") in {"active", "paused"}:
         current["status"] = updates["status"]
 
@@ -9951,8 +9987,11 @@ def _validate_planning_draft(draft: dict) -> list[str]:
     missing: list[str] = []
     if not draft.get("prompt"):
         missing.append("prompt")
-    if not draft.get("agents"):
-        missing.append("agents")
+    has_agents = bool(draft.get("agents"))
+    has_mcp_tools = bool(draft.get("mcpToolIds"))
+    has_mcp_orchestrator = bool(draft.get("useMcpOrchestrator"))
+    if not (has_agents or has_mcp_tools or has_mcp_orchestrator):
+        missing.append("executors")
 
     trigger = draft.get("trigger") or {}
     kind = trigger.get("kind")
@@ -9988,7 +10027,7 @@ def _validate_planning_draft(draft: dict) -> list[str]:
 def _planning_missing_prompt(missing_fields: list[str]) -> str:
     labels = {
         "prompt": "what the automation should do",
-        "agents": "which existing agent(s) should run",
+        "executors": "which agent(s), MCP connector(s), or MCP orchestrator should run",
         "trigger_kind": "what trigger type you want",
         "one_time_at": "the exact date and time",
         "time_of_day": "the time of day",
@@ -10009,10 +10048,15 @@ def _planning_missing_prompt(missing_fields: list[str]) -> str:
 def _planning_summary_markdown(draft: dict, missing_fields: list[str]) -> str:
     trigger = draft.get("trigger") or {}
     agents = draft.get("agents") or []
+    mcp_tool_ids = draft.get("mcpToolIds") or []
+    executor_labels = list(agents)
+    if draft.get("useMcpOrchestrator"):
+        executor_labels.append("mcp_orchestrator")
+    executor_labels.extend(str(tool_id) for tool_id in mcp_tool_ids if str(tool_id).strip())
     lines = [
         "## Draft Summary",
         f"- Name: {draft.get('name') or 'Untitled plan'}",
-        f"- Agents: {', '.join(agents) if agents else 'Not selected yet'}",
+        f"- Executors: {', '.join(executor_labels) if executor_labels else 'Not selected yet'}",
         f"- Trigger: {trigger.get('kind') or 'Not selected yet'}",
     ]
     if trigger.get("kind") == "once":
@@ -10065,12 +10109,14 @@ PLANNING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages(
         (
             "system",
             (
-                "You are helping a user configure a LangGraph-based automation planner for existing agents. "
+                "You are helping a user configure a LangGraph-based automation planner for existing agents and MCP connectors. "
                 "Return JSON only with the keys: draft, clarification_question, should_open_form, and reasoning.\n"
-                "Inside draft, use these keys only: name, prompt, agents, status, and trigger.\n"
+                "Inside draft, use these keys only: name, prompt, agents, mcpToolIds, useMcpOrchestrator, status, and trigger.\n"
                 "Inside trigger, use these keys only: kind, timezone, oneTimeAt, timeOfDay, weekdays, "
                 "intervalMinutes, pollMinutes, watchSql, watchMode, directory, pattern, recursive.\n"
                 "Allowed agents: manager, clickhouse_query, file_management.\n"
+                "Allowed MCP choice: useMcpOrchestrator=true when the user explicitly asks for MCP orchestration. "
+                "Only populate mcpToolIds when the user clearly names a configured MCP connector already present in the current draft.\n"
                 "Allowed trigger kinds: once, daily, weekly, interval, clickhouse_watch, file_watch.\n"
                 "Allowed watch modes: returns_rows, count_increases, result_changes.\n"
                 "Allowed weekdays: mon, tue, wed, thu, fri, sat, sun.\n"
@@ -10132,7 +10178,7 @@ class PlanningExecutionGraphState(TypedDict, total=False):
     plan: dict[str, Any]
     trigger_context: dict[str, Any]
     app_config: dict[str, Any]
-    pending_agents: list[str]
+    pending_executors: list[dict[str, Any]]
     outputs: list[dict[str, Any]]
     overall_status: str
     summary: str
@@ -10764,8 +10810,8 @@ async def _run_clickhouse_planning_agent(
     )
 
     sql = generated["sql"]
-    if not is_safe_read_only_sql(sql):
-        raise ValueError("Scheduled ClickHouse SQL was rejected because it is not read-only.")
+    if not _clickhouse_sql_is_valid(sql, schema):
+        raise ValueError("Scheduled ClickHouse SQL was rejected because it is unsafe or uses forbidden date logic.")
 
     try:
         await execute_clickhouse_sql(clickhouse, f"EXPLAIN SYNTAX {sql}", readonly=False, json_format=False)
@@ -10786,8 +10832,8 @@ async def _run_clickhouse_planning_agent(
             error_feedback=str(first_error),
         )
         sql = repaired["sql"]
-        if not is_safe_read_only_sql(sql):
-            raise ValueError("Scheduled ClickHouse SQL repair was rejected because it is not read-only.")
+        if not _clickhouse_sql_is_valid(sql, schema):
+            raise ValueError("Scheduled ClickHouse SQL repair was rejected because it is unsafe or uses forbidden date logic.")
         generated["reasoning"] = repaired["reasoning"] or generated["reasoning"]
         result = await execute_clickhouse_sql(clickhouse, sql)
 
@@ -10804,6 +10850,103 @@ async def _run_clickhouse_planning_agent(
     )
     content = build_clickhouse_response_markdown(result_summary, [sql])
     return {"agent": "clickhouse_query", "status": "success", "content": content}
+
+
+def _planning_executor_queue(plan: dict) -> list[dict[str, Any]]:
+    queue: list[dict[str, Any]] = []
+    for agent in (plan.get("agents") or []):
+        if isinstance(agent, str) and agent in PLANNER_AGENT_ROLES:
+            queue.append({"kind": "agent", "id": agent})
+    if plan.get("useMcpOrchestrator"):
+        queue.append({"kind": "mcp_orchestrator", "id": MCP_ORCHESTRATOR_ID})
+    for tool_id in (plan.get("mcpToolIds") or []):
+        if isinstance(tool_id, str) and tool_id.strip():
+            queue.append({"kind": "mcp_tool", "id": tool_id.strip()})
+    return queue
+
+
+def _planning_configured_mcp_tool(app_config: dict, tool_id: str) -> Optional[dict[str, str]]:
+    for raw_tool in (app_config.get("mcpTools") or []):
+        tool = _normalize_mcp_tool_config_entry(raw_tool)
+        if tool["id"] == tool_id and tool["url"]:
+            return tool
+    return None
+
+
+async def _run_mcp_tool_planning_target(
+    plan: dict,
+    trigger_context: dict,
+    app_config: dict,
+    tool_id: str,
+) -> dict[str, Any]:
+    tool = _planning_configured_mcp_tool(app_config, tool_id)
+    if not tool:
+        raise ValueError(f"The MCP connector `{tool_id}` is not configured.")
+    llm_config = _app_llm_config(app_config)
+    request_text = (plan.get("prompt") or "").strip()
+    if trigger_context.get("kind") == "clickhouse_watch":
+        request_text += (
+            "\n\nAdditional context from the trigger watch query:\n"
+            f"{_truncate_json(trigger_context.get('rows') or [])}"
+        )
+    elif trigger_context.get("kind") == "file_watch":
+        request_text += (
+            "\n\nAdditional context from new files:\n"
+            + "\n".join(str(path) for path in (trigger_context.get("files") or [])[:10])
+        )
+
+    result = await _run_single_mcp_chat_loop(
+        message=request_text,
+        history=[],
+        mcp_url=tool["url"],
+        llm_base_url=llm_config["llm_base_url"],
+        llm_model=llm_config["llm_model"],
+        llm_provider=llm_config["llm_provider"],
+        llm_api_key=llm_config["llm_api_key"],
+        system_prompt="You are running inside a scheduled automation. Keep the answer concise and execution-focused.",
+        disable_ssl_verification=bool(llm_config.get("disable_ssl_verification", False)),
+    )
+    return {
+        "agent": f"mcp:{tool['label']}",
+        "status": "success",
+        "content": result.get("answer") or "",
+    }
+
+
+async def _run_mcp_orchestrator_planning_target(
+    plan: dict,
+    trigger_context: dict,
+    app_config: dict,
+) -> dict[str, Any]:
+    llm_config = _app_llm_config(app_config)
+    request_text = (plan.get("prompt") or "").strip()
+    if trigger_context.get("kind") == "clickhouse_watch":
+        request_text += (
+            "\n\nAdditional context from the trigger watch query:\n"
+            f"{_truncate_json(trigger_context.get('rows') or [])}"
+        )
+    elif trigger_context.get("kind") == "file_watch":
+        request_text += (
+            "\n\nAdditional context from new files:\n"
+            + "\n".join(str(path) for path in (trigger_context.get("files") or [])[:10])
+        )
+
+    result = await _run_mcp_orchestrator_chat(
+        message=request_text,
+        history=[],
+        mcp_tools=list(app_config.get("mcpTools") or []),
+        llm_base_url=llm_config["llm_base_url"],
+        llm_model=llm_config["llm_model"],
+        llm_provider=llm_config["llm_provider"],
+        llm_api_key=llm_config["llm_api_key"],
+        system_prompt="You are running inside a scheduled automation. Keep the answer concise and execution-focused.",
+        disable_ssl_verification=bool(llm_config.get("disable_ssl_verification", False)),
+    )
+    return {
+        "agent": "mcp_orchestrator",
+        "status": "success",
+        "content": result.get("answer") or "",
+    }
 
 
 async def _summarize_planning_outputs(
@@ -10951,13 +11094,13 @@ async def _due_trigger_context(plan: dict, app_config: dict, now_dt: datetime) -
 
 
 def _planning_execution_route(state: PlanningExecutionGraphState) -> str:
-    pending_agents = state.get("pending_agents") or []
-    return "run_agent" if pending_agents else "summarize"
+    pending_executors = state.get("pending_executors") or []
+    return "run_agent" if pending_executors else "summarize"
 
 
 def _planning_execution_init_node(state: PlanningExecutionGraphState) -> PlanningExecutionGraphState:
     return {
-        "pending_agents": list((state.get("plan") or {}).get("agents") or []),
+        "pending_executors": _planning_executor_queue(state.get("plan") or {}),
         "outputs": [],
         "overall_status": "success",
     }
@@ -10966,31 +11109,37 @@ def _planning_execution_init_node(state: PlanningExecutionGraphState) -> Plannin
 async def _planning_execution_run_agent_node(
     state: PlanningExecutionGraphState,
 ) -> PlanningExecutionGraphState:
-    pending_agents = list(state.get("pending_agents") or [])
+    pending_executors = list(state.get("pending_executors") or [])
     outputs = list(state.get("outputs") or [])
     overall_status = str(state.get("overall_status") or "success")
-    if not pending_agents:
+    if not pending_executors:
         return {
-            "pending_agents": pending_agents,
+            "pending_executors": pending_executors,
             "outputs": outputs,
             "overall_status": overall_status,
         }
 
-    agent = pending_agents.pop(0)
+    executor = dict(pending_executors.pop(0))
     plan = dict(state.get("plan") or {})
     trigger_context = dict(state.get("trigger_context") or {"kind": "manual"})
     app_config = dict(state.get("app_config") or {})
 
     try:
-        if agent == "clickhouse_query":
+        executor_kind = str(executor.get("kind") or "agent")
+        executor_id = str(executor.get("id") or "")
+        if executor_kind == "agent" and executor_id == "clickhouse_query":
             output = await _run_clickhouse_planning_agent(plan, trigger_context, app_config)
-        elif agent == "file_management":
+        elif executor_kind == "agent" and executor_id == "file_management":
             output = await _run_file_management_planning_agent(plan, trigger_context, app_config)
+        elif executor_kind == "mcp_tool":
+            output = await _run_mcp_tool_planning_target(plan, trigger_context, app_config, executor_id)
+        elif executor_kind == "mcp_orchestrator":
+            output = await _run_mcp_orchestrator_planning_target(plan, trigger_context, app_config)
         else:
-            output = await _run_local_role_agent(agent, plan, trigger_context, app_config)
+            output = await _run_local_role_agent(executor_id, plan, trigger_context, app_config)
     except Exception as agent_error:
         output = {
-            "agent": agent,
+            "agent": executor.get("id") or executor.get("kind") or "executor",
             "status": "error",
             "content": f"Agent execution failed: {agent_error}",
         }
@@ -11001,7 +11150,7 @@ async def _planning_execution_run_agent_node(
         overall_status = "error"
 
     return {
-        "pending_agents": pending_agents,
+        "pending_executors": pending_executors,
         "outputs": outputs,
         "overall_status": overall_status,
     }
@@ -11230,6 +11379,24 @@ class MCPChatRequest(BaseModel):
     message: str
     history: list[dict] = []
     mcp_url: str
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    system_prompt: str = ""
+    disable_ssl_verification: bool = False
+
+
+class MCPToolConfigModel(BaseModel):
+    id: str
+    label: str
+    url: str
+
+
+class MCPOrchestratorChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    mcp_tools: list[MCPToolConfigModel] = Field(default_factory=list)
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
@@ -11711,6 +11878,13 @@ class ClickHouseGuideMetadataRequest(BaseModel):
     table: Optional[str] = None
 
 
+class ClickHouseGuidePreviewRequest(BaseModel):
+    clickhouse: ClickHouseConfig
+    table: str
+    row_filter: str = ""
+    row_limit: int = 5
+
+
 class ClickHouseScopeSuggestionRequest(BaseModel):
     table: str
     agent_kind: str = "generic"
@@ -11892,8 +12066,12 @@ async def upsert_planning_plan(req: PlanningPlanRequest):
     normalized_plan = _normalize_planning_plan(req.plan)
     if not normalized_plan.get("prompt"):
         raise HTTPException(status_code=400, detail="A planning job objective is required.")
-    if not normalized_plan.get("agents"):
-        raise HTTPException(status_code=400, detail="Select at least one existing agent.")
+    if not (
+        normalized_plan.get("agents")
+        or normalized_plan.get("mcpToolIds")
+        or normalized_plan.get("useMcpOrchestrator")
+    ):
+        raise HTTPException(status_code=400, detail="Select at least one agent, MCP connector, or the MCP orchestrator.")
 
     trigger = normalized_plan.get("trigger") or {}
     kind = trigger.get("kind")
@@ -12248,6 +12426,7 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
                 }
             )
             state["last_tool_result"] = final_answer
+            _emit_log("success", "file_manager", "Prepared final answer", {"iterations": iteration + 1})
             return {
                 "answer": final_answer,
                 "agent_state": state,
@@ -12369,6 +12548,7 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
                 }
             )
             state["last_tool_result"] = final_answer
+            _emit_log("success", "file_manager", "Stopped after completed task", {"tool": tool_name, "iterations": iteration + 1})
             return {
                 "answer": final_answer,
                 "agent_state": state,
@@ -12381,6 +12561,7 @@ async def chat_file_manager_agent(req: FileManagerAgentRequest):
     )
     if last_error:
         answer += f"\n\n```text\n{last_error}\n```"
+    _emit_log("warning", "file_manager", "Reached iteration limit", {"error": last_error})
     return {
         "answer": answer,
         "agent_state": state,
@@ -12844,6 +13025,7 @@ async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
             state["stage"] = "ready"
             state["pending_request"] = ""
             state["final_answer"] = planned.get("final_answer") or state.get("final_answer") or "## Executive Summary\nThe Oracle analysis is complete."
+            _emit_log("success", "oracle", "Prepared final answer", {"table": state.get("selected_table") or "", "action_count": len(state.get("action_log") or [])})
             return {
                 "answer": state["final_answer"],
                 "agent_state": state,
@@ -12939,6 +13121,7 @@ async def chat_oracle_analyst_agent(req: OracleAnalystAgentRequest):
                 )
                 state["stage"] = "ready"
                 state["pending_request"] = ""
+                _emit_log("success", "oracle", "Completed Oracle analysis", {"table": state.get("selected_table") or "", "rows": result["row_count"]})
                 steps.append(
                     {
                         "id": f"oracle-execute-{iteration}",
@@ -13047,6 +13230,54 @@ async def get_clickhouse_guide_metadata(req: ClickHouseGuideMetadataRequest):
         "available_tables": available_tables,
         "schema_info": schema_info,
         "target_candidates": target_candidates,
+    }
+
+
+@app.post("/api/clickhouse/guide-preview")
+async def get_clickhouse_guide_preview(req: ClickHouseGuidePreviewRequest):
+    table_name = str(req.table or "").strip()
+    if not table_name:
+        raise HTTPException(status_code=400, detail="A ClickHouse table is required before loading a preview.")
+
+    try:
+        available_tables = await list_clickhouse_tables(req.clickhouse)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"ClickHouse metadata loading failed: {exc}") from exc
+
+    if table_name not in available_tables:
+        raise HTTPException(status_code=400, detail=f"Unknown ClickHouse table: {table_name}")
+
+    row_filter = _normalize_auto_ml_row_filter(str(req.row_filter or ""))
+    validation_error = _validate_data_quality_row_filter(row_filter)
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
+
+    preview_limit = max(1, min(int(req.row_limit or 5), 20))
+    count_sql = (
+        f"SELECT count() AS row_count FROM {quote_clickhouse_identifier(table_name)}"
+        + (f" WHERE ({row_filter})" if row_filter else "")
+    )
+    count_payload = await execute_clickhouse_sql(req.clickhouse, count_sql)
+    row_count = int(_first_row(count_payload).get("row_count") or 0)
+
+    preview_sql = (
+        f"SELECT * FROM {quote_clickhouse_identifier(table_name)}\n"
+        + (f"WHERE ({row_filter})\n" if row_filter else "")
+        + f"LIMIT {preview_limit}"
+    )
+    preview_payload = await execute_clickhouse_sql(req.clickhouse, preview_sql, max_result_rows_override=preview_limit)
+    meta = preview_payload.get("meta", []) if isinstance(preview_payload.get("meta"), list) else []
+    rows = preview_payload.get("data", []) if isinstance(preview_payload.get("data"), list) else []
+
+    return {
+        "row_count": row_count,
+        "row_limit": preview_limit,
+        "columns": [str(item.get("name") or "") for item in meta if isinstance(item, dict) and str(item.get("name") or "").strip()],
+        "rows": [row for row in rows if isinstance(row, dict)],
+        "preview_markdown": build_clickhouse_markdown_table(rows, headers=None, max_rows=preview_limit),
+        "scope_label": row_filter or "Full table",
+        "count_sql": count_sql,
+        "preview_sql": preview_sql,
     }
 
 
@@ -15007,6 +15238,7 @@ async def chat_auto_ml_agent(req: AutoMlAgentRequest):
     try:
         comparison_rows, recommended_model = _run_automl_benchmark(records, targets, problem_type)
     except Exception as exc:
+        _emit_log("error", "auto_ml", f"Benchmark failed: {exc}", {"table": state["selected_table"], "target": state["target_column"], "error": str(exc)})
         raise HTTPException(
             status_code=400,
             detail=(
@@ -15065,6 +15297,7 @@ async def chat_auto_ml_agent(req: AutoMlAgentRequest):
     state["clarification_prompt"] = ""
     state["clarification_options"] = []
     state["stage"] = "ready"
+    _emit_log("success", "auto_ml", "Completed Auto-ML benchmark", {"table": state["selected_table"], "target": state["target_column"], "recommended_model": recommended_model})
     return {
         "answer": answer,
         "agent_state": state,
@@ -15168,6 +15401,88 @@ async def chat_data_cleaner_agent(req: DataCleanerAgentRequest):
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {state['selected_table']}: {exc}") from exc
 
+    normalized_scope = str(state.get("row_filter") or "").strip()
+
+    if is_clickhouse_row_request_ambiguous(user_message):
+        answer = build_choice_markdown(
+            "Row Request Clarification",
+            "Do you want the row count or a sample row preview for this scoped table?",
+            [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION],
+        )
+        state["clarification_prompt"] = "Do you want the row count or a sample row preview for this scoped table?"
+        state["clarification_options"] = [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION]
+        return {
+            "answer": answer,
+            "agent_state": state,
+            "steps": [{"id": "data-cleaner-row-intent", "title": "Clarified row intent", "status": "running", "details": "The request is ambiguous between a row count and a row preview."}],
+        }
+
+    if is_clickhouse_row_count_request(user_message):
+        preview_payload = await get_clickhouse_guide_preview(
+            ClickHouseGuidePreviewRequest(
+                clickhouse=req.clickhouse,
+                table=str(state["selected_table"]),
+                row_filter=normalized_scope,
+                row_limit=5,
+            )
+        )
+        row_count = int(preview_payload.get("row_count") or 0)
+        answer = (
+            "## Executive Summary\n"
+            f"`{state['selected_table']}` contains **{row_count:,} row(s)**"
+            + (f" within the scope `{normalized_scope}`.\n\n" if normalized_scope else ".\n\n")
+            + "## Preview\n"
+            + (str(preview_payload.get("preview_markdown") or "").strip() or "No preview rows available.")
+        )
+        state["final_answer"] = answer
+        state["pending_request"] = ""
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        state["stage"] = "ready"
+        state["last_error"] = ""
+        _emit_log("success", "data_cleaner", "Returned scoped row count", {"table": state["selected_table"], "row_count": row_count, "row_filter": normalized_scope})
+        return {
+            "answer": answer,
+            "agent_state": state,
+            "steps": [
+                {"id": "data-cleaner-schema", "title": "Inspected schema", "status": "success", "details": f"Loaded {len(state['schema_info'])} columns from `{state['selected_table']}`."},
+                {"id": "data-cleaner-count", "title": "Returned row count", "status": "success", "details": f"Counted **{row_count:,}** row(s) before running a full audit."},
+            ],
+        }
+
+    if is_clickhouse_sample_rows_request(user_message):
+        requested_limit = extract_clickhouse_requested_row_limit(user_message, default=10, max_limit=50)
+        preview_payload = await get_clickhouse_guide_preview(
+            ClickHouseGuidePreviewRequest(
+                clickhouse=req.clickhouse,
+                table=str(state["selected_table"]),
+                row_filter=normalized_scope,
+                row_limit=requested_limit,
+            )
+        )
+        answer = (
+            "## Executive Summary\n"
+            f"Here is a **{min(requested_limit, int(preview_payload.get('row_count') or 0))}-row preview** from `{state['selected_table']}`"
+            + (f" within the scope `{normalized_scope}`.\n\n" if normalized_scope else ".\n\n")
+            + "## Preview\n"
+            + (str(preview_payload.get("preview_markdown") or "").strip() or "No preview rows available.")
+        )
+        state["final_answer"] = answer
+        state["pending_request"] = ""
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        state["stage"] = "ready"
+        state["last_error"] = ""
+        _emit_log("success", "data_cleaner", "Returned scoped sample preview", {"table": state["selected_table"], "row_filter": normalized_scope, "row_limit": requested_limit})
+        return {
+            "answer": answer,
+            "agent_state": state,
+            "steps": [
+                {"id": "data-cleaner-schema", "title": "Inspected schema", "status": "success", "details": f"Loaded {len(state['schema_info'])} columns from `{state['selected_table']}`."},
+                {"id": "data-cleaner-preview", "title": "Returned sample preview", "status": "success", "details": f"Returned a scoped preview instead of launching a full audit."},
+            ],
+        }
+
     findings, scripts, sample_rows, audit_sqls, preview_markdown = await _data_cleaner_profile(
         req.clickhouse,
         str(state["selected_table"]),
@@ -15228,6 +15543,7 @@ async def chat_data_cleaner_agent(req: DataCleanerAgentRequest):
     state["clarification_options"] = []
     state["stage"] = "ready"
     state["last_error"] = ""
+    _emit_log("success", "data_cleaner", "Completed data-cleaning audit", {"table": state["selected_table"], "finding_count": len(findings), "script_count": len(scripts), "row_filter": str(state.get("row_filter") or "")})
     return {
         "answer": answer,
         "agent_state": state,
@@ -15330,6 +15646,88 @@ async def chat_anonymizer_agent(req: AnonymizerAgentRequest):
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {state['selected_table']}: {exc}") from exc
 
+    normalized_scope = str(state.get("row_filter") or "").strip()
+
+    if is_clickhouse_row_request_ambiguous(user_message):
+        answer = build_choice_markdown(
+            "Row Request Clarification",
+            "Do you want the row count or a sample row preview for this scoped table?",
+            [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION],
+        )
+        state["clarification_prompt"] = "Do you want the row count or a sample row preview for this scoped table?"
+        state["clarification_options"] = [CLICKHOUSE_ROW_COUNT_OPTION, CLICKHOUSE_SAMPLE_ROWS_OPTION]
+        return {
+            "answer": answer,
+            "agent_state": state,
+            "steps": [{"id": "anonymizer-row-intent", "title": "Clarified row intent", "status": "running", "details": "The request is ambiguous between a row count and a row preview."}],
+        }
+
+    if is_clickhouse_row_count_request(user_message):
+        preview_payload = await get_clickhouse_guide_preview(
+            ClickHouseGuidePreviewRequest(
+                clickhouse=req.clickhouse,
+                table=str(state["selected_table"]),
+                row_filter=normalized_scope,
+                row_limit=5,
+            )
+        )
+        row_count = int(preview_payload.get("row_count") or 0)
+        answer = (
+            "## Executive Summary\n"
+            f"`{state['selected_table']}` contains **{row_count:,} row(s)**"
+            + (f" within the scope `{normalized_scope}`.\n\n" if normalized_scope else ".\n\n")
+            + "## Preview\n"
+            + (str(preview_payload.get("preview_markdown") or "").strip() or "No preview rows available.")
+        )
+        state["final_answer"] = answer
+        state["pending_request"] = ""
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        state["stage"] = "ready"
+        state["last_error"] = ""
+        _emit_log("success", "anonymizer", "Returned scoped row count", {"table": state["selected_table"], "row_count": row_count, "row_filter": normalized_scope})
+        return {
+            "answer": answer,
+            "agent_state": state,
+            "steps": [
+                {"id": "anonymizer-schema", "title": "Inspected schema", "status": "success", "details": f"Loaded {len(state['schema_info'])} columns from `{state['selected_table']}`."},
+                {"id": "anonymizer-count", "title": "Returned row count", "status": "success", "details": f"Counted **{row_count:,}** row(s) before running a privacy scan."},
+            ],
+        }
+
+    if is_clickhouse_sample_rows_request(user_message):
+        requested_limit = extract_clickhouse_requested_row_limit(user_message, default=10, max_limit=50)
+        preview_payload = await get_clickhouse_guide_preview(
+            ClickHouseGuidePreviewRequest(
+                clickhouse=req.clickhouse,
+                table=str(state["selected_table"]),
+                row_filter=normalized_scope,
+                row_limit=requested_limit,
+            )
+        )
+        answer = (
+            "## Executive Summary\n"
+            f"Here is a **{min(requested_limit, int(preview_payload.get('row_count') or 0))}-row preview** from `{state['selected_table']}`"
+            + (f" within the scope `{normalized_scope}`.\n\n" if normalized_scope else ".\n\n")
+            + "## Preview\n"
+            + (str(preview_payload.get("preview_markdown") or "").strip() or "No preview rows available.")
+        )
+        state["final_answer"] = answer
+        state["pending_request"] = ""
+        state["clarification_prompt"] = ""
+        state["clarification_options"] = []
+        state["stage"] = "ready"
+        state["last_error"] = ""
+        _emit_log("success", "anonymizer", "Returned scoped sample preview", {"table": state["selected_table"], "row_filter": normalized_scope, "row_limit": requested_limit})
+        return {
+            "answer": answer,
+            "agent_state": state,
+            "steps": [
+                {"id": "anonymizer-schema", "title": "Inspected schema", "status": "success", "details": f"Loaded {len(state['schema_info'])} columns from `{state['selected_table']}`."},
+                {"id": "anonymizer-preview", "title": "Returned sample preview", "status": "success", "details": f"Returned a scoped preview instead of launching a full privacy scan."},
+            ],
+        }
+
     pii_findings, masking_scripts, sample_rows, preview_markdown = await _anonymizer_profile(
         req.clickhouse,
         str(state["selected_table"]),
@@ -15382,6 +15780,7 @@ async def chat_anonymizer_agent(req: AnonymizerAgentRequest):
     state["clarification_options"] = []
     state["stage"] = "ready"
     state["last_error"] = ""
+    _emit_log("success", "anonymizer", "Completed anonymization scan", {"table": state["selected_table"], "pii_count": len(findings), "script_count": len(scripts), "row_filter": str(state.get("row_filter") or "")})
     return {
         "answer": answer,
         "agent_state": state,
@@ -15423,6 +15822,7 @@ async def analyze_custom_agent(req: CustomAgentAnalysisRequest):
 
 @app.post("/api/chat/custom-agent")
 async def chat_custom_agent(req: CustomAgentChatRequest):
+    _emit_log("info", "custom_agent", "Received request", {"query": req.message, "agent_id": req.custom_agent.id})
     custom_agent = {
         "id": req.custom_agent.id,
         "title": req.custom_agent.title or "Custom Agent",
@@ -15477,9 +15877,11 @@ async def chat_custom_agent(req: CustomAgentChatRequest):
             req.llm_api_key,
         )
     except Exception as exc:
+        _emit_log("error", "custom_agent", f"Custom agent failed: {exc}", {"error": str(exc), "agent_id": custom_agent["id"]})
         state["last_error"] = str(exc)
         raise HTTPException(status_code=400, detail=f"Custom agent execution failed: {exc}") from exc
 
+    _emit_log("success", "custom_agent", "Generated final answer", {"agent_id": custom_agent["id"], "title": custom_agent["title"]})
     state["final_answer"] = answer
     state["last_error"] = ""
     return {
@@ -17047,8 +17449,8 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
     )
 
     sql = generated["sql"]
-    if not is_safe_read_only_sql(sql):
-        raise HTTPException(status_code=400, detail="The generated SQL was rejected because it is not a safe read-only query.")
+    if not _clickhouse_sql_is_valid(sql, state.table_schema):
+        raise HTTPException(status_code=400, detail="The generated SQL was rejected because it is unsafe or uses forbidden date logic.")
 
     try:
         start_exec = _time.time()
@@ -17074,9 +17476,9 @@ async def chat_clickhouse_agent(req: ClickHouseAgentRequest):
             error_feedback=str(first_error),
         )
         sql = repaired["sql"]
-        if not is_safe_read_only_sql(sql):
-            _emit_log("error", "clickhouse", "Repaired SQL rejected (not read-only)", {"sql": sql})
-            raise HTTPException(status_code=400, detail="The repaired SQL was rejected because it is not read-only.")
+        if not _clickhouse_sql_is_valid(sql, state.table_schema):
+            _emit_log("error", "clickhouse", "Repaired SQL rejected (forbidden date logic or unsafe)", {"sql": sql})
+            raise HTTPException(status_code=400, detail="The repaired SQL was rejected because it is unsafe or still violates the BETWEEN date rule.")
         generated["reasoning"] = repaired["reasoning"] or generated["reasoning"]
         try:
             start_exec = _time.time()
@@ -17372,152 +17774,636 @@ def _mcp_tool_to_openai(tool) -> dict:
     }
 
 
-@app.post("/api/chat/mcp")
-async def chat_mcp(req: MCPChatRequest):
-    """Agentic loop: connects to an MCP server via the Python MCP SDK, lets the LLM call tools, returns the final answer."""
-    try:
+def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, str]:
+    if isinstance(tool, dict):
+        return {
+            "id": str(tool.get("id") or "").strip(),
+            "label": str(tool.get("label") or tool.get("id") or "MCP").strip(),
+            "url": str(tool.get("url") or "").strip(),
+        }
+    return {
+        "id": str(getattr(tool, "id", "") or "").strip(),
+        "label": str(getattr(tool, "label", "") or getattr(tool, "id", "") or "MCP").strip(),
+        "url": str(getattr(tool, "url", "") or "").strip(),
+    }
+
+
+async def _discover_mcp_catalog(
+    mcp_tools: list[Any],
+    *,
+    disable_ssl_verification: bool = False,
+) -> list[dict[str, Any]]:
+    catalog: list[dict[str, Any]] = []
+    for raw_tool in mcp_tools:
+        tool = _normalize_mcp_tool_config_entry(raw_tool)
+        if not tool["id"] or not tool["url"]:
+            continue
         async with _mcp_client_session(
-            req.mcp_url,
-            disable_ssl_verification=req.disable_ssl_verification,
+            tool["url"],
+            disable_ssl_verification=disable_ssl_verification,
         ) as session:
             tool_result = await session.list_tools()
-            tool_definitions = list(tool_result.tools or [])
-            openai_tools = [_mcp_tool_to_openai(tool) for tool in tool_definitions]
-            memory_history = _normalized_history_messages(
-                req.history,
-                current_message=req.message,
-                max_steps=CHAT_MEMORY_MAX_STEPS,
+            resource_result = await session.list_resources()
+            catalog.append(
+                {
+                    "id": tool["id"],
+                    "label": tool["label"] or tool["id"],
+                    "url": tool["url"],
+                    "tools": [
+                        {
+                            "name": item.name,
+                            "description": item.description or "",
+                            "input_schema": (
+                                item.inputSchema
+                                if isinstance(getattr(item, "inputSchema", None), dict)
+                                else {}
+                            ),
+                        }
+                        for item in (tool_result.tools or [])
+                    ],
+                    "resource_count": len(resource_result.resources or []),
+                }
             )
+    return catalog
 
-            # Build initial messages
-            messages: list[dict] = []
-            if req.system_prompt:
-                messages.append({"role": "system", "content": req.system_prompt})
-            for m in memory_history:
-                role = "user" if m.get("role") == "user" else "assistant"
-                messages.append({"role": role, "content": m.get("content", "")})
-            messages.append({"role": "user", "content": req.message})
 
-            tool_calls_log: list[dict] = []
-            MAX_TURNS = 5
+async def _run_single_mcp_chat_loop(
+    *,
+    message: str,
+    history: list[dict],
+    mcp_url: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+    system_prompt: str,
+    disable_ssl_verification: bool,
+) -> dict[str, Any]:
+    _emit_log("info", "mcp", "Starting MCP conversation", {"target": mcp_url, "query": message})
+    async with _mcp_client_session(
+        mcp_url,
+        disable_ssl_verification=disable_ssl_verification,
+    ) as session:
+        tool_result = await session.list_tools()
+        tool_definitions = list(tool_result.tools or [])
+        openai_tools = [_mcp_tool_to_openai(tool) for tool in tool_definitions]
+        memory_history = _normalized_history_messages(
+            history,
+            current_message=message,
+            max_steps=CHAT_MEMORY_MAX_STEPS,
+        )
 
-            for _ in range(MAX_TURNS):
-                # Call LLM with tools
-                headers = {"Content-Type": "application/json"}
-                if req.llm_api_key:
-                    headers["Authorization"] = f"Bearer {req.llm_api_key}"
-                normalized_base_url = _normalize_local_service_url(req.llm_base_url)
+        messages: list[dict] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        for item in memory_history:
+            role = "user" if item.get("role") == "user" else "assistant"
+            messages.append({"role": role, "content": item.get("content", "")})
+        messages.append({"role": "user", "content": message})
 
-                if req.llm_provider == "ollama":
-                    endpoint = normalized_base_url.rstrip("/") + "/api/chat"
-                    payload: dict = {
-                        "model": req.llm_model,
-                        "messages": messages,
-                        "stream": False,
-                        "tools": openai_tools,
-                    }
-                    async with httpx.AsyncClient(
-                        **_httpx_async_client_kwargs(
-                            endpoint,
-                            timeout=120.0,
-                            verify=False if req.disable_ssl_verification else None,
-                        )
-                    ) as llm_client:
-                        resp = await llm_client.post(endpoint, json=payload, headers=headers)
-                        resp.raise_for_status()
-                    data = resp.json()
-                    llm_msg = data.get("message", {})
-                    content = llm_msg.get("content", "")
-                    raw_tool_calls = llm_msg.get("tool_calls", [])
+        tool_calls_log: list[dict] = []
+        step_log: list[dict[str, Any]] = [
+            {
+                "id": "mcp-tool-discovery",
+                "title": "Discovered MCP tools",
+                "status": "success",
+                "details": f"Loaded {len(tool_definitions)} tool(s) from the selected MCP.",
+            }
+        ]
+        _emit_log("decision", "mcp", "Discovered MCP tool catalog", {"target": mcp_url, "tool_count": len(tool_definitions)})
+        max_turns = 5
+
+        for turn_index in range(max_turns):
+            _emit_log("llm", "mcp", f"Planning MCP step {turn_index + 1}", {"turn": turn_index + 1, "target": mcp_url})
+            headers = {"Content-Type": "application/json"}
+            if llm_api_key:
+                headers["Authorization"] = f"Bearer {llm_api_key}"
+            normalized_base_url = _normalize_local_service_url(llm_base_url)
+
+            if llm_provider == "ollama":
+                endpoint = normalized_base_url.rstrip("/") + "/api/chat"
+                payload: dict[str, Any] = {
+                    "model": llm_model,
+                    "messages": messages,
+                    "stream": False,
+                    "tools": openai_tools,
+                }
+                async with httpx.AsyncClient(
+                    **_httpx_async_client_kwargs(
+                        endpoint,
+                        timeout=120.0,
+                        verify=False if disable_ssl_verification else None,
+                    )
+                ) as llm_client:
+                    resp = await llm_client.post(endpoint, json=payload, headers=headers)
+                    resp.raise_for_status()
+                data = resp.json()
+                llm_msg = data.get("message", {})
+                content = llm_msg.get("content", "")
+                raw_tool_calls = llm_msg.get("tool_calls", [])
+            else:
+                endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
+                payload = {
+                    "model": llm_model,
+                    "messages": messages,
+                    "tools": openai_tools,
+                }
+                async with httpx.AsyncClient(
+                    **_httpx_async_client_kwargs(
+                        endpoint,
+                        timeout=120.0,
+                        verify=False if disable_ssl_verification else None,
+                    )
+                ) as llm_client:
+                    resp = await llm_client.post(endpoint, json=payload, headers=headers)
+                    resp.raise_for_status()
+                data = resp.json()
+                choice = data["choices"][0]["message"]
+                content = choice.get("content") or ""
+                raw_tool_calls = choice.get("tool_calls", [])
+
+            if not raw_tool_calls:
+                _emit_log("success", "mcp", "Completed MCP conversation without further tool calls", {"target": mcp_url})
+                return {
+                    "answer": content,
+                    "tool_calls": tool_calls_log,
+                    "steps": step_log,
+                }
+
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": raw_tool_calls,
+            })
+
+            for call_index, tc in enumerate(raw_tool_calls):
+                if isinstance(tc, dict) and "function" in tc:
+                    fn = tc["function"]
+                    tool_name = fn.get("name", "")
+                    raw_args = fn.get("arguments", "{}")
+                    tool_id = tc.get("id", tool_name)
                 else:
-                    endpoint = normalized_base_url.rstrip("/") + "/chat/completions"
-                    payload = {
-                        "model": req.llm_model,
-                        "messages": messages,
-                        "tools": openai_tools,
-                    }
-                    async with httpx.AsyncClient(
-                        **_httpx_async_client_kwargs(
-                            endpoint,
-                            timeout=120.0,
-                            verify=False if req.disable_ssl_verification else None,
-                        )
-                    ) as llm_client:
-                        resp = await llm_client.post(endpoint, json=payload, headers=headers)
-                        resp.raise_for_status()
-                    data = resp.json()
-                    choice = data["choices"][0]["message"]
-                    content = choice.get("content") or ""
-                    raw_tool_calls = choice.get("tool_calls", [])
+                    tool_name = tc.get("name", "")
+                    raw_args = tc.get("arguments", "{}")
+                    tool_id = tool_name
 
-                # No tool calls → final answer
-                if not raw_tool_calls:
-                    return {
-                        "answer": content,
-                        "tool_calls": tool_calls_log,
-                    }
+                tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                try:
+                    result = await session.call_tool(tool_name, tool_args or {})
+                    tool_output = _format_mcp_tool_result(result)
+                    _emit_log("tool_call", "mcp", f"Executed MCP tool `{tool_name}`", {"target": mcp_url, "tool": tool_name, "args": tool_args})
+                    step_log.append(
+                        {
+                            "id": f"mcp-call-{turn_index + 1}-{call_index + 1}",
+                            "title": f"Called tool `{tool_name}`",
+                            "status": "success",
+                            "details": f"Args: {json.dumps(tool_args, ensure_ascii=False)}\n\n{tool_output[:2400]}",
+                        }
+                    )
+                except Exception as exc:
+                    tool_output = f"[Tool error] {exc}"
+                    _emit_log("error", "mcp", f"MCP tool `{tool_name}` failed: {exc}", {"target": mcp_url, "tool": tool_name, "error": str(exc)})
+                    step_log.append(
+                        {
+                            "id": f"mcp-call-{turn_index + 1}-{call_index + 1}",
+                            "title": f"Tool `{tool_name}` failed",
+                            "status": "error",
+                            "details": tool_output,
+                        }
+                    )
 
-                # Append assistant message with tool calls
-                messages.append({
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": raw_tool_calls,
+                tool_calls_log.append({
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "result": tool_output,
                 })
 
-                # Execute each tool call via the Python MCP SDK
-                for tc in raw_tool_calls:
-                    # Normalise across Ollama / OpenAI formats
-                    if isinstance(tc, dict) and "function" in tc:
-                        fn = tc["function"]
-                        tool_name = fn.get("name", "")
-                        raw_args = fn.get("arguments", "{}")
-                        tool_id = tc.get("id", tool_name)
-                    else:
-                        # Ollama sometimes returns {"name":..., "arguments":...} directly
-                        tool_name = tc.get("name", "")
-                        raw_args = tc.get("arguments", "{}")
-                        tool_id = tool_name
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": tool_output,
+                })
 
-                    tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        messages.append({"role": "user", "content": "Please summarize the MCP execution as a final answer."})
+        final = await llm_chat(
+            messages,
+            llm_base_url,
+            llm_model,
+            llm_provider,
+            llm_api_key,
+            disable_ssl_verification=disable_ssl_verification,
+        )
+        _emit_log("success", "mcp", "Reached MCP safety-net summary", {"target": mcp_url, "tool_call_count": len(tool_calls_log)})
+        return {"answer": final, "tool_calls": tool_calls_log, "steps": step_log}
 
-                    try:
-                        result = await session.call_tool(tool_name, tool_args or {})
-                        tool_output = _format_mcp_tool_result(result)
-                    except Exception as e:
-                        tool_output = f"[Tool error] {e}"
 
-                    tool_calls_log.append({
-                        "tool": tool_name,
-                        "args": tool_args,
-                        "result": tool_output,
-                    })
+def _mcp_orchestrator_catalog_json(catalog: list[dict[str, Any]]) -> str:
+    compact = [
+        {
+            "id": item.get("id"),
+            "label": item.get("label"),
+            "tool_count": len(item.get("tools") or []),
+            "tools": [
+                {
+                    "name": tool.get("name"),
+                    "description": tool.get("description"),
+                    "input_schema": tool.get("input_schema") or {},
+                }
+                for tool in (item.get("tools") or [])
+            ],
+        }
+        for item in catalog
+    ]
+    return json.dumps(compact, ensure_ascii=False, indent=2)
 
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "name": tool_name,
-                        "content": tool_output,
-                    })
 
-            # Safety net: ask LLM for a final answer without tools
-            messages.append({
-                "role": "user",
-                "content": "Please summarise the results above as a final answer.",
-            })
-            final = await llm_chat(
-                messages,
-                req.llm_base_url,
-                req.llm_model,
-                req.llm_provider,
-                req.llm_api_key,
-                disable_ssl_verification=req.disable_ssl_verification,
+async def _mcp_orchestrator_json_call(
+    prompt: str,
+    *,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+    disable_ssl_verification: bool,
+) -> dict[str, Any]:
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+        disable_ssl_verification=disable_ssl_verification,
+    )
+    return extract_json_object(raw)
+
+
+def _mcp_tool_exists(catalog: list[dict[str, Any]], mcp_id: str, tool_name: str) -> bool:
+    for item in catalog:
+        if item.get("id") != mcp_id:
+            continue
+        return any(str(tool.get("name") or "") == tool_name for tool in (item.get("tools") or []))
+    return False
+
+
+async def _run_mcp_orchestrator_chat(
+    *,
+    message: str,
+    history: list[dict],
+    mcp_tools: list[Any],
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+    system_prompt: str,
+    disable_ssl_verification: bool,
+) -> dict[str, Any]:
+    _emit_log("info", "mcp_orchestrator", "Received orchestration request", {"query": message, "connector_count": len(mcp_tools)})
+    catalog = await _discover_mcp_catalog(
+        mcp_tools,
+        disable_ssl_verification=disable_ssl_verification,
+    )
+    if not catalog:
+        _emit_log("error", "mcp_orchestrator", "No usable MCP connector configured", {})
+        raise ValueError("No usable MCP connector is configured for the orchestrator.")
+    _emit_log("decision", "mcp_orchestrator", "Built MCP connector catalog", {"connector_count": len(catalog), "tool_count": sum(len(item.get('tools') or []) for item in catalog)})
+
+    conversation_memory = _conversation_memory_markdown(history, current_message=message)
+    step_cap = 10
+    planning_prompt = f"""
+You are an MCP orchestration planner.
+Write in English.
+Before acting, use the discovered MCP tool inventory below to create the best initial plan.
+Return JSON only with:
+{{
+  "goal": "short goal",
+  "step_budget": 1-10,
+  "mid_review_step": 1-10,
+  "initial_plan": ["step 1", "step 2"],
+  "reasoning": "short explanation"
+}}
+
+Rules:
+- Use between 1 and 10 execution steps.
+- The midpoint review must happen roughly halfway through the plan.
+- Prefer the MCP whose tool is the most specific to the requested job.
+
+System prompt:
+{system_prompt or "None"}
+
+Recent conversation:
+{conversation_memory}
+
+User request:
+{message}
+
+Discovered MCP catalog:
+{_mcp_orchestrator_catalog_json(catalog)}
+""".strip()
+    plan = await _mcp_orchestrator_json_call(
+        planning_prompt,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
+        disable_ssl_verification=disable_ssl_verification,
+    )
+    _emit_log("llm", "mcp_orchestrator", "Generated initial orchestration plan", {"goal": str(plan.get("goal") or ""), "step_budget": int(plan.get("step_budget") or 0)})
+
+    step_budget = max(1, min(int(plan.get("step_budget") or 6), 10))
+    mid_review_step = max(1, min(int(plan.get("mid_review_step") or max(1, math.ceil(step_budget / 2))), step_budget))
+    initial_plan = [
+        str(item).strip()
+        for item in (plan.get("initial_plan") or [])
+        if str(item).strip()
+    ][:step_budget]
+
+    steps: list[dict[str, Any]] = [
+        {
+            "id": "mcp-orch-discovery",
+            "title": "Discovered MCP tools",
+            "status": "success",
+            "details": f"Loaded {sum(len(item.get('tools') or []) for item in catalog)} tool(s) across {len(catalog)} MCP connector(s).",
+        },
+        {
+            "id": "mcp-orch-plan",
+            "title": "Built initial execution plan",
+            "status": "success",
+            "details": (
+                f"Goal: {str(plan.get('goal') or 'Fulfil the user request.')}\n"
+                f"Step budget: {step_budget}\n"
+                f"Midpoint review: step {mid_review_step}\n\n"
+                + "\n".join(f"- {item}" for item in initial_plan)
+            ).strip(),
+        },
+    ]
+    execution_log: list[dict[str, Any]] = []
+    reviewed = False
+
+    for step_index in range(1, step_budget + 1):
+        if step_index == mid_review_step and execution_log and not reviewed:
+            review_prompt = f"""
+You are reviewing an MCP execution plan at mid-point.
+Return JSON only:
+{{
+  "plan_update": "short review",
+  "next_focus": "what to do next"
+}}
+
+User request:
+{message}
+
+Initial plan:
+{json.dumps(initial_plan, ensure_ascii=False, indent=2)}
+
+Execution log so far:
+{json.dumps(execution_log, ensure_ascii=False, indent=2, default=str)}
+""".strip()
+            review = await _mcp_orchestrator_json_call(
+                review_prompt,
+                llm_base_url=llm_base_url,
+                llm_model=llm_model,
+                llm_provider=llm_provider,
+                llm_api_key=llm_api_key,
+                disable_ssl_verification=disable_ssl_verification,
             )
-            return {"answer": final, "tool_calls": tool_calls_log}
+            _emit_log("decision", "mcp_orchestrator", "Reviewed plan at midpoint", {"step": step_index, "review": str(review.get("plan_update") or "")})
+            steps.append(
+                {
+                    "id": f"mcp-orch-review-{step_index}",
+                    "title": "Reviewed plan at midpoint",
+                    "status": "success",
+                    "details": (
+                        f"Review: {str(review.get('plan_update') or 'No revision required.')}\n"
+                        f"Next focus: {str(review.get('next_focus') or 'Continue the plan.')}"
+                    ),
+                }
+            )
+            reviewed = True
 
+        decision_prompt = f"""
+You are an MCP orchestrator.
+Return JSON only with:
+{{
+  "action": "run_tool|finish",
+  "mcp_id": "connector id when action=run_tool",
+  "tool": "tool name when action=run_tool",
+  "arguments": {{}},
+  "reasoning": "why this step is useful",
+  "final_answer": "required only when action=finish"
+}}
+
+Rules:
+- Use the MCP catalog exactly as provided.
+- If enough evidence is available, choose finish.
+- Otherwise choose one tool call that advances the plan.
+- Keep tool arguments minimal and valid.
+
+User request:
+{message}
+
+Current plan:
+{json.dumps(initial_plan, ensure_ascii=False, indent=2)}
+
+Execution log so far:
+{json.dumps(execution_log, ensure_ascii=False, indent=2, default=str)}
+
+Available MCP catalog:
+{_mcp_orchestrator_catalog_json(catalog)}
+""".strip()
+        decision = await _mcp_orchestrator_json_call(
+            decision_prompt,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            disable_ssl_verification=disable_ssl_verification,
+        )
+        action = str(decision.get("action") or "").strip().lower()
+        if action == "finish":
+            final_answer = str(decision.get("final_answer") or "").strip()
+            if not final_answer:
+                summary_prompt = f"""
+Write a concise final answer in English for the user.
+Focus on what was achieved and the most useful result.
+
+User request:
+{message}
+
+Execution log:
+{json.dumps(execution_log, ensure_ascii=False, indent=2, default=str)}
+""".strip()
+                final_answer = await llm_chat(
+                    [{"role": "user", "content": summary_prompt}],
+                    llm_base_url,
+                    llm_model,
+                    llm_provider,
+                    llm_api_key,
+                    disable_ssl_verification=disable_ssl_verification,
+                )
+            _emit_log("success", "mcp_orchestrator", "Finished orchestration", {"step_count": len(execution_log)})
+            return {
+                "answer": final_answer,
+                "tool_calls": execution_log,
+                "steps": steps,
+                "plan": {
+                    "goal": str(plan.get("goal") or ""),
+                    "initial_plan": initial_plan,
+                    "step_budget": step_budget,
+                    "mid_review_step": mid_review_step,
+                },
+            }
+
+        mcp_id = str(decision.get("mcp_id") or "").strip()
+        tool_name = str(decision.get("tool") or "").strip()
+        tool_args = decision.get("arguments") if isinstance(decision.get("arguments"), dict) else {}
+        reasoning = str(decision.get("reasoning") or "").strip() or "The orchestrator selected the next best MCP action."
+
+        if not mcp_id or not tool_name or not _mcp_tool_exists(catalog, mcp_id, tool_name):
+            _emit_log("warning", "mcp_orchestrator", "Rejected invalid MCP step", {"step": step_index, "mcp_id": mcp_id, "tool": tool_name})
+            steps.append(
+                {
+                    "id": f"mcp-orch-invalid-{step_index}",
+                    "title": "Rejected invalid MCP step",
+                    "status": "error",
+                    "details": "The local LLM selected an unknown MCP connector or tool, so the step was skipped and replanned.",
+                }
+            )
+            continue
+
+        target = next(item for item in catalog if item.get("id") == mcp_id)
+        try:
+            async with _mcp_client_session(
+                str(target.get("url") or ""),
+                disable_ssl_verification=disable_ssl_verification,
+            ) as session:
+                result = await session.call_tool(tool_name, tool_args or {})
+                tool_output = _format_mcp_tool_result(result)
+                _emit_log("tool_call", "mcp_orchestrator", f"Executed `{tool_name}` on {target.get('label')}", {"step": step_index, "mcp_id": mcp_id, "tool": tool_name, "args": tool_args})
+        except Exception as exc:
+            tool_output = f"[Tool error] {exc}"
+            _emit_log("error", "mcp_orchestrator", f"Tool `{tool_name}` failed on {target.get('label')}: {exc}", {"step": step_index, "mcp_id": mcp_id, "tool": tool_name, "error": str(exc)})
+            steps.append(
+                {
+                    "id": f"mcp-orch-step-{step_index}",
+                    "title": f"{target.get('label')} · {tool_name}",
+                    "status": "error",
+                    "details": f"{reasoning}\n\n{tool_output}",
+                }
+            )
+            execution_log.append(
+                {
+                    "step": step_index,
+                    "mcp_id": mcp_id,
+                    "mcp_label": target.get("label"),
+                    "tool": tool_name,
+                    "arguments": tool_args,
+                    "result": tool_output,
+                    "status": "error",
+                }
+            )
+            continue
+
+        steps.append(
+            {
+                "id": f"mcp-orch-step-{step_index}",
+                "title": f"{target.get('label')} · {tool_name}",
+                "status": "success",
+                "details": f"{reasoning}\n\nArgs: {json.dumps(tool_args, ensure_ascii=False)}\n\n{tool_output[:2400]}",
+            }
+        )
+        execution_log.append(
+            {
+                "step": step_index,
+                "mcp_id": mcp_id,
+                "mcp_label": target.get("label"),
+                "tool": tool_name,
+                "arguments": tool_args,
+                "result": tool_output,
+                "status": "success",
+            }
+        )
+
+    final_prompt = f"""
+Write a concise final answer in English for the user.
+The orchestrator used its full step budget.
+Summarize the best result available.
+
+User request:
+{message}
+
+Execution log:
+{json.dumps(execution_log, ensure_ascii=False, indent=2, default=str)}
+""".strip()
+    final_answer = await llm_chat(
+        [{"role": "user", "content": final_prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        disable_ssl_verification=disable_ssl_verification,
+    )
+    _emit_log("success", "mcp_orchestrator", "Finished orchestration at step budget", {"step_count": len(execution_log)})
+    return {
+        "answer": final_answer,
+        "tool_calls": execution_log,
+        "steps": steps,
+        "plan": {
+            "goal": str(plan.get("goal") or ""),
+            "initial_plan": initial_plan,
+            "step_budget": step_budget,
+            "mid_review_step": mid_review_step,
+        },
+    }
+
+
+@app.post("/api/chat/mcp")
+async def chat_mcp(req: MCPChatRequest):
+    """Single-MCP agentic loop backed by the Python MCP SDK."""
+    try:
+        return await _run_single_mcp_chat_loop(
+            message=req.message,
+            history=req.history,
+            mcp_url=req.mcp_url,
+            llm_base_url=req.llm_base_url,
+            llm_model=req.llm_model,
+            llm_provider=req.llm_provider,
+            llm_api_key=req.llm_api_key,
+            system_prompt=req.system_prompt,
+            disable_ssl_verification=req.disable_ssl_verification,
+        )
     except Exception as e:
+        _emit_log("error", "mcp", f"MCP chat failed: {e}", {"target": req.mcp_url, "error": str(e)})
         raise HTTPException(
             status_code=400,
             detail=f"MCP chat failed: {_format_mcp_exception(e, req.mcp_url)}",
+        ) from e
+
+
+@app.post("/api/chat/mcp-orchestrator")
+async def chat_mcp_orchestrator(req: MCPOrchestratorChatRequest):
+    """Multi-MCP orchestrator that discovers tools first, plans up to 10 steps, reviews midway, then answers."""
+    try:
+        return await _run_mcp_orchestrator_chat(
+            message=req.message,
+            history=req.history,
+            mcp_tools=req.mcp_tools,
+            llm_base_url=req.llm_base_url,
+            llm_model=req.llm_model,
+            llm_provider=req.llm_provider,
+            llm_api_key=req.llm_api_key,
+            system_prompt=req.system_prompt,
+            disable_ssl_verification=req.disable_ssl_verification,
+        )
+    except Exception as e:
+        _emit_log("error", "mcp_orchestrator", f"MCP orchestration failed: {e}", {"error": str(e)})
+        target_label = ", ".join(
+            entry.label for entry in req.mcp_tools if str(entry.url or "").strip()
+        ) or "configured MCP connectors"
+        raise HTTPException(
+            status_code=400,
+            detail=f"MCP orchestration failed: {_format_mcp_exception(e, target_label)}",
         ) from e
 
 

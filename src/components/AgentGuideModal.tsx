@@ -26,6 +26,14 @@ type AgentGuideModalProps = {
   rowFilter: string;
   sampleRowLimit?: number;
   filterSuggestionRationale: string;
+  preview: {
+    rowCount: number;
+    rowLimit: number;
+    scopeLabel: string;
+    columns: string[];
+    rows: Record<string, unknown>[];
+  } | null;
+  isPreviewLoading: boolean;
   goalText: string;
   notesText: string;
   onClose: () => void;
@@ -37,6 +45,7 @@ type AgentGuideModalProps = {
   onGoalTextChange: (value: string) => void;
   onNotesTextChange: (value: string) => void;
   onSuggestRowFilter: () => void;
+  onRefreshPreview: () => void;
   onSubmit: () => void;
   onStop: () => void;
 };
@@ -138,6 +147,8 @@ export function AgentGuideModal({
   rowFilter,
   sampleRowLimit = 1000,
   filterSuggestionRationale,
+  preview,
+  isPreviewLoading,
   goalText,
   notesText,
   onClose,
@@ -149,6 +160,7 @@ export function AgentGuideModal({
   onGoalTextChange,
   onNotesTextChange,
   onSuggestRowFilter,
+  onRefreshPreview,
   onSubmit,
   onStop,
 }: AgentGuideModalProps) {
@@ -414,6 +426,17 @@ export function AgentGuideModal({
                 </div>
               )}
               <div className="mt-4 flex flex-wrap items-center gap-3">
+                {(mode === "data_cleaner" || mode === "anonymizer") && (
+                  <button
+                    type="button"
+                    onClick={onRefreshPreview}
+                    disabled={!selectedTable || isPreviewLoading}
+                    className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:hover:bg-white/10"
+                  >
+                    {isPreviewLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                    Preview scope
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={isBusy ? onStop : onSubmit}
@@ -454,6 +477,62 @@ export function AgentGuideModal({
                 ))
               )}
             </div>
+
+            {(mode === "data_cleaner" || mode === "anonymizer") && (
+              <div className="mt-5 rounded-[1.35rem] border border-slate-200 bg-white/85 p-4 dark:border-white/10 dark:bg-white/5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Scope preview</div>
+                    <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">
+                      {preview ? `${preview.rowCount.toLocaleString()} row(s)` : "Preview not loaded"}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      {preview ? `Scope: ${preview.scopeLabel}` : "Load a preview to validate the selected table and WHERE clause."}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onRefreshPreview}
+                    disabled={!selectedTable || isPreviewLoading}
+                    className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:hover:bg-white/10"
+                  >
+                    {isPreviewLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    Refresh preview
+                  </button>
+                </div>
+                <div className="mt-3 overflow-hidden rounded-2xl border border-slate-200 dark:border-white/10">
+                  <div className="max-h-[220px] overflow-auto">
+                    <table className="min-w-full divide-y divide-slate-200 text-left text-xs dark:divide-white/10">
+                      <thead className="bg-slate-50/90 dark:bg-slate-900/70">
+                        <tr>
+                          {(preview?.columns?.length ? preview.columns : ["Preview"]).map((column) => (
+                            <th key={column} className="px-3 py-2 font-semibold text-slate-700 dark:text-slate-200">
+                              {column}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white/90 dark:divide-white/5 dark:bg-transparent">
+                        {(preview?.rows?.length ? preview.rows : [{}]).map((row, rowIndex) => (
+                          <tr key={rowIndex}>
+                            {(preview?.columns?.length ? preview.columns : ["Preview"]).map((column) => (
+                              <td key={`${rowIndex}-${column}`} className="px-3 py-2 align-top text-slate-600 dark:text-slate-300">
+                                {preview?.rows?.length ? String((row as Record<string, unknown>)[column] ?? "") : (isPreviewLoading ? "Loading…" : "No preview rows yet")}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                {preview && (
+                  <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                    Showing up to {preview.rowLimit} preview row(s).
+                  </div>
+                )}
+              </div>
+            )}
           </aside>
         </div>
       </div>

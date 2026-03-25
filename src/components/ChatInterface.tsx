@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -256,6 +256,14 @@ type ClickHouseGuideMetadata = {
   availableTables: string[];
   schema: GuideSchemaColumn[];
   targetCandidates: string[];
+};
+
+type ClickHouseGuidePreview = {
+  rowCount: number;
+  rowLimit: number;
+  scopeLabel: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
 };
 
 type AutoMlFilterSuggestion = {
@@ -863,6 +871,8 @@ export function ChatInterface({
   const [dataCleanerGuideSchema, setDataCleanerGuideSchema] = useState<GuideSchemaColumn[]>(dataCleanerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
   const [isDataCleanerFilterSuggestionLoading, setIsDataCleanerFilterSuggestionLoading] = useState(false);
   const [dataCleanerFilterSuggestion, setDataCleanerFilterSuggestion] = useState<AutoMlFilterSuggestion | null>(null);
+  const [isDataCleanerPreviewLoading, setIsDataCleanerPreviewLoading] = useState(false);
+  const [dataCleanerPreview, setDataCleanerPreview] = useState<ClickHouseGuidePreview | null>(null);
   const [anonymizerGuideForm, setAnonymizerGuideForm] = useState<ScopedAuditGuideForm>({
     table: anonymizerAgentState.selectedTable ?? "",
     rowFilter: anonymizerAgentState.rowFilter ?? "",
@@ -873,6 +883,8 @@ export function ChatInterface({
   const [anonymizerGuideSchema, setAnonymizerGuideSchema] = useState<GuideSchemaColumn[]>(anonymizerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
   const [isAnonymizerFilterSuggestionLoading, setIsAnonymizerFilterSuggestionLoading] = useState(false);
   const [anonymizerFilterSuggestion, setAnonymizerFilterSuggestion] = useState<AutoMlFilterSuggestion | null>(null);
+  const [isAnonymizerPreviewLoading, setIsAnonymizerPreviewLoading] = useState(false);
+  const [anonymizerPreview, setAnonymizerPreview] = useState<ClickHouseGuidePreview | null>(null);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const persistedPlanningDraftKey = JSON.stringify((currentConversation?.agentState as any)?.planning?.draft ?? null);
 
@@ -1074,7 +1086,8 @@ export function ChatInterface({
       return;
     }
 
-    const currentToolExists = (config.mcpTools ?? []).some((tool: McpTool) => tool.id === mcpToolId);
+    const currentToolExists = mcpToolId === MCP_ORCHESTRATOR_ID
+      || (config.mcpTools ?? []).some((tool: McpTool) => tool.id === mcpToolId);
     if (!currentToolExists) {
       onMcpToolIdChange(config.mcpTools[0]?.id ?? '');
     }
@@ -1250,6 +1263,77 @@ export function ChatInterface({
     }
   };
 
+  const fetchClickHouseGuidePreview = async (table: string, rowFilter: string) => {
+    const response = await fetch('/api/clickhouse/guide-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        table: table.trim(),
+        row_filter: rowFilter.trim(),
+        row_limit: 5,
+        clickhouse: {
+          host: config.clickhouseHost,
+          port: config.clickhousePort,
+          database: config.clickhouseDatabase,
+          username: config.clickhouseUsername,
+          password: config.clickhousePassword,
+          secure: config.clickhouseSecure,
+          verify_ssl: config.disableSslVerification ? false : (config.clickhouseVerifySsl ?? true),
+          http_path: config.clickhouseHttpPath,
+          query_limit: config.clickhouseQueryLimit,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || `ClickHouse preview error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return {
+      rowCount: Number(data.row_count ?? 0),
+      rowLimit: Number(data.row_limit ?? 5),
+      scopeLabel: String(data.scope_label ?? (rowFilter || 'Full table')),
+      columns: Array.isArray(data.columns) ? data.columns.map(String) : [],
+      rows: Array.isArray(data.rows) ? data.rows.filter(Boolean) as Record<string, unknown>[] : [],
+    } satisfies ClickHouseGuidePreview;
+  };
+
+  const loadDataCleanerPreview = async (table: string, rowFilter: string) => {
+    if (!table.trim()) {
+      setDataCleanerPreview(null);
+      return;
+    }
+    setIsDataCleanerPreviewLoading(true);
+    try {
+      const preview = await fetchClickHouseGuidePreview(table, rowFilter);
+      setDataCleanerPreview(preview);
+    } catch (error) {
+      setGuideFormError(error instanceof Error ? error.message : 'Unable to load the Data Cleaner preview.');
+      setDataCleanerPreview(null);
+    } finally {
+      setIsDataCleanerPreviewLoading(false);
+    }
+  };
+
+  const loadAnonymizerPreview = async (table: string, rowFilter: string) => {
+    if (!table.trim()) {
+      setAnonymizerPreview(null);
+      return;
+    }
+    setIsAnonymizerPreviewLoading(true);
+    try {
+      const preview = await fetchClickHouseGuidePreview(table, rowFilter);
+      setAnonymizerPreview(preview);
+    } catch (error) {
+      setGuideFormError(error instanceof Error ? error.message : 'Unable to load the Anonymizer preview.');
+      setAnonymizerPreview(null);
+    } finally {
+      setIsAnonymizerPreviewLoading(false);
+    }
+  };
+
   const suggestScopedRowFilter = async (options: {
     mode: 'auto_ml' | 'data_cleaner' | 'anonymizer';
     table: string;
@@ -1362,6 +1446,7 @@ export function ChatInterface({
         setDataCleanerFilterSuggestion({ whereClause, rationale });
         if (whereClause) {
           setDataCleanerGuideForm((prev) => ({ ...prev, rowFilter: whereClause }));
+          void loadDataCleanerPreview(dataCleanerGuideForm.table, whereClause);
         }
       },
       onFailure: () => setDataCleanerFilterSuggestion(null),
@@ -1380,6 +1465,7 @@ export function ChatInterface({
         setAnonymizerFilterSuggestion({ whereClause, rationale });
         if (whereClause) {
           setAnonymizerGuideForm((prev) => ({ ...prev, rowFilter: whereClause }));
+          void loadAnonymizerPreview(anonymizerGuideForm.table, whereClause);
         }
       },
       onFailure: () => setAnonymizerFilterSuggestion(null),
@@ -1390,12 +1476,14 @@ export function ChatInterface({
     setDataCleanerFilterSuggestion(null);
     setIsDataCleanerGuideOpen(true);
     await loadDataCleanerGuideMetadata(dataCleanerGuideForm.table || dataCleanerAgentState.selectedTable || undefined);
+    await loadDataCleanerPreview(dataCleanerGuideForm.table || dataCleanerAgentState.selectedTable || "", dataCleanerGuideForm.rowFilter || dataCleanerAgentState.rowFilter || "");
   };
 
   const openAnonymizerGuide = async () => {
     setAnonymizerFilterSuggestion(null);
     setIsAnonymizerGuideOpen(true);
     await loadAnonymizerGuideMetadata(anonymizerGuideForm.table || anonymizerAgentState.selectedTable || undefined);
+    await loadAnonymizerPreview(anonymizerGuideForm.table || anonymizerAgentState.selectedTable || "", anonymizerGuideForm.rowFilter || anonymizerAgentState.rowFilter || "");
   };
 
   useEffect(() => {
@@ -2146,25 +2234,43 @@ export function ChatInterface({
         confidence = data.confidence;
         setIsConnected(true);
       } else if (resolvedWorkflow === 'MCP') {
+        const isOrchestratorMode = mcpToolId === MCP_ORCHESTRATOR_ID;
         const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === mcpToolId);
-        if (!activeTool?.url) {
+        if (isOrchestratorMode && (config.mcpTools ?? []).length === 0) {
+          throw new Error("No MCP connector is configured. Add at least one MCP tool in Settings before using the MCP orchestrator.");
+        }
+        if (!isOrchestratorMode && !activeTool?.url) {
           throw new Error("No MCP tool is selected or its URL is missing. Configure an MCP tool in Settings.");
         }
-        const response = await fetch('/api/chat/mcp', {
+        const response = await fetch(isOrchestratorMode ? '/api/chat/mcp-orchestrator' : '/api/chat/mcp', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: controller.signal,
-          body: JSON.stringify({
-            message: text,
-            history: memoryHistory,
-            mcp_url: activeTool.url,
-            llm_base_url: config.baseUrl,
-            llm_model: config.model,
-            llm_api_key: config.apiKey || undefined,
-            llm_provider: config.provider,
-            system_prompt: formattedSystemPrompt,
-            disable_ssl_verification: disableSslVerification,
-          }),
+          body: JSON.stringify(
+            isOrchestratorMode
+              ? {
+                  message: text,
+                  history: memoryHistory,
+                  mcp_tools: config.mcpTools,
+                  llm_base_url: config.baseUrl,
+                  llm_model: config.model,
+                  llm_api_key: config.apiKey || undefined,
+                  llm_provider: config.provider,
+                  system_prompt: formattedSystemPrompt,
+                  disable_ssl_verification: disableSslVerification,
+                }
+              : {
+                  message: text,
+                  history: memoryHistory,
+                  mcp_url: activeTool!.url,
+                  llm_base_url: config.baseUrl,
+                  llm_model: config.model,
+                  llm_api_key: config.apiKey || undefined,
+                  llm_provider: config.provider,
+                  system_prompt: formattedSystemPrompt,
+                  disable_ssl_verification: disableSslVerification,
+                }
+          ),
         });
         if (!response.ok) {
           const err = await response.json().catch(() => ({}));
@@ -2179,13 +2285,20 @@ export function ChatInterface({
           role: "assistant",
           content: reply,
           timestamp: Date.now(),
-          steps: data.tool_calls?.length > 0
-            ? data.tool_calls.map((tc: { tool: string; args: Record<string, unknown>; result: string }, i: number) => ({
-                id: `mcp-${i}`,
-                title: `Tool: ${tc.tool}`,
-                status: 'success' as const,
-                details: `Args: ${JSON.stringify(tc.args)}\n\nResult: ${tc.result}`,
+          steps: Array.isArray(data.steps) && data.steps.length > 0
+            ? data.steps.map((step: { id?: string; title?: string; status?: string; details?: string }, i: number) => ({
+                id: step.id || `mcp-step-${i}`,
+                title: step.title || `Step ${i + 1}`,
+                status: step.status === 'error' ? 'error' as const : step.status === 'running' ? 'running' as const : 'success' as const,
+                details: step.details || '',
               }))
+            : data.tool_calls?.length > 0
+              ? data.tool_calls.map((tc: { tool: string; args: Record<string, unknown>; result: string }, i: number) => ({
+                  id: `mcp-${i}`,
+                  title: `Tool: ${tc.tool}`,
+                  status: 'success' as const,
+                  details: `Args: ${JSON.stringify(tc.args)}\n\nResult: ${tc.result}`,
+                }))
             : undefined,
         };
 
@@ -3179,7 +3292,9 @@ export function ChatInterface({
     toolsIslandLevel === 2
       ? 'max-w-[58rem]'
       : 'max-w-[50rem]';
-  const activeMcpToolLabel = (config.mcpTools ?? []).find((tool: McpTool) => tool.id === mcpToolId)?.label ?? 'MCP';
+  const activeMcpToolLabel = mcpToolId === MCP_ORCHESTRATOR_ID
+    ? 'MCP Orchestrator'
+    : (config.mcpTools ?? []).find((tool: McpTool) => tool.id === mcpToolId)?.label ?? 'MCP';
   const activeToolsSummary =
     workflow === 'AGENT'
       ? agentRole === 'manager'
@@ -4110,7 +4225,17 @@ export function ChatInterface({
           `Saved plans: ${planningState.plans.length}.`,
           `Recent runs: ${planningState.runs.length}.`,
           planningAgentState.missingFields.length > 0 ? `Still missing: ${planningAgentState.missingFields.join(', ')}.` : 'The current draft has all required inputs.',
-          planningAgentState.draft.agents.length > 0 ? `Draft agents: ${planningAgentState.draft.agents.map((agent) => AGENT_ROLE_LABELS[agent]).join(', ')}.` : 'No agent selected in the current draft yet.',
+          (
+            planningAgentState.draft.agents.length > 0
+            || planningAgentState.draft.mcpToolIds.length > 0
+            || planningAgentState.draft.useMcpOrchestrator
+          )
+            ? `Draft executors: ${[
+                ...planningAgentState.draft.agents.map((agent) => AGENT_ROLE_LABELS[agent]),
+                ...(planningAgentState.draft.useMcpOrchestrator ? ['MCP Orchestrator'] : []),
+                ...planningAgentState.draft.mcpToolIds.map((toolId) => (config.mcpTools ?? []).find((tool: McpTool) => tool.id === toolId)?.label || toolId),
+              ].join(', ')}.`
+            : 'No executor selected in the current draft yet.',
         ],
         nextLabel: 'Next best action',
         nextValue: planningAgentState.readyToReview
@@ -4183,6 +4308,7 @@ export function ChatInterface({
     planningState.runs,
     activeMcpToolLabel,
     config.model,
+    config.mcpTools,
     config.elasticsearchIndex,
     config.knnNeighbors,
   ]);
@@ -4615,7 +4741,7 @@ export function ChatInterface({
                         MCP Tools
                       </div>
                       <div className="mt-1 text-xs text-teal-900/70 dark:text-teal-200/75">
-                        Pick the MCP connector you want to message.
+                        Pick one MCP connector directly, or switch to the MCP orchestrator to coordinate several connectors.
                       </div>
                     </div>
                     <span className="rounded-full border border-teal-200/80 bg-teal-50/80 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-teal-600 dark:border-teal-800/70 dark:bg-teal-950/35 dark:text-teal-300">
@@ -4627,6 +4753,12 @@ export function ChatInterface({
                     <span className="px-1 text-xs text-gray-400 italic">No MCP tools configured. Open Settings to add one.</span>
                   ) : (
                     <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => handleMcpToolSelection(MCP_ORCHESTRATOR_ID)}
+                        className={`${toolsSecondaryButtonBase} ${mcpToolId === MCP_ORCHESTRATOR_ID ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/85 text-gray-700 border border-teal-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-teal-800/70 dark:hover:bg-white/10'}`}
+                      >
+                        <Network className="h-3.5 w-3.5" /> MCP Orchestrator
+                      </button>
                       {(config.mcpTools ?? []).map((tool: McpTool) => (
                         <button
                           key={tool.id}
@@ -5305,6 +5437,7 @@ export function ChatInterface({
         draft={plannerDraft}
         editingPlanId={editingPlanningPlanId}
         planningState={planningState}
+        mcpTools={config.mcpTools ?? []}
         isBusy={planningBusy}
         error={planningError}
         onDraftChange={(draft) => {
@@ -5353,6 +5486,8 @@ export function ChatInterface({
         rowFilter={autoMlGuideForm.rowFilter}
         sampleRowLimit={autoMlGuideForm.sampleRowLimit}
         filterSuggestionRationale={autoMlFilterSuggestion?.rationale ?? ""}
+        preview={null}
+        isPreviewLoading={false}
         goalText={autoMlGuideForm.goal}
         notesText={autoMlGuideForm.notes}
         onClose={() => setIsAutoMlGuideOpen(false)}
@@ -5382,6 +5517,7 @@ export function ChatInterface({
           setAutoMlGuideForm((prev) => ({ ...prev, notes: value }));
         }}
         onSuggestRowFilter={() => void suggestAutoMlRowFilter()}
+        onRefreshPreview={() => {}}
         onSubmit={() => void launchAutoMlGuide()}
         onStop={stopCurrentExecution}
       />
@@ -5397,12 +5533,15 @@ export function ChatInterface({
         selectedTable={dataCleanerGuideForm.table}
         rowFilter={dataCleanerGuideForm.rowFilter}
         filterSuggestionRationale={dataCleanerFilterSuggestion?.rationale ?? ""}
+        preview={dataCleanerPreview}
+        isPreviewLoading={isDataCleanerPreviewLoading}
         goalText={dataCleanerGuideForm.goal}
         notesText={dataCleanerGuideForm.notes}
         onClose={() => setIsDataCleanerGuideOpen(false)}
         onRefreshMetadata={() => void loadDataCleanerGuideMetadata(dataCleanerGuideForm.table || undefined)}
         onTableChange={(table) => {
           setDataCleanerFilterSuggestion(null);
+          setDataCleanerPreview(null);
           setDataCleanerGuideForm((prev) => ({ ...prev, table, rowFilter: '' }));
           void loadDataCleanerGuideMetadata(table);
         }}
@@ -5420,6 +5559,7 @@ export function ChatInterface({
           setDataCleanerGuideForm((prev) => ({ ...prev, notes: value }));
         }}
         onSuggestRowFilter={() => void suggestDataCleanerRowFilter()}
+        onRefreshPreview={() => void loadDataCleanerPreview(dataCleanerGuideForm.table, dataCleanerGuideForm.rowFilter)}
         onSubmit={() => void launchDataCleanerGuide()}
         onStop={stopCurrentExecution}
       />
@@ -5435,12 +5575,15 @@ export function ChatInterface({
         selectedTable={anonymizerGuideForm.table}
         rowFilter={anonymizerGuideForm.rowFilter}
         filterSuggestionRationale={anonymizerFilterSuggestion?.rationale ?? ""}
+        preview={anonymizerPreview}
+        isPreviewLoading={isAnonymizerPreviewLoading}
         goalText={anonymizerGuideForm.goal}
         notesText={anonymizerGuideForm.notes}
         onClose={() => setIsAnonymizerGuideOpen(false)}
         onRefreshMetadata={() => void loadAnonymizerGuideMetadata(anonymizerGuideForm.table || undefined)}
         onTableChange={(table) => {
           setAnonymizerFilterSuggestion(null);
+          setAnonymizerPreview(null);
           setAnonymizerGuideForm((prev) => ({ ...prev, table, rowFilter: '' }));
           void loadAnonymizerGuideMetadata(table);
         }}
@@ -5458,6 +5601,7 @@ export function ChatInterface({
           setAnonymizerGuideForm((prev) => ({ ...prev, notes: value }));
         }}
         onSuggestRowFilter={() => void suggestAnonymizerRowFilter()}
+        onRefreshPreview={() => void loadAnonymizerPreview(anonymizerGuideForm.table, anonymizerGuideForm.rowFilter)}
         onSubmit={() => void launchAnonymizerGuide()}
         onStop={stopCurrentExecution}
       />

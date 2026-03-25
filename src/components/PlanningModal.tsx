@@ -5,6 +5,7 @@ import {
   CalendarClock,
   Database,
   FolderOpen,
+  Network,
   Pause,
   Play,
   RefreshCw,
@@ -18,6 +19,8 @@ import {
   AgentRole,
   CrewPlan,
   CrewPlanDraft,
+  MCP_ORCHESTRATOR_ID,
+  McpTool,
   PlanningBackendState,
   PlanningWeekday,
   cn,
@@ -29,6 +32,7 @@ interface PlanningModalProps {
   draft: CrewPlanDraft;
   editingPlanId: string | null;
   planningState: PlanningBackendState;
+  mcpTools: McpTool[];
   isBusy: boolean;
   error: string | null;
   onDraftChange: (draft: CrewPlanDraft) => void;
@@ -145,6 +149,7 @@ export function PlanningModal({
   draft,
   editingPlanId,
   planningState,
+  mcpTools,
   isBusy,
   error,
   onDraftChange,
@@ -197,6 +202,21 @@ export function PlanningModal({
     });
   };
 
+  const toggleMcpTool = (toolId: string) => {
+    const hasTool = draft.mcpToolIds.includes(toolId);
+    updateDraft({
+      mcpToolIds: hasTool
+        ? draft.mcpToolIds.filter((item) => item !== toolId)
+        : [...draft.mcpToolIds, toolId],
+    });
+  };
+
+  const toggleMcpOrchestrator = () => {
+    updateDraft({
+      useMcpOrchestrator: !draft.useMcpOrchestrator,
+    });
+  };
+
   const toggleWeekday = (day: PlanningWeekday) => {
     const hasDay = draft.trigger.weekdays.includes(day);
     updateTrigger({
@@ -211,12 +231,21 @@ export function PlanningModal({
   };
 
   const selectedAgents = AGENT_OPTIONS.filter((agent) => draft.agents.includes(agent.role));
+  const selectedMcpTools = mcpTools.filter((tool) => draft.mcpToolIds.includes(tool.id));
+  const selectedExecutorCount = selectedAgents.length + selectedMcpTools.length + (draft.useMcpOrchestrator ? 1 : 0);
   const activeTrigger = TRIGGER_OPTIONS.find((option) => option.kind === draft.trigger.kind) ?? TRIGGER_OPTIONS[0];
   const readinessChecks = [
     { label: "Objective", ok: draft.prompt.trim().length > 0 },
-    { label: "Agents", ok: draft.agents.length > 0 },
+    { label: "Executors", ok: selectedExecutorCount > 0 },
     { label: "Trigger", ok: Boolean(triggerSummary(draft.trigger)) },
   ];
+
+  const describePlanExecutor = (value: string) => {
+    const tool = mcpTools.find((item) => item.id === value);
+    if (tool) return `MCP · ${tool.label}`;
+    if (value === MCP_ORCHESTRATOR_ID) return "MCP · Orchestrator";
+    return agentLabel(value as AgentRole);
+  };
 
   return createPortal(
     <>
@@ -241,14 +270,14 @@ export function PlanningModal({
                 LangGraph Planning
               </div>
               <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
-                Schedule existing agents with fixed time or event triggers
+                Schedule agents, MCP connectors, and orchestrated runs with fixed time or event triggers
               </h2>
               <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
                 Native controls for Windows reliability, plus LangGraph orchestration for draft parsing and scheduled execution.
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-gray-600 dark:text-gray-300">
                 <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 dark:border-emerald-800/70 dark:bg-emerald-900/30">
-                  {selectedAgents.length} agent{selectedAgents.length === 1 ? "" : "s"} selected
+                  {selectedExecutorCount} executor{selectedExecutorCount === 1 ? "" : "s"} selected
                 </span>
                 <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 dark:border-sky-800/70 dark:bg-sky-900/30">
                   Trigger: {activeTrigger.title}
@@ -376,13 +405,17 @@ export function PlanningModal({
                     Step 2
                   </div>
                   <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                    Agents to run
+                    Executors to run
                   </h3>
                   <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    Select one or more existing agents. The scheduler keeps their current capabilities unchanged.
+                    Select one or more built-in agents, one or more MCP connectors, or the MCP orchestrator.
                   </p>
 
-                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <div className="mt-4">
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                      Agents
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
                     {AGENT_OPTIONS.map((agent) => {
                       const Icon = agent.icon;
                       const checked = draft.agents.includes(agent.role);
@@ -414,6 +447,75 @@ export function PlanningModal({
                         </label>
                       );
                     })}
+                    </div>
+                  </div>
+
+                  <div className="mt-5">
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                      MCP
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <label
+                        className={cn(
+                          "flex cursor-pointer items-start gap-3 rounded-2xl border px-4 py-4 transition-colors",
+                          draft.useMcpOrchestrator
+                            ? "border-teal-300 bg-teal-50 dark:border-teal-600 dark:bg-teal-900/20"
+                            : "border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-950"
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={draft.useMcpOrchestrator}
+                          onChange={toggleMcpOrchestrator}
+                          className="mt-1 h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            <Network className="h-4 w-4 text-teal-600 dark:text-teal-300" />
+                            MCP Orchestrator
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                            Discover all configured MCP tools, build a 1-to-10 step plan, review it halfway, then execute the best path.
+                          </p>
+                        </div>
+                      </label>
+
+                      {mcpTools.map((tool) => {
+                        const checked = draft.mcpToolIds.includes(tool.id);
+                        return (
+                          <label
+                            key={tool.id}
+                            className={cn(
+                              "flex cursor-pointer items-start gap-3 rounded-2xl border px-4 py-4 transition-colors",
+                              checked
+                                ? "border-teal-300 bg-teal-50 dark:border-teal-600 dark:bg-teal-900/20"
+                                : "border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-950"
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleMcpTool(tool.id)}
+                              className="mt-1 h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                                <Network className="h-4 w-4 text-teal-600 dark:text-teal-300" />
+                                {tool.label}
+                              </div>
+                              <p className="mt-1 break-all text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                                {tool.url}
+                              </p>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {mcpTools.length === 0 && (
+                      <div className="mt-3 rounded-2xl border border-dashed border-gray-200 px-4 py-3 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                        No MCP connector is configured yet in Settings.
+                      </div>
+                    )}
                   </div>
                 </section>
 
@@ -666,17 +768,31 @@ export function PlanningModal({
                   </h3>
                   <div className="mt-4 space-y-3 text-sm">
                     <div>
-                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Selected agents</div>
+                      <div className="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Selected executors</div>
                       <div className="mt-2 flex flex-wrap gap-2">
-                        {selectedAgents.length > 0 ? selectedAgents.map((agent) => (
+                        {selectedAgents.map((agent) => (
                           <span
                             key={agent.role}
                             className="rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs text-violet-800 dark:border-violet-800/70 dark:bg-violet-900/25 dark:text-violet-200"
                           >
                             {agent.label}
                           </span>
-                        )) : (
-                          <span className="text-gray-500 dark:text-gray-400">No agent selected yet</span>
+                        ))}
+                        {draft.useMcpOrchestrator && (
+                          <span className="rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-xs text-teal-800 dark:border-teal-800/70 dark:bg-teal-900/25 dark:text-teal-200">
+                            MCP Orchestrator
+                          </span>
+                        )}
+                        {selectedMcpTools.map((tool) => (
+                          <span
+                            key={tool.id}
+                            className="rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-xs text-teal-800 dark:border-teal-800/70 dark:bg-teal-900/25 dark:text-teal-200"
+                          >
+                            {tool.label}
+                          </span>
+                        ))}
+                        {selectedExecutorCount === 0 && (
+                          <span className="text-gray-500 dark:text-gray-400">No executor selected yet</span>
                         )}
                       </div>
                     </div>
@@ -747,7 +863,11 @@ export function PlanningModal({
                               {plan.name || "Untitled plan"}
                             </div>
                           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                              {plan.agents.map(agentLabel).join(", ") || "No agents"} · {plan.trigger.kind}
+                              {[
+                                ...plan.agents.map(agentLabel),
+                                ...(plan.useMcpOrchestrator ? ["MCP Orchestrator"] : []),
+                                ...((plan.mcpToolIds || []).map(describePlanExecutor)),
+                              ].join(", ") || "No executor"} · {plan.trigger.kind}
                           </div>
                         </div>
                           <span className={cn("rounded-full border px-2.5 py-1 text-[11px] font-medium", statusTone(plan.status))}>
