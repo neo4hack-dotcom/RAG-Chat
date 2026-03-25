@@ -40,6 +40,14 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       label: tool.label || 'New Tool',
       url: tool.url || '',
       description: tool.description || '',
+      presetQuestions: Array.isArray(tool.presetQuestions)
+        ? tool.presetQuestions.map((preset, presetIndex) => ({
+            id: preset.id || `${tool.id || 'mcp'}_preset_${presetIndex + 1}`,
+            label: preset.label || '',
+            prompt: preset.prompt || '',
+            preferredTool: preset.preferredTool || '',
+          }))
+        : [],
     })),
     documentationUrl: config.documentationUrl ?? '',
     agenticDataVizUrl: config.agenticDataVizUrl ?? '',
@@ -1587,7 +1595,7 @@ export function SettingsModal({
                 </h3>
                 <button
                   onClick={() => {
-                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '' };
+                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '', presetQuestions: [] };
                     setLocalConfig(prev => ({ ...prev, mcpTools: [...(prev.mcpTools ?? []), newTool] }));
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200 rounded-xl hover:bg-teal-100 transition-colors"
@@ -1595,7 +1603,7 @@ export function SettingsModal({
                   <Plus className="w-3.5 h-3.5" /> Add Tool
                 </button>
               </div>
-              <p className="text-xs text-gray-500 dark:text-gray-400 -mt-3">These tools appear in the MCP button dropdown inside the chat interface. Add a short English description so the MCP Orchestrator can understand what each MCP is best at before planning its steps.</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 -mt-3">These tools appear in the MCP button dropdown inside the chat interface. Add a short English description so the MCP Orchestrator can understand what each MCP is best at before planning its steps. You can also define optional starter questions so users can click and launch a guided MCP request immediately.</p>
 
               {(localConfig.mcpTools ?? []).length === 0 && (
                 <div className="text-center py-8 text-sm text-gray-400 dark:text-gray-500 border border-dashed border-gray-200 dark:border-gray-700 rounded-xl">
@@ -1650,6 +1658,111 @@ export function SettingsModal({
                               className="w-full min-h-[84px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all resize-none"
                               placeholder="Explain in English what this MCP can do, what systems it can reach, and when the orchestrator should prefer it."
                             />
+                          </div>
+                          <div className="col-span-2 rounded-xl border border-teal-100 dark:border-teal-900/50 bg-teal-50/60 dark:bg-teal-950/20 p-3 space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-xs font-semibold text-teal-800 dark:text-teal-200">Starter questions</p>
+                                <p className="text-[11px] text-teal-700/80 dark:text-teal-300/80">Optional clickable questions shown in the chat when this MCP is selected. Leave empty if users should start with a blank chat.</p>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  const updated = [...(localConfig.mcpTools ?? [])];
+                                  const nextQuestions = [
+                                    ...(tool.presetQuestions ?? []),
+                                    {
+                                      id: `${tool.id || 'mcp'}_preset_${Date.now()}`,
+                                      label: '',
+                                      prompt: '',
+                                      preferredTool: '',
+                                    },
+                                  ];
+                                  updated[idx] = { ...tool, presetQuestions: nextQuestions };
+                                  setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                }}
+                                className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium bg-white text-teal-700 border border-teal-200 rounded-lg hover:bg-teal-50 transition-colors"
+                              >
+                                <Plus className="w-3.5 h-3.5" /> Add question
+                              </button>
+                            </div>
+
+                            {(tool.presetQuestions ?? []).length === 0 ? (
+                              <div className="rounded-lg border border-dashed border-teal-200 dark:border-teal-900/60 bg-white/70 dark:bg-slate-900/30 px-3 py-3 text-[11px] text-teal-700/80 dark:text-teal-300/80">
+                                No starter question yet. Users will see an empty MCP chat and can type freely.
+                              </div>
+                            ) : (
+                              <div className="space-y-2">
+                                {(tool.presetQuestions ?? []).map((preset, presetIndex) => (
+                                  <div key={preset.id} className="rounded-lg border border-white/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/50 p-3 space-y-2">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-teal-500">
+                                        Question {presetIndex + 1}
+                                      </p>
+                                      <button
+                                        onClick={() => {
+                                          const updated = [...(localConfig.mcpTools ?? [])];
+                                          const nextQuestions = (tool.presetQuestions ?? []).filter((_, index) => index !== presetIndex);
+                                          updated[idx] = { ...tool, presetQuestions: nextQuestions };
+                                          setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                        }}
+                                        className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                    <div className="grid gap-2 md:grid-cols-2">
+                                      <div>
+                                        <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400 mb-1 block">Button label</label>
+                                        <input
+                                          type="text"
+                                          value={preset.label}
+                                          onChange={(e) => {
+                                            const updated = [...(localConfig.mcpTools ?? [])];
+                                            const nextQuestions = [...(tool.presetQuestions ?? [])];
+                                            nextQuestions[presetIndex] = { ...preset, label: e.target.value };
+                                            updated[idx] = { ...tool, presetQuestions: nextQuestions };
+                                            setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                          }}
+                                          className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                                          placeholder="List today's open tickets"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400 mb-1 block">Preferred MCP tool (optional)</label>
+                                        <input
+                                          type="text"
+                                          value={preset.preferredTool}
+                                          onChange={(e) => {
+                                            const updated = [...(localConfig.mcpTools ?? [])];
+                                            const nextQuestions = [...(tool.presetQuestions ?? [])];
+                                            nextQuestions[presetIndex] = { ...preset, preferredTool: e.target.value };
+                                            updated[idx] = { ...tool, presetQuestions: nextQuestions };
+                                            setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                          }}
+                                          className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                                          placeholder="get_incidents"
+                                        />
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400 mb-1 block">Question sent to chat</label>
+                                      <textarea
+                                        value={preset.prompt}
+                                        onChange={(e) => {
+                                          const updated = [...(localConfig.mcpTools ?? [])];
+                                          const nextQuestions = [...(tool.presetQuestions ?? [])];
+                                          nextQuestions[presetIndex] = { ...preset, prompt: e.target.value };
+                                          updated[idx] = { ...tool, presetQuestions: nextQuestions };
+                                          setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                        }}
+                                        className="w-full min-h-[72px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all resize-none"
+                                        placeholder="Summarize the top five incidents created today and highlight anything still unresolved."
+                                      />
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex flex-col gap-1 pt-5">
