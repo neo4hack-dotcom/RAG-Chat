@@ -35,7 +35,12 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     chunkSize: config.chunkSize || 512,
     chunkOverlap: config.chunkOverlap || 50,
     knnNeighbors: config.knnNeighbors || 50,
-    mcpTools: config.mcpTools ?? [],
+    mcpTools: (config.mcpTools ?? []).map((tool) => ({
+      id: tool.id || `mcp_${Date.now()}`,
+      label: tool.label || 'New Tool',
+      url: tool.url || '',
+      description: tool.description || '',
+    })),
     documentationUrl: config.documentationUrl ?? '',
     agenticDataVizUrl: config.agenticDataVizUrl ?? '',
     portalApps: Array.isArray(config.portalApps)
@@ -1582,7 +1587,7 @@ export function SettingsModal({
                 </h3>
                 <button
                   onClick={() => {
-                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '' };
+                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '' };
                     setLocalConfig(prev => ({ ...prev, mcpTools: [...(prev.mcpTools ?? []), newTool] }));
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200 rounded-xl hover:bg-teal-100 transition-colors"
@@ -1590,7 +1595,7 @@ export function SettingsModal({
                   <Plus className="w-3.5 h-3.5" /> Add Tool
                 </button>
               </div>
-              <p className="text-xs text-gray-500 dark:text-gray-400 -mt-3">These tools appear in the MCP button dropdown inside the chat interface.</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 -mt-3">These tools appear in the MCP button dropdown inside the chat interface. Add a short English description so the MCP Orchestrator can understand what each MCP is best at before planning its steps.</p>
 
               {(localConfig.mcpTools ?? []).length === 0 && (
                 <div className="text-center py-8 text-sm text-gray-400 dark:text-gray-500 border border-dashed border-gray-200 dark:border-gray-700 rounded-xl">
@@ -1631,6 +1636,19 @@ export function SettingsModal({
                               }}
                               className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
                               placeholder="http://localhost:3000/sse"
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Description</label>
+                            <textarea
+                              value={tool.description || ''}
+                              onChange={(e) => {
+                                const updated = [...(localConfig.mcpTools ?? [])];
+                                updated[idx] = { ...tool, description: e.target.value };
+                                setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                              }}
+                              className="w-full min-h-[84px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all resize-none"
+                              placeholder="Explain in English what this MCP can do, what systems it can reach, and when the orchestrator should prefer it."
                             />
                           </div>
                         </div>

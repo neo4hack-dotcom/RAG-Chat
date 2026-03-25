@@ -441,6 +441,7 @@ export type McpTool = {
   id: string;
   label: string;
   url: string;
+  description: string;
 };
 
 export const MCP_ORCHESTRATOR_ID = '__mcp_orchestrator__';
@@ -553,8 +554,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   chunkOverlap: 50,
   knnNeighbors: 50,
   mcpTools: [
-    { id: 'mcp_1', label: 'MCP Tool 1', url: '' },
-    { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
+    { id: 'mcp_1', label: 'MCP Tool 1', url: '', description: '' },
+    { id: 'mcp_2', label: 'MCP Tool 2', url: '', description: '' },
   ],
   documentationUrl: '',
   agenticDataVizUrl: '',
@@ -1170,6 +1171,7 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
           id: tool.id || `mcp_${Date.now()}`,
           label: tool.label || 'New Tool',
           url: tool.url || '',
+          description: tool.description || '',
         }))
       : DEFAULT_CONFIG.mcpTools.map((tool) => ({ ...tool })),
   };

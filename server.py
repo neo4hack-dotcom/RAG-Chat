@@ -249,8 +249,8 @@ DEFAULT_APP_CONFIG = {
     "chunkOverlap": 50,
     "knnNeighbors": 50,
     "mcpTools": [
-        {"id": "mcp_1", "label": "MCP Tool 1", "url": ""},
-        {"id": "mcp_2", "label": "MCP Tool 2", "url": ""},
+        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": ""},
+        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": ""},
     ],
     "documentationUrl": "",
     "agenticDataVizUrl": "",
@@ -11391,6 +11391,7 @@ class MCPToolConfigModel(BaseModel):
     id: str
     label: str
     url: str
+    description: str = ""
 
 
 class MCPOrchestratorChatRequest(BaseModel):
@@ -17780,11 +17781,13 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, str]:
             "id": str(tool.get("id") or "").strip(),
             "label": str(tool.get("label") or tool.get("id") or "MCP").strip(),
             "url": str(tool.get("url") or "").strip(),
+            "description": str(tool.get("description") or "").strip(),
         }
     return {
         "id": str(getattr(tool, "id", "") or "").strip(),
         "label": str(getattr(tool, "label", "") or getattr(tool, "id", "") or "MCP").strip(),
         "url": str(getattr(tool, "url", "") or "").strip(),
+        "description": str(getattr(tool, "description", "") or "").strip(),
     }
 
 
@@ -17809,6 +17812,7 @@ async def _discover_mcp_catalog(
                     "id": tool["id"],
                     "label": tool["label"] or tool["id"],
                     "url": tool["url"],
+                    "description": tool.get("description") or "",
                     "tools": [
                         {
                             "name": item.name,
@@ -18003,6 +18007,7 @@ def _mcp_orchestrator_catalog_json(catalog: list[dict[str, Any]]) -> str:
         {
             "id": item.get("id"),
             "label": item.get("label"),
+            "description": item.get("description"),
             "tool_count": len(item.get("tools") or []),
             "tools": [
                 {
