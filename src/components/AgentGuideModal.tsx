@@ -1,6 +1,6 @@
 import React from "react";
 import { createPortal } from "react-dom";
-import { BrainCircuit, Database, Loader2, Play, RefreshCw, Sparkles, Target, X } from "lucide-react";
+import { BrainCircuit, Database, Gauge, Loader2, Play, RefreshCw, ShieldCheck, Sparkles, Target, X } from "lucide-react";
 import { cn } from "../lib/utils";
 
 export type GuideSchemaColumn = {
@@ -9,7 +9,10 @@ export type GuideSchemaColumn = {
   category: "numeric" | "string" | "date" | "other";
 };
 
+export type AgentGuideMode = "auto_ml" | "data_cleaner" | "anonymizer";
+
 type AgentGuideModalProps = {
+  mode: AgentGuideMode;
   isOpen: boolean;
   isBusy: boolean;
   isLoadingMetadata: boolean;
@@ -21,7 +24,7 @@ type AgentGuideModalProps = {
   targetColumn?: string;
   targetCandidates?: string[];
   rowFilter: string;
-  sampleRowLimit: number;
+  sampleRowLimit?: number;
   filterSuggestionRationale: string;
   goalText: string;
   notesText: string;
@@ -30,7 +33,7 @@ type AgentGuideModalProps = {
   onTableChange: (table: string) => void;
   onTargetColumnChange?: (value: string) => void;
   onRowFilterChange: (value: string) => void;
-  onSampleRowLimitChange: (value: number) => void;
+  onSampleRowLimitChange?: (value: number) => void;
   onGoalTextChange: (value: string) => void;
   onNotesTextChange: (value: string) => void;
   onSuggestRowFilter: () => void;
@@ -45,6 +48,20 @@ const AUTOML_GOAL_PRESETS = [
   "Benchmark models before deeper feature work",
 ];
 
+const CLEANER_GOAL_PRESETS = [
+  "Audit duplicates and missing values",
+  "Review date and identifier consistency",
+  "Prepare the table before reporting",
+  "Stabilize the dataset before ML work",
+];
+
+const ANONYMIZER_GOAL_PRESETS = [
+  "Find direct identifiers quickly",
+  "Prepare a GDPR-safe shared dataset",
+  "Audit contact fields and address exposure",
+  "Suggest masking before external export",
+];
+
 const AUTO_ML_SAMPLE_PRESETS = [1000, 2500, 5000, 10000];
 
 function categoryTone(category: GuideSchemaColumn["category"]) {
@@ -54,7 +71,60 @@ function categoryTone(category: GuideSchemaColumn["category"]) {
   return "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-200";
 }
 
+function getGuideUi(mode: AgentGuideMode) {
+  if (mode === "data_cleaner") {
+    return {
+      title: "Data Cleaner guide",
+      subtitle: "Select the ClickHouse table, define an optional WHERE scope, and launch a focused cleanup audit.",
+      icon: ShieldCheck,
+      iconClass: "border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-800/70 dark:bg-indigo-950/30 dark:text-indigo-200",
+      accentClass: "border-indigo-100 bg-indigo-50/70 dark:border-indigo-900/60 dark:bg-indigo-950/15",
+      accentLabelClass: "text-indigo-700 dark:text-indigo-200",
+      presets: CLEANER_GOAL_PRESETS,
+      launchHint: "The audit will appear in the main chat with findings, correction scripts, and a scoped sample preview.",
+      scopeTitle: "Focus the quality audit with a WHERE clause",
+      scopeExample: "country = 'FR' AND order_date BETWEEN '2025-01-01' AND '2025-03-31'",
+      goalPlaceholder: "Example: audit duplicates and missing values before the quarterly sales dashboard refresh.",
+      notesPlaceholder: "Optional notes: suspicious identifier columns, expected date format, known null-heavy fields...",
+      canLaunch: (selectedTable: string) => Boolean(selectedTable),
+    };
+  }
+  if (mode === "anonymizer") {
+    return {
+      title: "Anonymizer guide",
+      subtitle: "Select the ClickHouse table, narrow the privacy scan if needed, and launch a focused PII review.",
+      icon: Gauge,
+      iconClass: "border-zinc-200 bg-zinc-100 text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900/60 dark:text-zinc-100",
+      accentClass: "border-zinc-200 bg-zinc-50/80 dark:border-zinc-800/70 dark:bg-zinc-950/20",
+      accentLabelClass: "text-zinc-700 dark:text-zinc-200",
+      presets: ANONYMIZER_GOAL_PRESETS,
+      launchHint: "The privacy review will appear in the main chat with PII findings, masking patterns, and a scoped preview.",
+      scopeTitle: "Focus the privacy scan with a WHERE clause",
+      scopeExample: "country = 'DE' AND signup_date BETWEEN '2025-01-01' AND '2025-03-31'",
+      goalPlaceholder: "Example: identify PII exposure before sharing the customer dataset with an external partner.",
+      notesPlaceholder: "Optional notes: fields likely to contain contact data, expected regulatory context, export audience...",
+      canLaunch: (selectedTable: string) => Boolean(selectedTable),
+    };
+  }
+  return {
+    title: "Auto-ML guide",
+    subtitle: "Pick the training table, choose the prediction target, and benchmark models with the right business framing.",
+    icon: BrainCircuit,
+    iconClass: "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/30 dark:text-rose-200",
+    accentClass: "border-cyan-100 bg-cyan-50/70 dark:border-cyan-900/60 dark:bg-cyan-950/15",
+    accentLabelClass: "text-cyan-700 dark:text-cyan-200",
+    presets: AUTOML_GOAL_PRESETS,
+    launchHint: "The benchmark result will appear in the main chat with a comparison table and a recommended baseline model.",
+    scopeTitle: "Scope the dataset with a safe WHERE clause",
+    scopeExample: "country = 'FR' AND order_date BETWEEN '2025-01-01' AND '2025-03-31'",
+    goalPlaceholder: "Example: benchmark models to predict customer churn with a strong baseline F1-score.",
+    notesPlaceholder: "Optional notes: preferred business metric, class imbalance concern, baseline expectations...",
+    canLaunch: (selectedTable: string, targetColumn?: string) => Boolean(selectedTable && targetColumn),
+  };
+}
+
 export function AgentGuideModal({
+  mode,
   isOpen,
   isBusy,
   isLoadingMetadata,
@@ -66,7 +136,7 @@ export function AgentGuideModal({
   targetColumn = "",
   targetCandidates = [],
   rowFilter,
-  sampleRowLimit,
+  sampleRowLimit = 1000,
   filterSuggestionRationale,
   goalText,
   notesText,
@@ -83,10 +153,13 @@ export function AgentGuideModal({
   onStop,
 }: AgentGuideModalProps) {
   if (!isOpen || typeof document === "undefined") return null;
-  const title = "Auto-ML guide";
-  const subtitle = "Pick the training table, choose the prediction target, and benchmark models with the right business framing.";
-  const presets = AUTOML_GOAL_PRESETS;
-  const canLaunch = Boolean(selectedTable && targetColumn);
+
+  const ui = getGuideUi(mode);
+  const Icon = ui.icon;
+  const canLaunch = ui.canLaunch(selectedTable, targetColumn);
+  const showTargetSelection = mode === "auto_ml";
+  const showSampleLimit = mode === "auto_ml";
+  const scopeLabel = mode === "auto_ml" ? "Training scope" : "Analysis scope";
 
   return createPortal(
     <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/20 px-4 py-6 backdrop-blur-sm">
@@ -94,7 +167,7 @@ export function AgentGuideModal({
         className="relative flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-white/88 shadow-[0_28px_90px_rgba(15,23,42,0.22)] backdrop-blur-2xl dark:border-white/10 dark:bg-[#0f1117]/90"
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label={ui.title}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4 border-b border-black/5 px-6 py-5 dark:border-white/10">
@@ -103,17 +176,12 @@ export function AgentGuideModal({
               Guided setup
             </div>
             <div className="mt-2 flex items-center gap-3">
-              <div
-                className={cn(
-                  "inline-flex h-11 w-11 items-center justify-center rounded-2xl border",
-                  "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/30 dark:text-rose-200"
-                )}
-              >
-                <BrainCircuit className="h-5 w-5" />
+              <div className={cn("inline-flex h-11 w-11 items-center justify-center rounded-2xl border", ui.iconClass)}>
+                <Icon className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <h2 className="truncate text-xl font-semibold text-gray-950 dark:text-white">{title}</h2>
-                <p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">{subtitle}</p>
+                <h2 className="truncate text-xl font-semibold text-gray-950 dark:text-white">{ui.title}</h2>
+                <p className="mt-1 max-w-3xl text-sm text-gray-600 dark:text-gray-300">{ui.subtitle}</p>
               </div>
             </div>
           </div>
@@ -134,7 +202,7 @@ export function AgentGuideModal({
                 <div>
                   <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 1</div>
                   <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Choose the source table</h3>
-                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Start with the dataset that best matches the business problem you want to solve.</p>
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Start with the dataset that best matches the business question you want this agent to solve.</p>
                 </div>
                 <button
                   type="button"
@@ -167,49 +235,51 @@ export function AgentGuideModal({
               </div>
             </section>
 
-            <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 2</div>
-              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Choose the prediction target</h3>
-              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Pick the column you ultimately want the model to predict. The benchmark will treat the rest as candidate features.</p>
-              <div className="mt-4 flex flex-wrap gap-2.5">
-                {targetCandidates.map((candidate) => (
-                  <button
-                    key={candidate}
-                    type="button"
-                    onClick={() => onTargetColumnChange?.(candidate)}
-                    className={cn(
-                      "inline-flex items-center gap-2 rounded-2xl border px-3.5 py-2.5 text-sm font-medium transition-all",
-                      targetColumn === candidate
-                        ? "border-rose-300 bg-rose-500 text-white shadow-md shadow-rose-500/20"
-                        : "border-rose-200/80 bg-rose-50/80 text-rose-800 hover:bg-rose-100/80 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200 dark:hover:bg-rose-950/35"
-                    )}
-                  >
-                    <Target className="h-4 w-4" />
-                    {candidate}
-                  </button>
-                ))}
-              </div>
-              {targetCandidates.length === 0 && (
-                <div className="mt-4 rounded-2xl border border-dashed border-gray-200 px-4 py-3 text-xs text-gray-500 dark:border-white/10 dark:text-gray-400">
-                  Choose a table first to load candidate target columns.
+            {showTargetSelection && (
+              <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 2</div>
+                <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Choose the prediction target</h3>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Pick the column you ultimately want the model to predict. The benchmark will treat the rest as candidate features.</p>
+                <div className="mt-4 flex flex-wrap gap-2.5">
+                  {targetCandidates.map((candidate) => (
+                    <button
+                      key={candidate}
+                      type="button"
+                      onClick={() => onTargetColumnChange?.(candidate)}
+                      className={cn(
+                        "inline-flex items-center gap-2 rounded-2xl border px-3.5 py-2.5 text-sm font-medium transition-all",
+                        targetColumn === candidate
+                          ? "border-rose-300 bg-rose-500 text-white shadow-md shadow-rose-500/20"
+                          : "border-rose-200/80 bg-rose-50/80 text-rose-800 hover:bg-rose-100/80 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200 dark:hover:bg-rose-950/35"
+                      )}
+                    >
+                      <Target className="h-4 w-4" />
+                      {candidate}
+                    </button>
+                  ))}
                 </div>
-              )}
-            </section>
+                {targetCandidates.length === 0 && (
+                  <div className="mt-4 rounded-2xl border border-dashed border-gray-200 px-4 py-3 text-xs text-gray-500 dark:border-white/10 dark:text-gray-400">
+                    Choose a table first to load candidate target columns.
+                  </div>
+                )}
+              </section>
+            )}
 
             <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 3</div>
-              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Narrow the training scope</h3>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">{showTargetSelection ? "Step 3" : "Step 2"}</div>
+              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Narrow the scope</h3>
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Optional, but useful when you only want to benchmark on a business slice of the table or keep the run lightweight.
+                Optional, but useful when you only want to work on a business slice of the table instead of the full dataset.
               </p>
               <div className="mt-4 grid gap-4">
-                <div className="rounded-[1.35rem] border border-cyan-100 bg-cyan-50/70 p-4 dark:border-cyan-900/60 dark:bg-cyan-950/15">
+                <div className={cn("rounded-[1.35rem] p-4", ui.accentClass)}>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-700 dark:text-cyan-200">Row filter</div>
-                      <div className="mt-1 text-sm font-semibold text-cyan-950 dark:text-cyan-50">Scope the dataset with a safe WHERE clause</div>
-                      <div className="mt-1 text-xs text-cyan-800/80 dark:text-cyan-100/75">
-                        Example: <span className="font-mono">country = 'FR' AND order_date BETWEEN '2025-01-01' AND '2025-03-31'</span>
+                      <div className={cn("text-[10px] font-semibold uppercase tracking-[0.16em]", ui.accentLabelClass)}>{scopeLabel}</div>
+                      <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-gray-50">{ui.scopeTitle}</div>
+                      <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                        Example: <span className="font-mono">{ui.scopeExample}</span>
                       </div>
                     </div>
                     <button
@@ -236,53 +306,55 @@ export function AgentGuideModal({
                   )}
                 </div>
 
-                <div className="rounded-[1.35rem] border border-rose-100 bg-rose-50/70 p-4 dark:border-rose-900/60 dark:bg-rose-950/15">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-rose-700 dark:text-rose-200">Sample size</div>
-                  <div className="mt-1 text-sm font-semibold text-rose-950 dark:text-rose-50">Cap the number of rows used for training</div>
-                  <div className="mt-1 text-xs text-rose-800/80 dark:text-rose-100/75">
-                    Useful for quick iteration, budget control, or early experimentation before scaling the benchmark.
+                {showSampleLimit && (
+                  <div className="rounded-[1.35rem] border border-rose-100 bg-rose-50/70 p-4 dark:border-rose-900/60 dark:bg-rose-950/15">
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-rose-700 dark:text-rose-200">Sample size</div>
+                    <div className="mt-1 text-sm font-semibold text-rose-950 dark:text-rose-50">Cap the number of rows used for training</div>
+                    <div className="mt-1 text-xs text-rose-800/80 dark:text-rose-100/75">
+                      Useful for quick iteration, budget control, or early experimentation before scaling the benchmark.
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {AUTO_ML_SAMPLE_PRESETS.map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => onSampleRowLimitChange?.(preset)}
+                          className={cn(
+                            "inline-flex items-center rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                            sampleRowLimit === preset
+                              ? "border-rose-300 bg-rose-500 text-white shadow-md shadow-rose-500/20"
+                              : "border-rose-200 bg-white text-rose-800 hover:bg-rose-100 dark:border-rose-800/70 dark:bg-white/5 dark:text-rose-100 dark:hover:bg-rose-950/35"
+                          )}
+                        >
+                          {preset.toLocaleString()} rows
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex max-w-[220px] items-center gap-3">
+                      <input
+                        type="number"
+                        min={100}
+                        max={10000}
+                        step={100}
+                        value={sampleRowLimit}
+                        onChange={(event) => onSampleRowLimitChange?.(Number(event.target.value) || 1000)}
+                        className="w-full rounded-2xl border border-rose-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100 dark:border-rose-800/70 dark:bg-slate-950/50 dark:text-gray-100 dark:focus:border-rose-500 dark:focus:ring-rose-900/30"
+                      />
+                      <span className="text-xs font-medium uppercase tracking-[0.14em] text-rose-700 dark:text-rose-200">Rows</span>
+                    </div>
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {AUTO_ML_SAMPLE_PRESETS.map((preset) => (
-                      <button
-                        key={preset}
-                        type="button"
-                        onClick={() => onSampleRowLimitChange(preset)}
-                        className={cn(
-                          "inline-flex items-center rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-                          sampleRowLimit === preset
-                            ? "border-rose-300 bg-rose-500 text-white shadow-md shadow-rose-500/20"
-                            : "border-rose-200 bg-white text-rose-800 hover:bg-rose-100 dark:border-rose-800/70 dark:bg-white/5 dark:text-rose-100 dark:hover:bg-rose-950/35"
-                        )}
-                      >
-                        {preset.toLocaleString()} rows
-                      </button>
-                    ))}
-                  </div>
-                  <div className="mt-3 flex max-w-[220px] items-center gap-3">
-                    <input
-                      type="number"
-                      min={100}
-                      max={10000}
-                      step={100}
-                      value={sampleRowLimit}
-                      onChange={(event) => onSampleRowLimitChange(Number(event.target.value) || 1000)}
-                      className="w-full rounded-2xl border border-rose-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100 dark:border-rose-800/70 dark:bg-slate-950/50 dark:text-gray-100 dark:focus:border-rose-500 dark:focus:ring-rose-900/30"
-                    />
-                    <span className="text-xs font-medium uppercase tracking-[0.14em] text-rose-700 dark:text-rose-200">Rows</span>
-                  </div>
-                </div>
+                )}
               </div>
             </section>
 
             <section className="rounded-[1.7rem] border border-white/70 bg-white/82 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 4</div>
-              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Frame the benchmark objective</h3>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">{showTargetSelection ? "Step 4" : "Step 3"}</div>
+              <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Frame the objective</h3>
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                The more concrete the objective, the better the agent can focus the analysis and produce a usable recommendation.
+                The more concrete the objective, the better the agent can focus the analysis and produce a useful business answer.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
-                {presets.map((preset) => (
+                {ui.presets.map((preset) => (
                   <button
                     key={preset}
                     type="button"
@@ -299,38 +371,42 @@ export function AgentGuideModal({
                   onChange={(event) => onGoalTextChange(event.target.value)}
                   rows={3}
                   className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-100 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:focus:border-blue-500 dark:focus:ring-blue-900/30"
-                  placeholder="Example: benchmark models to predict customer churn with a strong baseline F1-score."
+                  placeholder={ui.goalPlaceholder}
                 />
                 <textarea
                   value={notesText}
                   onChange={(event) => onNotesTextChange(event.target.value)}
                   rows={3}
                   className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-100 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:focus:border-blue-500 dark:focus:ring-blue-900/30"
-                  placeholder="Optional notes: preferred business metric, class imbalance concern, baseline expectations..."
+                  placeholder={ui.notesPlaceholder}
                 />
               </div>
             </section>
 
             <section className="rounded-[1.7rem] border border-white/70 bg-gradient-to-br from-white via-white to-slate-50 p-4 shadow-sm dark:border-white/10 dark:bg-gradient-to-br dark:from-white/5 dark:via-white/[0.03] dark:to-slate-950/40">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Step 5</div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">{showTargetSelection ? "Step 5" : "Step 4"}</div>
               <h3 className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">Review and launch</h3>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className={cn("mt-4 grid gap-3", showTargetSelection ? "sm:grid-cols-2 xl:grid-cols-4" : "sm:grid-cols-2 xl:grid-cols-3")}>
                 <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
                   <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Table</div>
                   <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{selectedTable || "Not selected yet"}</div>
                 </div>
-                <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Target</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{targetColumn || "Not selected yet"}</div>
-                </div>
+                {showTargetSelection && (
+                  <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Target</div>
+                    <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{targetColumn || "Not selected yet"}</div>
+                  </div>
+                )}
                 <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
                   <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Scope</div>
                   <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{rowFilter || "Full table"}</div>
                 </div>
-                <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Sample size</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{sampleRowLimit.toLocaleString()} rows</div>
-                </div>
+                {showSampleLimit && (
+                  <div className="rounded-2xl border border-white/70 bg-white/85 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Sample size</div>
+                    <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{sampleRowLimit.toLocaleString()} rows</div>
+                  </div>
+                )}
               </div>
               {error && (
                 <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200">
@@ -342,19 +418,12 @@ export function AgentGuideModal({
                   type="button"
                   onClick={isBusy ? onStop : onSubmit}
                   disabled={!canLaunch}
-                  className={cn(
-                    "inline-flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-                    isBusy
-                      ? "bg-rose-500 hover:bg-rose-400"
-                      : "bg-rose-500 hover:bg-rose-400"
-                  )}
+                  className="inline-flex items-center gap-2 rounded-full bg-black px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100"
                 >
                   {isBusy ? <X className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                   {isBusy ? "Stop" : "Launch"}
                 </button>
-                <div className="text-xs text-gray-500 dark:text-gray-400">
-                  The benchmark result will appear in the main chat with a comparison table and a recommended baseline model.
-                </div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">{ui.launchHint}</div>
               </div>
             </section>
           </div>
@@ -365,7 +434,7 @@ export function AgentGuideModal({
               {selectedTable ? `${selectedTable} columns` : "Select a table to inspect its columns"}
             </div>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              This live preview helps the user choose the right table and, for Auto-ML, the right prediction target.
+              This live preview helps the user choose the right table and define a scope that matches the table structure.
             </p>
 
             <div className="mt-4 max-h-[52vh] space-y-2 overflow-y-auto pr-1">

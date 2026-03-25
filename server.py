@@ -235,6 +235,7 @@ DEFAULT_APP_CONFIG = {
         "If the user explicitly asks for a table, rows/columns, a matrix, a grid, a schema list, or a tabular preview, "
         "return the relevant structured result as a valid Markdown table whenever the data is naturally tabular."
     ),
+    "managerUseRagFunctionalContext": False,
     "disableSslVerification": False,
     "elasticsearchUrl": "http://localhost:9200",
     "elasticsearchIndex": "rag_documents",
@@ -2091,6 +2092,10 @@ def _extract_auto_ml_row_filter(user_request: str) -> str:
             _, _, remainder = candidate.partition(":")
             return _normalize_auto_ml_row_filter(remainder)
     return ""
+
+
+def _extract_guided_row_filter(user_request: str) -> str:
+    return _extract_auto_ml_row_filter(user_request)
 
 
 def _extract_auto_ml_sample_row_limit(user_request: str) -> Optional[int]:
@@ -6505,6 +6510,7 @@ async def analyze_manager_routing(
     llm_model: str,
     llm_provider: str,
     llm_api_key: Optional[str] = None,
+    functional_context: str = "",
 ) -> dict[str, str]:
     heuristic = _heuristic_manager_delegate(
         user_message,
@@ -6593,6 +6599,9 @@ Current manager state:
 Current specialist state summary:
 {_manager_specialist_state_summary(clickhouse_state, data_analyst_state, auto_ml_state, data_cleaner_state, anonymizer_state, custom_agents, custom_agent_state, file_manager_state, pdf_creator_state, oracle_state, manager_state)}
 
+Functional knowledge context from RAG:
+{functional_context or "No additional functional context loaded."}
+
 Enabled custom agents:
 {json.dumps([
     {
@@ -6642,6 +6651,7 @@ async def _run_manager_direct_response(
     llm_provider: str,
     llm_api_key: Optional[str],
     system_prompt: str,
+    functional_context: str = "",
 ) -> str:
     manager_system_prompt = (
         f"{_with_table_output_guidance(system_prompt)}\n\n"
@@ -6649,6 +6659,13 @@ async def _run_manager_direct_response(
         "use specialist agents only when needed, and explain clearly when you can answer directly."
     ).strip()
     messages = [{"role": "system", "content": manager_system_prompt}]
+    if functional_context.strip():
+        messages.append(
+            {
+                "role": "system",
+                "content": "Functional knowledge context from the RAG knowledge base:\n" + functional_context.strip(),
+            }
+        )
     messages.extend(_manager_trimmed_history(history, limit=12))
     return await llm_chat(
         messages,
@@ -7168,6 +7185,7 @@ def _default_data_cleaner_state() -> dict[str, Any]:
         "available_tables": [],
         "selected_table": None,
         "schema_info": [],
+        "row_filter": "",
         "clarification_prompt": "",
         "clarification_options": [],
         "findings": [],
@@ -7197,6 +7215,7 @@ def _normalize_data_cleaner_state(payload: Optional[dict]) -> dict[str, Any]:
             for item in schema_info
             if isinstance(item, dict) and str(item.get("name") or "").strip()
         ]
+    state["row_filter"] = str(payload.get("row_filter") or payload.get("rowFilter") or "").strip()
     state["clarification_prompt"] = str(payload.get("clarification_prompt") or payload.get("clarificationPrompt") or "").strip()
     clarification_options = payload.get("clarification_options") or payload.get("clarificationOptions")
     if isinstance(clarification_options, list):
@@ -7223,6 +7242,7 @@ def _default_anonymizer_state() -> dict[str, Any]:
         "available_tables": [],
         "selected_table": None,
         "schema_info": [],
+        "row_filter": "",
         "clarification_prompt": "",
         "clarification_options": [],
         "pii_findings": [],
@@ -7252,6 +7272,7 @@ def _normalize_anonymizer_state(payload: Optional[dict]) -> dict[str, Any]:
             for item in schema_info
             if isinstance(item, dict) and str(item.get("name") or "").strip()
         ]
+    state["row_filter"] = str(payload.get("row_filter") or payload.get("rowFilter") or "").strip()
     state["clarification_prompt"] = str(payload.get("clarification_prompt") or payload.get("clarificationPrompt") or "").strip()
     clarification_options = payload.get("clarification_options") or payload.get("clarificationOptions")
     if isinstance(clarification_options, list):
@@ -8111,6 +8132,32 @@ async def _data_analyst_search_knowledge(
     }
 
 
+def _manager_rag_context_enabled(app_config: dict[str, Any]) -> bool:
+    return bool((app_config or {}).get("managerUseRagFunctionalContext"))
+
+
+async def _manager_functional_context_from_rag(
+    query_text: str,
+    app_config: dict[str, Any],
+) -> dict[str, Any]:
+    if not _manager_rag_context_enabled(app_config):
+        return {
+            "enabled": False,
+            "used": False,
+            "summary": "",
+            "context": "",
+            "results": [],
+        }
+    knowledge = await _data_analyst_search_knowledge(query_text)
+    return {
+        "enabled": True,
+        "used": bool(knowledge.get("ok") and knowledge.get("results")),
+        "summary": str(knowledge.get("summary") or ""),
+        "context": str(knowledge.get("context") or ""),
+        "results": knowledge.get("results") or [],
+    }
+
+
 async def plan_data_analyst_step(
     user_request: str,
     selected_table: str,
@@ -8916,16 +8963,27 @@ async def _data_cleaner_profile(
     clickhouse: ClickHouseConfig,
     table_name: str,
     schema: list[dict[str, Any]],
+    row_filter: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]], str]:
     column_names = _schema_column_names(schema)
     sampled_columns = column_names[: min(20, len(column_names))]
-    _, sample_rows, sample_sql = await _fetch_clickhouse_sample_rows(clickhouse, table_name, sampled_columns, DATA_CLEANER_SAMPLE_ROWS)
+    normalized_row_filter = _normalize_auto_ml_row_filter(row_filter)
+    _, sample_rows, sample_sql = await _fetch_clickhouse_sample_rows(
+        clickhouse,
+        table_name,
+        sampled_columns,
+        DATA_CLEANER_SAMPLE_ROWS,
+        normalized_row_filter,
+    )
 
     findings: list[dict[str, Any]] = []
     scripts: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
 
-    total_sql = f"SELECT count() AS row_count FROM {quote_clickhouse_identifier(table_name)}"
+    total_sql = (
+        f"SELECT count() AS row_count FROM {quote_clickhouse_identifier(table_name)}"
+        + (f" WHERE ({normalized_row_filter})" if normalized_row_filter else "")
+    )
     total_payload = await execute_clickhouse_sql(clickhouse, total_sql)
     total_rows = int(_first_row(total_payload).get("row_count") or 0)
 
@@ -8935,6 +8993,7 @@ async def _data_cleaner_profile(
         duplicate_sql = (
             f"SELECT count() AS row_count, countDistinct(tuple({tuple_sql})) AS distinct_rows "
             f"FROM {quote_clickhouse_identifier(table_name)}"
+            + (f" WHERE ({normalized_row_filter})" if normalized_row_filter else "")
         )
         duplicate_payload = await execute_clickhouse_sql(clickhouse, duplicate_sql)
         first = _first_row(duplicate_payload)
@@ -8964,7 +9023,10 @@ async def _data_cleaner_profile(
             profile_exprs.append(f"countIf(isNull(toNullable({identifier}))) AS {quote_clickhouse_identifier(f'{column_name}__nulls')}")
             if any(col.get("name") == column_name and classify_clickhouse_column_type(str(col.get("type") or "")) == "string" for col in schema):
                 profile_exprs.append(f"countIf(trim(BOTH ' ' FROM toString({identifier})) = '') AS {quote_clickhouse_identifier(f'{column_name}__empties')}")
-        profile_sql = f"SELECT\n  " + ",\n  ".join(profile_exprs) + f"\nFROM {quote_clickhouse_identifier(table_name)}"
+        profile_sql = (
+            f"SELECT\n  " + ",\n  ".join(profile_exprs) + f"\nFROM {quote_clickhouse_identifier(table_name)}"
+            + (f"\nWHERE ({normalized_row_filter})" if normalized_row_filter else "")
+        )
         profile_payload = await execute_clickhouse_sql(clickhouse, profile_sql)
         profile_row = _first_row(profile_payload)
         for column_name in profile_columns:
@@ -9083,9 +9145,17 @@ async def _anonymizer_profile(
     clickhouse: ClickHouseConfig,
     table_name: str,
     schema: list[dict[str, Any]],
+    row_filter: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
     sampled_columns = _schema_column_names(schema)[: min(20, len(schema))]
-    _, sample_rows, _ = await _fetch_clickhouse_sample_rows(clickhouse, table_name, sampled_columns, ANONYMIZER_SAMPLE_ROWS)
+    normalized_row_filter = _normalize_auto_ml_row_filter(row_filter)
+    _, sample_rows, _ = await _fetch_clickhouse_sample_rows(
+        clickhouse,
+        table_name,
+        sampled_columns,
+        ANONYMIZER_SAMPLE_ROWS,
+        normalized_row_filter,
+    )
     findings: list[dict[str, Any]] = []
     scripts: list[dict[str, Any]] = []
 
@@ -9121,6 +9191,7 @@ async def _anonymizer_profile(
 async def _data_cleaner_narrative(
     user_request: str,
     table_name: str,
+    row_filter: str,
     findings: list[dict[str, Any]],
     scripts: list[dict[str, Any]],
     preview_markdown: str,
@@ -9149,6 +9220,9 @@ User request:
 Table:
 {table_name}
 
+Row filter:
+{row_filter or "Full table"}
+
 Findings:
 {json.dumps(findings, ensure_ascii=False, indent=2)}
 
@@ -9173,6 +9247,7 @@ Conversation memory:
 async def _anonymizer_narrative(
     user_request: str,
     table_name: str,
+    row_filter: str,
     pii_findings: list[dict[str, Any]],
     masking_scripts: list[dict[str, Any]],
     preview_markdown: str,
@@ -9199,6 +9274,9 @@ User request:
 
 Table:
 {table_name}
+
+Row filter:
+{row_filter or "Full table"}
 
 PII findings:
 {json.dumps(pii_findings, ensure_ascii=False, indent=2)}
@@ -11463,6 +11541,7 @@ class DataCleanerAgentStateModel(BaseModel):
     available_tables: list[str] = Field(default_factory=list)
     selected_table: Optional[str] = None
     schema_info: list[dict] = Field(default_factory=list)
+    row_filter: str = ""
     clarification_prompt: str = ""
     clarification_options: list[str] = Field(default_factory=list)
     findings: list[dict] = Field(default_factory=list)
@@ -11477,6 +11556,7 @@ class AnonymizerAgentStateModel(BaseModel):
     available_tables: list[str] = Field(default_factory=list)
     selected_table: Optional[str] = None
     schema_info: list[dict] = Field(default_factory=list)
+    row_filter: str = ""
     clarification_prompt: str = ""
     clarification_options: list[str] = Field(default_factory=list)
     pii_findings: list[dict] = Field(default_factory=list)
@@ -11604,6 +11684,20 @@ class AutoMlFilterSuggestionRequest(BaseModel):
 class ClickHouseGuideMetadataRequest(BaseModel):
     clickhouse: ClickHouseConfig
     table: Optional[str] = None
+
+
+class ClickHouseScopeSuggestionRequest(BaseModel):
+    table: str
+    agent_kind: str = "generic"
+    target_column: Optional[str] = None
+    goal: str = ""
+    notes: str = ""
+    schema_info: list[dict] = Field(default_factory=list)
+    clickhouse: ClickHouseConfig
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
 
 
 class SqlDraftPreviewRequest(BaseModel):
@@ -12984,6 +13078,109 @@ Rules:
 - Do NOT include SELECT, FROM, JOIN, ORDER BY, LIMIT, comments, semicolons, or markdown.
 - Do NOT prefix the expression with WHERE.
 - Prefer a practical business scope such as geography, product segment, or a recent explicit date range if the schema supports it.
+- If you cannot infer a safe useful scope, return an empty string for `where_clause`.
+
+Table:
+{table_name}
+
+Target column:
+{str(req.target_column or "").strip() or "Not provided"}
+
+Goal:
+{str(req.goal or "").strip() or "Not provided"}
+
+Notes:
+{str(req.notes or "").strip() or "Not provided"}
+
+Schema:
+{json.dumps(schema_info, ensure_ascii=False, indent=2)}
+""".strip()
+
+    try:
+        raw = await llm_chat(
+            [{"role": "user", "content": prompt}],
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Local LLM filter suggestion failed: {exc}") from exc
+
+    parsed = extract_json_object(raw)
+    where_clause = _normalize_auto_ml_row_filter(str(parsed.get("where_clause") or parsed.get("where") or "").strip())
+    rationale = str(parsed.get("rationale") or parsed.get("reasoning") or "").strip()
+    validation_error = _validate_data_quality_row_filter(where_clause)
+    if validation_error:
+        where_clause = ""
+        rationale = rationale or validation_error
+
+    return {
+        "where_clause": where_clause,
+        "rationale": rationale,
+    }
+
+
+@app.post("/api/clickhouse/filter-suggestion")
+async def suggest_clickhouse_scope_filter(req: ClickHouseScopeSuggestionRequest):
+    table_name = str(req.table or "").strip()
+    if not table_name:
+        raise HTTPException(status_code=400, detail="A ClickHouse table is required before the AI can suggest a row filter.")
+
+    try:
+        available_tables = await list_clickhouse_tables(req.clickhouse)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"ClickHouse metadata loading failed: {exc}") from exc
+
+    if table_name not in available_tables:
+        raise HTTPException(status_code=400, detail=f"Unknown ClickHouse table: {table_name}")
+
+    schema_info = [
+        {
+            "name": str(column.get("name") or "").strip(),
+            "type": str(column.get("type") or "").strip(),
+            "category": str(column.get("category") or "").strip(),
+        }
+        for column in req.schema_info
+        if isinstance(column, dict) and str(column.get("name") or "").strip()
+    ]
+    if not schema_info:
+        try:
+            raw_schema = await describe_clickhouse_table(req.clickhouse, table_name)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to inspect schema for {table_name}: {exc}") from exc
+        schema_info = [
+            {
+                "name": str(column.get("name") or "").strip(),
+                "type": str(column.get("type") or "").strip(),
+                "category": _clickhouse_schema_category(str(column.get("type") or "")),
+            }
+            for column in raw_schema
+            if str(column.get("name") or "").strip()
+        ]
+
+    agent_kind = str(req.agent_kind or "generic").strip().lower()
+    agent_brief = {
+        "data_cleaner": "You are helping a Data Cleaner focus a quality audit on the most relevant business slice.",
+        "anonymizer": "You are helping an Anonymizer focus a privacy scan on the most relevant business slice.",
+        "auto_ml": "You are helping Auto-ML focus model training on the most relevant business slice.",
+    }.get(agent_kind, "You are helping a ClickHouse specialist focus an analysis on the most relevant business slice.")
+
+    prompt = f"""
+{agent_brief}
+Suggest one safe SQL boolean WHERE clause to narrow the dataset.
+
+Rules:
+- Return ONLY valid JSON.
+- Use this exact shape:
+  {{
+    "where_clause": "country = 'FR' AND event_date BETWEEN '2025-01-01' AND '2025-03-31'",
+    "rationale": "Short explanation"
+  }}
+- The clause must be a single boolean expression only.
+- Do NOT include SELECT, FROM, JOIN, ORDER BY, LIMIT, comments, semicolons, or markdown.
+- Do NOT prefix the expression with WHERE.
+- Prefer a practical scope such as geography, product segment, status, or an explicit recent date range when the schema supports it.
 - If you cannot infer a safe useful scope, return an empty string for `where_clause`.
 
 Table:
@@ -14859,6 +15056,9 @@ async def chat_data_cleaner_agent(req: DataCleanerAgentRequest):
     _emit_log("info", "data_cleaner", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     state = _normalize_data_cleaner_state(req.agent_state.model_dump())
+    extracted_row_filter = _extract_guided_row_filter(user_message)
+    if extracted_row_filter:
+        state["row_filter"] = extracted_row_filter
     conversation_memory = _conversation_memory_markdown(
         req.history,
         current_message=state.get("pending_request") or user_message,
@@ -14868,6 +15068,9 @@ async def chat_data_cleaner_agent(req: DataCleanerAgentRequest):
         state["available_tables"] = state["available_tables"] or await list_clickhouse_tables(req.clickhouse)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"ClickHouse connection error: {exc}") from exc
+    validation_error = _validate_data_quality_row_filter(str(state.get("row_filter") or ""))
+    if validation_error:
+        raise HTTPException(status_code=400, detail=f"Invalid Data Cleaner row filter: {validation_error}")
 
     if not user_message:
         return {
@@ -14944,12 +15147,14 @@ async def chat_data_cleaner_agent(req: DataCleanerAgentRequest):
         req.clickhouse,
         str(state["selected_table"]),
         state["schema_info"],
+        str(state.get("row_filter") or ""),
     )
 
     try:
         narrative = await _data_cleaner_narrative(
             user_message,
             str(state["selected_table"]),
+            str(state.get("row_filter") or ""),
             findings,
             scripts,
             preview_markdown,
@@ -14962,11 +15167,12 @@ async def chat_data_cleaner_agent(req: DataCleanerAgentRequest):
     except Exception:
         narrative = (
             "## Executive Summary\n"
-            f"I reviewed `{state['selected_table']}` for duplicate risk, missing values, and inconsistent date formats.\n\n"
-            "## Key Quality Risks\n"
+            + f"I reviewed `{state['selected_table']}` for duplicate risk, missing values, and inconsistent date formats"
+            + (f" within the scope `{state.get('row_filter')}`.\n\n" if str(state.get("row_filter") or "").strip() else ".\n\n")
+            + "## Key Quality Risks\n"
             + "\n".join(f"- **{item['title']}** — {item['detail']}" for item in findings[:4])
             + "\n\n## Recommended Fix Path\n"
-            "Prioritize the critical issues first, normalize date parsing rules, and standardize missing-value handling before downstream analytics or ML work."
+            + "Prioritize the critical issues first, normalize date parsing rules, and standardize missing-value handling before downstream analytics or ML work."
         )
 
     script_blocks = "\n\n".join(
@@ -15012,6 +15218,9 @@ async def chat_anonymizer_agent(req: AnonymizerAgentRequest):
     _emit_log("info", "anonymizer", "Received request", {"query": req.message})
     user_message = (req.message or "").strip()
     state = _normalize_anonymizer_state(req.agent_state.model_dump())
+    extracted_row_filter = _extract_guided_row_filter(user_message)
+    if extracted_row_filter:
+        state["row_filter"] = extracted_row_filter
     conversation_memory = _conversation_memory_markdown(
         req.history,
         current_message=state.get("pending_request") or user_message,
@@ -15021,6 +15230,9 @@ async def chat_anonymizer_agent(req: AnonymizerAgentRequest):
         state["available_tables"] = state["available_tables"] or await list_clickhouse_tables(req.clickhouse)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"ClickHouse connection error: {exc}") from exc
+    validation_error = _validate_data_quality_row_filter(str(state.get("row_filter") or ""))
+    if validation_error:
+        raise HTTPException(status_code=400, detail=f"Invalid Anonymizer row filter: {validation_error}")
 
     if not user_message:
         return {
@@ -15097,11 +15309,13 @@ async def chat_anonymizer_agent(req: AnonymizerAgentRequest):
         req.clickhouse,
         str(state["selected_table"]),
         state["schema_info"],
+        str(state.get("row_filter") or ""),
     )
     try:
         narrative = await _anonymizer_narrative(
             user_message,
             str(state["selected_table"]),
+            str(state.get("row_filter") or ""),
             pii_findings,
             masking_scripts,
             preview_markdown,
@@ -15114,11 +15328,12 @@ async def chat_anonymizer_agent(req: AnonymizerAgentRequest):
     except Exception:
         narrative = (
             "## Executive Summary\n"
-            f"I reviewed `{state['selected_table']}` for personally identifiable information and privacy-sensitive fields.\n\n"
-            "## PII Exposure Review\n"
+            + f"I reviewed `{state['selected_table']}` for personally identifiable information and privacy-sensitive fields"
+            + (f" within the scope `{state.get('row_filter')}`.\n\n" if str(state.get("row_filter") or "").strip() else ".\n\n")
+            + "## PII Exposure Review\n"
             + ("\n".join(f"- **{item['column']}** — {item['pii_type']} ({item['risk']} risk). {item['recommendation']}" for item in pii_findings[:6]) or "- No direct PII signal was found in the inspected sample.")
             + "\n\n## Recommended Masking Strategy\n"
-            "Hash stable identifiers, mask direct contact fields, and generalize sensitive dates before sharing or analytics outside the restricted perimeter."
+            + "Hash stable identifiers, mask direct contact fields, and generalize sensitive dates before sharing or analytics outside the restricted perimeter."
         )
 
     script_blocks = "\n\n".join(
@@ -15262,6 +15477,9 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     _emit_log("info", "manager", "Received manager request", {"query": req.message})
     user_message = (req.message or "").strip()
     manager_state = _normalize_manager_agent_state(req.manager_state.model_dump())
+    persisted_state = await read_db_state()
+    app_config = (persisted_state or {}).get("config") or {}
+    manager_rag_context = await _manager_functional_context_from_rag(user_message, app_config)
 
     clickhouse_state = dump_clickhouse_agent_state(req.clickhouse_state)
     data_analyst_state = _normalize_data_analyst_state(req.data_analyst_state.model_dump())
@@ -15520,6 +15738,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             req.llm_model,
             req.llm_provider,
             req.llm_api_key,
+            manager_rag_context.get("context") or "",
         )
         if routing["delegate"] == "clickhouse_query":
             export_pipeline = _extract_clickhouse_file_export_pipeline(user_message)
@@ -15534,6 +15753,12 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     delegate = routing["delegate"]
     manager_state["last_routing_reason"] = routing["reasoning"]
     manager_state["last_delegate_label"] = _manager_specialist_label(delegate)
+    if manager_rag_context.get("used") and delegate in {"clickhouse_query", "data_analyst", "auto_ml", "data_cleaner", "anonymizer", "custom_agent", "manager"}:
+        routing["handoff_message"] = (
+            f"{routing['handoff_message']}\n\n"
+            "Functional context from RAG:\n"
+            f"{manager_rag_context.get('context')}"
+        ).strip()
     
     _emit_log(
         "decision",
@@ -15542,14 +15767,24 @@ async def chat_manager_agent(req: ManagerAgentRequest):
         {"agent": delegate, "rationale": routing["reasoning"]}
     )
 
-    base_steps = [
+    base_steps = []
+    if manager_rag_context.get("enabled"):
+        base_steps.append(
+            {
+                "id": "manager-functional-context",
+                "title": "Loaded functional context",
+                "status": "success" if manager_rag_context.get("used") else "running",
+                "details": str(manager_rag_context.get("summary") or "No matching functional context was found in the knowledge base."),
+            }
+        )
+    base_steps.append(
         {
             "id": "manager-analyze",
             "title": "Analyzed request",
             "status": "success",
             "details": routing["reasoning"],
         }
-    ]
+    )
 
     if delegate == "manager":
         manager_state["active_delegate"] = None
@@ -15563,6 +15798,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             req.llm_provider,
             req.llm_api_key,
             req.system_prompt,
+            manager_rag_context.get("context") or "",
         )
         return {
             "answer": answer,

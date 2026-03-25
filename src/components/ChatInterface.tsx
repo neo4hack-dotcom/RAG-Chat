@@ -245,6 +245,13 @@ type AutoMlGuideForm = {
   notes: string;
 };
 
+type ScopedAuditGuideForm = {
+  table: string;
+  rowFilter: string;
+  goal: string;
+  notes: string;
+};
+
 type ClickHouseGuideMetadata = {
   availableTables: string[];
   schema: GuideSchemaColumn[];
@@ -744,6 +751,8 @@ export function ChatInterface({
   const zoomControlRef = useRef<HTMLDivElement>(null);
   const agentIntroBootstrapRef = useRef<string | null>(null);
   const autoMlGuideAutoOpenRef = useRef(false);
+  const dataCleanerGuideAutoOpenRef = useRef(false);
+  const anonymizerGuideAutoOpenRef = useRef(false);
   const toolsIslandRef = useRef<HTMLDivElement>(null);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
   const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -827,6 +836,8 @@ export function ChatInterface({
   const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
   const [isAutoMlGuideOpen, setIsAutoMlGuideOpen] = useState(false);
+  const [isDataCleanerGuideOpen, setIsDataCleanerGuideOpen] = useState(false);
+  const [isAnonymizerGuideOpen, setIsAnonymizerGuideOpen] = useState(false);
   const [isGuideMetadataLoading, setIsGuideMetadataLoading] = useState(false);
   const [guideFormError, setGuideFormError] = useState<string | null>(null);
   const [autoMlGuideForm, setAutoMlGuideForm] = useState<AutoMlGuideForm>({
@@ -842,6 +853,26 @@ export function ChatInterface({
   const [autoMlTargetCandidates, setAutoMlTargetCandidates] = useState<string[]>([]);
   const [isAutoMlFilterSuggestionLoading, setIsAutoMlFilterSuggestionLoading] = useState(false);
   const [autoMlFilterSuggestion, setAutoMlFilterSuggestion] = useState<AutoMlFilterSuggestion | null>(null);
+  const [dataCleanerGuideForm, setDataCleanerGuideForm] = useState<ScopedAuditGuideForm>({
+    table: dataCleanerAgentState.selectedTable ?? "",
+    rowFilter: dataCleanerAgentState.rowFilter ?? "",
+    goal: "",
+    notes: "",
+  });
+  const [dataCleanerGuideTables, setDataCleanerGuideTables] = useState<string[]>(dataCleanerAgentState.availableTables);
+  const [dataCleanerGuideSchema, setDataCleanerGuideSchema] = useState<GuideSchemaColumn[]>(dataCleanerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
+  const [isDataCleanerFilterSuggestionLoading, setIsDataCleanerFilterSuggestionLoading] = useState(false);
+  const [dataCleanerFilterSuggestion, setDataCleanerFilterSuggestion] = useState<AutoMlFilterSuggestion | null>(null);
+  const [anonymizerGuideForm, setAnonymizerGuideForm] = useState<ScopedAuditGuideForm>({
+    table: anonymizerAgentState.selectedTable ?? "",
+    rowFilter: anonymizerAgentState.rowFilter ?? "",
+    goal: "",
+    notes: "",
+  });
+  const [anonymizerGuideTables, setAnonymizerGuideTables] = useState<string[]>(anonymizerAgentState.availableTables);
+  const [anonymizerGuideSchema, setAnonymizerGuideSchema] = useState<GuideSchemaColumn[]>(anonymizerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
+  const [isAnonymizerFilterSuggestionLoading, setIsAnonymizerFilterSuggestionLoading] = useState(false);
+  const [anonymizerFilterSuggestion, setAnonymizerFilterSuggestion] = useState<AutoMlFilterSuggestion | null>(null);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const persistedPlanningDraftKey = JSON.stringify((currentConversation?.agentState as any)?.planning?.draft ?? null);
 
@@ -859,6 +890,8 @@ export function ChatInterface({
     activeRequestControllerRef.current = null;
     agentIntroBootstrapRef.current = null;
     autoMlGuideAutoOpenRef.current = false;
+    dataCleanerGuideAutoOpenRef.current = false;
+    anonymizerGuideAutoOpenRef.current = false;
     onCurrentIdChange(null);
     setInput("");
     setAttachments([]);
@@ -868,6 +901,8 @@ export function ChatInterface({
     setIsPlanningMonitorOpen(false);
     setIsFileManagerConfigOpen(false);
     setIsAutoMlGuideOpen(false);
+    setIsDataCleanerGuideOpen(false);
+    setIsAnonymizerGuideOpen(false);
     setGuideFormError(null);
     setIsConsoleOpen(false);
     setIsAgentStatePanelOpen(false);
@@ -1179,24 +1214,72 @@ export function ChatInterface({
     }
   };
 
-  const suggestAutoMlRowFilter = async () => {
-    if (!autoMlGuideForm.table.trim()) {
+  const loadDataCleanerGuideMetadata = async (nextTable?: string) => {
+    setIsGuideMetadataLoading(true);
+    setGuideFormError(null);
+    try {
+      const metadata = await fetchClickHouseGuideMetadata(nextTable);
+      setDataCleanerGuideTables(metadata.availableTables);
+      setDataCleanerGuideSchema(metadata.schema);
+      setDataCleanerGuideForm((prev) => ({
+        ...prev,
+        table: nextTable?.trim() ?? prev.table,
+      }));
+    } catch (error) {
+      setGuideFormError(error instanceof Error ? error.message : 'Unable to load ClickHouse metadata.');
+    } finally {
+      setIsGuideMetadataLoading(false);
+    }
+  };
+
+  const loadAnonymizerGuideMetadata = async (nextTable?: string) => {
+    setIsGuideMetadataLoading(true);
+    setGuideFormError(null);
+    try {
+      const metadata = await fetchClickHouseGuideMetadata(nextTable);
+      setAnonymizerGuideTables(metadata.availableTables);
+      setAnonymizerGuideSchema(metadata.schema);
+      setAnonymizerGuideForm((prev) => ({
+        ...prev,
+        table: nextTable?.trim() ?? prev.table,
+      }));
+    } catch (error) {
+      setGuideFormError(error instanceof Error ? error.message : 'Unable to load ClickHouse metadata.');
+    } finally {
+      setIsGuideMetadataLoading(false);
+    }
+  };
+
+  const suggestScopedRowFilter = async (options: {
+    mode: 'auto_ml' | 'data_cleaner' | 'anonymizer';
+    table: string;
+    targetColumn?: string;
+    goal: string;
+    notes: string;
+    schema: GuideSchemaColumn[];
+    onApply: (whereClause: string, rationale: string) => void;
+    onFailure: () => void;
+    setLoading: (value: boolean) => void;
+  }) => {
+    if (!options.table.trim()) {
       setGuideFormError('Choose a ClickHouse table before asking the AI to suggest a row filter.');
       return;
     }
 
     setGuideFormError(null);
-    setIsAutoMlFilterSuggestionLoading(true);
+    options.setLoading(true);
     try {
-      const response = await fetch('/api/auto-ml/filter-suggestion', {
+      const endpoint = options.mode === 'auto_ml' ? '/api/auto-ml/filter-suggestion' : '/api/clickhouse/filter-suggestion';
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          table: autoMlGuideForm.table.trim(),
-          target_column: autoMlGuideForm.targetColumn.trim() || undefined,
-          goal: autoMlGuideForm.goal.trim(),
-          notes: autoMlGuideForm.notes.trim(),
-          schema_info: autoMlGuideSchema.map((column) => ({
+          table: options.table.trim(),
+          agent_kind: options.mode,
+          target_column: options.targetColumn?.trim() || undefined,
+          goal: options.goal.trim(),
+          notes: options.notes.trim(),
+          schema_info: options.schema.map((column) => ({
             name: column.name,
             type: column.type,
             category: column.category,
@@ -1221,7 +1304,7 @@ export function ChatInterface({
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.detail || `Auto-ML filter suggestion error: ${response.status}`);
+        throw new Error(err.detail || `Filter suggestion error: ${response.status}`);
       }
 
       const data = await response.json();
@@ -1229,27 +1312,90 @@ export function ChatInterface({
         whereClause: String(data.where_clause ?? data.whereClause ?? '').trim(),
         rationale: String(data.rationale ?? '').trim(),
       };
-      setAutoMlFilterSuggestion(suggestion);
-      if (suggestion.whereClause) {
-        setAutoMlGuideForm((prev) => ({
-          ...prev,
-          rowFilter: suggestion.whereClause,
-        }));
-      }
+      options.onApply(suggestion.whereClause, suggestion.rationale);
       if (!suggestion.whereClause) {
+        options.onFailure();
         setGuideFormError('The local AI could not infer a safe row filter from the current objective. You can still type one manually.');
       }
     } catch (error) {
+      options.onFailure();
       setGuideFormError(error instanceof Error ? error.message : 'Unable to generate a row filter suggestion.');
     } finally {
-      setIsAutoMlFilterSuggestionLoading(false);
+      options.setLoading(false);
     }
+  };
+
+  const suggestAutoMlRowFilter = async () => {
+    await suggestScopedRowFilter({
+      mode: 'auto_ml',
+      table: autoMlGuideForm.table,
+      targetColumn: autoMlGuideForm.targetColumn,
+      goal: autoMlGuideForm.goal,
+      notes: autoMlGuideForm.notes,
+      schema: autoMlGuideSchema,
+      setLoading: setIsAutoMlFilterSuggestionLoading,
+      onApply: (whereClause, rationale) => {
+        setAutoMlFilterSuggestion({ whereClause, rationale });
+        if (whereClause) {
+          setAutoMlGuideForm((prev) => ({ ...prev, rowFilter: whereClause }));
+        }
+      },
+      onFailure: () => setAutoMlFilterSuggestion(null),
+    });
   };
 
   const openAutoMlGuide = async () => {
     setAutoMlFilterSuggestion(null);
     setIsAutoMlGuideOpen(true);
     await loadAutoMlGuideMetadata(autoMlGuideForm.table || autoMlAgentState.selectedTable || undefined);
+  };
+
+  const suggestDataCleanerRowFilter = async () => {
+    await suggestScopedRowFilter({
+      mode: 'data_cleaner',
+      table: dataCleanerGuideForm.table,
+      goal: dataCleanerGuideForm.goal,
+      notes: dataCleanerGuideForm.notes,
+      schema: dataCleanerGuideSchema,
+      setLoading: setIsDataCleanerFilterSuggestionLoading,
+      onApply: (whereClause, rationale) => {
+        setDataCleanerFilterSuggestion({ whereClause, rationale });
+        if (whereClause) {
+          setDataCleanerGuideForm((prev) => ({ ...prev, rowFilter: whereClause }));
+        }
+      },
+      onFailure: () => setDataCleanerFilterSuggestion(null),
+    });
+  };
+
+  const suggestAnonymizerRowFilter = async () => {
+    await suggestScopedRowFilter({
+      mode: 'anonymizer',
+      table: anonymizerGuideForm.table,
+      goal: anonymizerGuideForm.goal,
+      notes: anonymizerGuideForm.notes,
+      schema: anonymizerGuideSchema,
+      setLoading: setIsAnonymizerFilterSuggestionLoading,
+      onApply: (whereClause, rationale) => {
+        setAnonymizerFilterSuggestion({ whereClause, rationale });
+        if (whereClause) {
+          setAnonymizerGuideForm((prev) => ({ ...prev, rowFilter: whereClause }));
+        }
+      },
+      onFailure: () => setAnonymizerFilterSuggestion(null),
+    });
+  };
+
+  const openDataCleanerGuide = async () => {
+    setDataCleanerFilterSuggestion(null);
+    setIsDataCleanerGuideOpen(true);
+    await loadDataCleanerGuideMetadata(dataCleanerGuideForm.table || dataCleanerAgentState.selectedTable || undefined);
+  };
+
+  const openAnonymizerGuide = async () => {
+    setAnonymizerFilterSuggestion(null);
+    setIsAnonymizerGuideOpen(true);
+    await loadAnonymizerGuideMetadata(anonymizerGuideForm.table || anonymizerAgentState.selectedTable || undefined);
   };
 
   useEffect(() => {
@@ -1276,6 +1422,32 @@ export function ChatInterface({
   }, [autoMlAgentState, isAutoMlGuideOpen]);
 
   useEffect(() => {
+    if (isDataCleanerGuideOpen) return;
+    setDataCleanerGuideForm((prev) => ({
+      ...prev,
+      table: dataCleanerAgentState.selectedTable ?? prev.table ?? "",
+      rowFilter: dataCleanerAgentState.rowFilter ?? prev.rowFilter ?? "",
+    }));
+    setDataCleanerGuideTables(dataCleanerAgentState.availableTables);
+    if (dataCleanerAgentState.schemaInfo.length > 0) {
+      setDataCleanerGuideSchema(dataCleanerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
+    }
+  }, [dataCleanerAgentState, isDataCleanerGuideOpen]);
+
+  useEffect(() => {
+    if (isAnonymizerGuideOpen) return;
+    setAnonymizerGuideForm((prev) => ({
+      ...prev,
+      table: anonymizerAgentState.selectedTable ?? prev.table ?? "",
+      rowFilter: anonymizerAgentState.rowFilter ?? prev.rowFilter ?? "",
+    }));
+    setAnonymizerGuideTables(anonymizerAgentState.availableTables);
+    if (anonymizerAgentState.schemaInfo.length > 0) {
+      setAnonymizerGuideSchema(anonymizerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
+    }
+  }, [anonymizerAgentState, isAnonymizerGuideOpen]);
+
+  useEffect(() => {
     if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst')) {
       setIsOtherAgentsOpen(true);
     }
@@ -1292,6 +1464,34 @@ export function ChatInterface({
     autoMlGuideAutoOpenRef.current = false;
     if (agentRole !== 'auto_ml') {
       setIsAutoMlGuideOpen(false);
+    }
+  }, [workflow, agentRole, isLoading, currentConversation]);
+
+  useEffect(() => {
+    if (workflow === 'AGENT' && agentRole === 'data_cleaner' && !isLoading) {
+      if (!dataCleanerGuideAutoOpenRef.current && !hasMeaningfulConversationMessages(currentConversation?.messages ?? [])) {
+        dataCleanerGuideAutoOpenRef.current = true;
+        void openDataCleanerGuide();
+      }
+      return;
+    }
+    dataCleanerGuideAutoOpenRef.current = false;
+    if (agentRole !== 'data_cleaner') {
+      setIsDataCleanerGuideOpen(false);
+    }
+  }, [workflow, agentRole, isLoading, currentConversation]);
+
+  useEffect(() => {
+    if (workflow === 'AGENT' && agentRole === 'anonymizer' && !isLoading) {
+      if (!anonymizerGuideAutoOpenRef.current && !hasMeaningfulConversationMessages(currentConversation?.messages ?? [])) {
+        anonymizerGuideAutoOpenRef.current = true;
+        void openAnonymizerGuide();
+      }
+      return;
+    }
+    anonymizerGuideAutoOpenRef.current = false;
+    if (agentRole !== 'anonymizer') {
+      setIsAnonymizerGuideOpen(false);
     }
   }, [workflow, agentRole, isLoading, currentConversation]);
 
@@ -1671,6 +1871,44 @@ export function ChatInterface({
     await handleSend(prompt);
   };
 
+  const launchDataCleanerGuide = async () => {
+    if (!dataCleanerGuideForm.table.trim()) {
+      setGuideFormError('Choose a ClickHouse table before launching Data Cleaner.');
+      return;
+    }
+    setGuideFormError(null);
+    setIsDataCleanerGuideOpen(false);
+    const prompt = [
+      `Audit the ClickHouse table \`${dataCleanerGuideForm.table.trim()}\` with the Data Cleaner agent.`,
+      dataCleanerGuideForm.rowFilter.trim() ? `Apply this row filter: ${dataCleanerGuideForm.rowFilter.trim()}` : "",
+      dataCleanerGuideForm.goal.trim() ? `Audit objective: ${dataCleanerGuideForm.goal.trim()}` : "",
+      dataCleanerGuideForm.notes.trim() ? `Additional guidance: ${dataCleanerGuideForm.notes.trim()}` : "",
+      "Focus on duplicates, missing values, empty strings, and inconsistent formats. Return a business summary and correction scripts.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    await handleSend(prompt);
+  };
+
+  const launchAnonymizerGuide = async () => {
+    if (!anonymizerGuideForm.table.trim()) {
+      setGuideFormError('Choose a ClickHouse table before launching Anonymizer.');
+      return;
+    }
+    setGuideFormError(null);
+    setIsAnonymizerGuideOpen(false);
+    const prompt = [
+      `Scan the ClickHouse table \`${anonymizerGuideForm.table.trim()}\` with the Anonymizer agent.`,
+      anonymizerGuideForm.rowFilter.trim() ? `Apply this row filter: ${anonymizerGuideForm.rowFilter.trim()}` : "",
+      anonymizerGuideForm.goal.trim() ? `Privacy objective: ${anonymizerGuideForm.goal.trim()}` : "",
+      anonymizerGuideForm.notes.trim() ? `Additional guidance: ${anonymizerGuideForm.notes.trim()}` : "",
+      "Focus on PII exposure, sensitive identifiers, and practical masking or hashing recommendations.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    await handleSend(prompt);
+  };
+
   const handleMentionSelect = (target: MentionTargetDefinition) => {
     const cursor = textareaRef.current?.selectionStart ?? inputCursor ?? input.length;
     const nextValue = replaceMentionToken(input, cursor, `@${target.aliases[0]}`);
@@ -1841,6 +2079,7 @@ export function ChatInterface({
         available_tables: dataCleanerAgentState.availableTables,
         selected_table: dataCleanerAgentState.selectedTable,
         schema_info: dataCleanerAgentState.schemaInfo,
+        row_filter: dataCleanerAgentState.rowFilter,
         clarification_prompt: dataCleanerAgentState.clarificationPrompt,
         clarification_options: dataCleanerAgentState.clarificationOptions,
         findings: dataCleanerAgentState.findings,
@@ -1854,6 +2093,7 @@ export function ChatInterface({
         available_tables: anonymizerAgentState.availableTables,
         selected_table: anonymizerAgentState.selectedTable,
         schema_info: anonymizerAgentState.schemaInfo,
+        row_filter: anonymizerAgentState.rowFilter,
         clarification_prompt: anonymizerAgentState.clarificationPrompt,
         clarification_options: anonymizerAgentState.clarificationOptions,
         pii_findings: anonymizerAgentState.piiFindings,
@@ -4526,6 +4766,32 @@ export function ChatInterface({
                       </button>
                     </div>
                   )}
+
+                  {agentRole === 'data_cleaner' && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void openDataCleanerGuide()}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-full bg-indigo-500 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-400"
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        Open guide
+                      </button>
+                    </div>
+                  )}
+
+                  {agentRole === 'anonymizer' && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void openAnonymizerGuide()}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-full bg-zinc-800 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-zinc-700"
+                      >
+                        <Gauge className="h-3.5 w-3.5" />
+                        Open guide
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -5073,6 +5339,7 @@ export function ChatInterface({
         }}
       />
       <AgentGuideModal
+        mode="auto_ml"
         isOpen={isAutoMlGuideOpen}
         isBusy={isLoading}
         isLoadingMetadata={isGuideMetadataLoading}
@@ -5116,6 +5383,82 @@ export function ChatInterface({
         }}
         onSuggestRowFilter={() => void suggestAutoMlRowFilter()}
         onSubmit={() => void launchAutoMlGuide()}
+        onStop={stopCurrentExecution}
+      />
+      <AgentGuideModal
+        mode="data_cleaner"
+        isOpen={isDataCleanerGuideOpen}
+        isBusy={isLoading}
+        isLoadingMetadata={isGuideMetadataLoading}
+        isSuggestingRowFilter={isDataCleanerFilterSuggestionLoading}
+        error={guideFormError}
+        tables={dataCleanerGuideTables}
+        schema={dataCleanerGuideSchema}
+        selectedTable={dataCleanerGuideForm.table}
+        rowFilter={dataCleanerGuideForm.rowFilter}
+        filterSuggestionRationale={dataCleanerFilterSuggestion?.rationale ?? ""}
+        goalText={dataCleanerGuideForm.goal}
+        notesText={dataCleanerGuideForm.notes}
+        onClose={() => setIsDataCleanerGuideOpen(false)}
+        onRefreshMetadata={() => void loadDataCleanerGuideMetadata(dataCleanerGuideForm.table || undefined)}
+        onTableChange={(table) => {
+          setDataCleanerFilterSuggestion(null);
+          setDataCleanerGuideForm((prev) => ({ ...prev, table, rowFilter: '' }));
+          void loadDataCleanerGuideMetadata(table);
+        }}
+        onRowFilterChange={(value) => {
+          setDataCleanerFilterSuggestion(null);
+          setDataCleanerGuideForm((prev) => ({ ...prev, rowFilter: value }));
+        }}
+        onSampleRowLimitChange={() => {}}
+        onGoalTextChange={(value) => {
+          setDataCleanerFilterSuggestion(null);
+          setDataCleanerGuideForm((prev) => ({ ...prev, goal: value }));
+        }}
+        onNotesTextChange={(value) => {
+          setDataCleanerFilterSuggestion(null);
+          setDataCleanerGuideForm((prev) => ({ ...prev, notes: value }));
+        }}
+        onSuggestRowFilter={() => void suggestDataCleanerRowFilter()}
+        onSubmit={() => void launchDataCleanerGuide()}
+        onStop={stopCurrentExecution}
+      />
+      <AgentGuideModal
+        mode="anonymizer"
+        isOpen={isAnonymizerGuideOpen}
+        isBusy={isLoading}
+        isLoadingMetadata={isGuideMetadataLoading}
+        isSuggestingRowFilter={isAnonymizerFilterSuggestionLoading}
+        error={guideFormError}
+        tables={anonymizerGuideTables}
+        schema={anonymizerGuideSchema}
+        selectedTable={anonymizerGuideForm.table}
+        rowFilter={anonymizerGuideForm.rowFilter}
+        filterSuggestionRationale={anonymizerFilterSuggestion?.rationale ?? ""}
+        goalText={anonymizerGuideForm.goal}
+        notesText={anonymizerGuideForm.notes}
+        onClose={() => setIsAnonymizerGuideOpen(false)}
+        onRefreshMetadata={() => void loadAnonymizerGuideMetadata(anonymizerGuideForm.table || undefined)}
+        onTableChange={(table) => {
+          setAnonymizerFilterSuggestion(null);
+          setAnonymizerGuideForm((prev) => ({ ...prev, table, rowFilter: '' }));
+          void loadAnonymizerGuideMetadata(table);
+        }}
+        onRowFilterChange={(value) => {
+          setAnonymizerFilterSuggestion(null);
+          setAnonymizerGuideForm((prev) => ({ ...prev, rowFilter: value }));
+        }}
+        onSampleRowLimitChange={() => {}}
+        onGoalTextChange={(value) => {
+          setAnonymizerFilterSuggestion(null);
+          setAnonymizerGuideForm((prev) => ({ ...prev, goal: value }));
+        }}
+        onNotesTextChange={(value) => {
+          setAnonymizerFilterSuggestion(null);
+          setAnonymizerGuideForm((prev) => ({ ...prev, notes: value }));
+        }}
+        onSuggestRowFilter={() => void suggestAnonymizerRowFilter()}
+        onSubmit={() => void launchAnonymizerGuide()}
         onStop={stopCurrentExecution}
       />
       <SqlDraftModal

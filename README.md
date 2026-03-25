@@ -38,13 +38,13 @@ A privacy-first AI workspace combining **pure LLM chat**, **Retrieval-Augmented 
 | **5 chat modes** | Pure LLM, RAG, Agents, MCP Tools, LangGraph Planning |
 | **9 built-in agents** | Agent Manager, ClickHouse SQL, Data Analyst, Auto-ML, Data Cleaner, Anonymizer, Oracle SQL, File management, PDF creator |
 | **Custom Python agents** | Paste Python code in Settings, let the local LLM generate a complete agent profile, then enable or disable the new agent from the UI |
-| **Manager orchestration** | Agent Manager can delegate to every built-in specialist plus enabled custom agents and keep follow-up context across clarifications and confirmations |
+| **Manager orchestration** | Agent Manager can delegate to every built-in specialist plus enabled custom agents, keep follow-up context across clarifications and confirmations, and optionally preload functional context from RAG before routing |
 | **OpenSearch backend** | kNN vector search (HNSW/cosinesimil), index setup & document ingest from the UI |
 | **ClickHouse agent** | Table inference, schema inspection, ambiguity clarification via clickable tiles, safe read-only SQL generation, optional chart rendering |
 | **Data Analyst agent** | Multi-step ClickHouse investigations with iterative evidence gathering, optional knowledge-base search, automatic SQL simplification retry, and CSV export on demand |
 | **Auto-ML agent** | Guided model benchmarking flow with target-column selection, optional row scope / WHERE clause, sample-size cap, comparison table, and baseline recommendation |
-| **Data Cleaner agent** | ClickHouse data-quality audit for duplicates, missing values, empty strings, and inconsistent formats, with suggested SQL cleanup scripts |
-| **Anonymizer agent** | ClickHouse privacy scan for likely PII columns, with masking / hashing SQL suggestions and a governance-oriented summary |
+| **Data Cleaner agent** | Guided ClickHouse data-quality audit for duplicates, missing values, empty strings, and inconsistent formats, with optional WHERE scope and suggested SQL cleanup scripts |
+| **Anonymizer agent** | Guided ClickHouse privacy scan for likely PII columns, with optional WHERE scope, masking / hashing SQL suggestions, and a governance-oriented summary |
 | **Oracle agent** | Natural-language Oracle analysis, schema discovery, SQL validation, automatic repair on query errors, narrative Markdown output |
 | **File management agent** | Backend Python-only ReAct loop for file browsing, reading, creating, editing, moving and guarded destructive actions, with early stop once the requested filesystem change is complete |
 | **PDF creator agent** | Backend Python-only PDF export agent to turn the latest useful analysis or pasted content into a polished document |
@@ -228,12 +228,12 @@ Multi-agent orchestration with built-in specialists plus optional custom Python 
 
 | Role | Behaviour |
 |------|-----------|
-| **Agent Manager** | Routes requests to specialist agents, keeps conversation state, and continues delegated follow-ups automatically |
+| **Agent Manager** | Routes requests to specialist agents, keeps conversation state, continues delegated follow-ups automatically, and can optionally query the RAG knowledge base first for business definitions and field descriptions |
 | **ClickHouse SQL** | Infers the best table when possible, asks for table/field/date choices only when ambiguous, runs safe read-only SQL, can produce charts, and can show result sets or schema lists as Markdown tables on demand |
 | **Data Analyst** | Runs deeper multi-step ClickHouse investigations, can search configured knowledge sources, retries failed SQL automatically, can export the latest dataset to CSV, and can surface a visible result table when requested |
 | **Auto-ML** | Opens a guided setup to choose the ClickHouse table, target column, optional row scope and sample-size cap, then benchmarks baseline models and returns a comparison table |
-| **Data Cleaner** | Audits one ClickHouse table for duplicate risk, missing values, empty strings, and mixed date formats, then proposes practical SQL cleanup patterns |
-| **Anonymizer** | Scans one ClickHouse table for likely PII exposure and suggests masking or hashing SQL patterns |
+| **Data Cleaner** | Opens a guided setup to choose one ClickHouse table, define an optional WHERE scope, then audit duplicate risk, missing values, empty strings, and mixed date formats |
+| **Anonymizer** | Opens a guided setup to choose one ClickHouse table, define an optional WHERE scope, then scan for likely PII exposure and suggest masking or hashing SQL patterns |
 | **Oracle SQL** | Queries Oracle from natural language, inspects schema, validates Oracle SQL, executes safe read-only queries, answers in business-facing Markdown, and preserves a readable data table in the final answer |
 | **File management** | Uses backend Python tools to inspect and manage files safely, with explicit confirmation for overwrite/delete/move operations and tabular output when a file summary is naturally table-shaped |
 | **PDF creator** | Turns the latest useful analysis or pasted content into a polished PDF with guarded overwrite confirmation |
@@ -289,6 +289,18 @@ The ClickHouse agent uses the backend only and always relies on the configured l
    - a model comparison table,
    - the recommended baseline model,
    - a practical narrative on how to proceed.
+
+#### Data Cleaner / Anonymizer quick flow
+
+1. Configure ClickHouse once in **Settings → ClickHouse SQL**.
+2. Switch to **Agents** mode and select **Data Cleaner** or **Anonymizer**.
+3. A guided setup opens automatically on a fresh conversation, and you can reopen it later with **Open guide**.
+4. Choose:
+   - the source table,
+   - an optional row scope (`WHERE`) that can be suggested with the local LLM,
+   - the functional objective,
+   - optional notes for the agent.
+5. Launch the run to receive a business-facing summary in the chat plus the masked technical details and SQL patterns underneath.
 
 #### Oracle SQL quick flow
 
@@ -791,6 +803,7 @@ All settings are available in-app (no `.env` file needed).
 | API Key | — | Required for OpenAI-compatible providers |
 | Model | `llama3` | Model name (`ollama list` to see available) |
 | System Prompt | — | Prepended to every conversation |
+| Manager preloads functional context from RAG | `false` | When enabled, Agent Manager queries the knowledge base before routing or answering so it can reuse business definitions and field descriptions |
 | Disable SSL verification for backend calls | `false` | Global override for self-signed or internal certificates used by LLM, embeddings, ClickHouse, MCP, and model discovery |
 
 ### RAG & OpenSearch Settings

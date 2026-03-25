@@ -294,6 +294,7 @@ export type DataCleanerAgentState = {
   availableTables: string[];
   selectedTable: string | null;
   schemaInfo: Array<{ name: string; type: string }>;
+  rowFilter: string;
   clarificationPrompt: string;
   clarificationOptions: string[];
   findings: DataCleanerFinding[];
@@ -321,6 +322,7 @@ export type AnonymizerAgentState = {
   availableTables: string[];
   selectedTable: string | null;
   schemaInfo: Array<{ name: string; type: string }>;
+  rowFilter: string;
   clarificationPrompt: string;
   clarificationOptions: string[];
   piiFindings: AnonymizerFinding[];
@@ -468,6 +470,7 @@ export type AppConfig = {
   apiKey: string;
   model: string;
   systemPrompt: string;
+  managerUseRagFunctionalContext: boolean;
   disableSslVerification: boolean;
   elasticsearchUrl: string;
   elasticsearchIndex: string;
@@ -532,6 +535,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   apiKey: "",
   model: "llama3",
   systemPrompt: "You are a helpful, smart, and concise AI assistant. Present non-JSON answers in polished Markdown with clear sections, concise bullets, tasteful **bold** emphasis, and tables when they help. Safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> are allowed when they genuinely improve the layout. Never return a full HTML document, CSS, or JavaScript. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies. If the user explicitly asks for a table, rows/columns, a matrix, a grid, a schema list, or a tabular preview, return the relevant structured result as a valid Markdown table whenever the data is naturally tabular.",
+  managerUseRagFunctionalContext: false,
   disableSslVerification: false,
   elasticsearchUrl: "http://localhost:9200",
   elasticsearchIndex: "rag_documents",
@@ -1001,6 +1005,7 @@ export function normalizeDataCleanerAgentState(
           }))
           .filter((column: { name: string }) => Boolean(column.name))
       : [],
+    rowFilter: String((state as any)?.rowFilter ?? (state as any)?.row_filter ?? ''),
     clarificationPrompt: String((state as any)?.clarificationPrompt ?? (state as any)?.clarification_prompt ?? ''),
     clarificationOptions: Array.isArray((state as any)?.clarificationOptions ?? (state as any)?.clarification_options)
       ? ((state as any)?.clarificationOptions ?? (state as any)?.clarification_options).filter(Boolean).map(String)
@@ -1051,6 +1056,7 @@ export function normalizeAnonymizerAgentState(
           }))
           .filter((column: { name: string }) => Boolean(column.name))
       : [],
+    rowFilter: String((state as any)?.rowFilter ?? (state as any)?.row_filter ?? ''),
     clarificationPrompt: String((state as any)?.clarificationPrompt ?? (state as any)?.clarification_prompt ?? ''),
     clarificationOptions: Array.isArray((state as any)?.clarificationOptions ?? (state as any)?.clarification_options)
       ? ((state as any)?.clarificationOptions ?? (state as any)?.clarification_options).filter(Boolean).map(String)
@@ -1103,6 +1109,7 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
     ...DEFAULT_CONFIG,
     ...(config ?? {}),
     disableSslVerification: config?.disableSslVerification ?? DEFAULT_CONFIG.disableSslVerification,
+    managerUseRagFunctionalContext: config?.managerUseRagFunctionalContext ?? DEFAULT_CONFIG.managerUseRagFunctionalContext,
     settingsAccessPassword: config?.settingsAccessPassword || DEFAULT_CONFIG.settingsAccessPassword,
     agenticDataVizUrl: config?.agenticDataVizUrl ?? DEFAULT_CONFIG.agenticDataVizUrl,
     portalApps: incomingPortalApps

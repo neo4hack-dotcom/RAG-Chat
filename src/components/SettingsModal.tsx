@@ -22,6 +22,7 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     apiKey: config.apiKey || '',
     model: config.model || '',
     systemPrompt: config.systemPrompt || '',
+    managerUseRagFunctionalContext: config.managerUseRagFunctionalContext ?? false,
     disableSslVerification: config.disableSslVerification ?? false,
     elasticsearchUrl: config.elasticsearchUrl || 'http://localhost:9200',
     elasticsearchIndex: config.elasticsearchIndex || 'rag_documents',
@@ -1801,6 +1802,23 @@ export function SettingsModal({
                     className="w-full bg-white/50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all min-h-[100px] resize-none"
                     placeholder="You are a helpful assistant..."
                   />
+                </div>
+
+                <div className="rounded-2xl border border-blue-200/80 bg-blue-50/70 px-4 py-3">
+                  <label className="flex items-start gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={localConfig.managerUseRagFunctionalContext}
+                      onChange={(e) => setLocalConfig({ ...localConfig, managerUseRagFunctionalContext: e.target.checked })}
+                      className="mt-0.5 w-4 h-4 rounded text-blue-500 focus:ring-blue-500"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-blue-900">Manager preloads functional context from RAG</span>
+                      <span className="block text-xs text-blue-800/80 mt-1">
+                        When enabled, Agent Manager queries the knowledge base before routing or answering so it can reuse field names, definitions, and business descriptions. When disabled, Manager behaves exactly as before.
+                      </span>
+                    </span>
+                  </label>
                 </div>
             </div>
           ) : activeTab === 'rag' ? (
