@@ -45,6 +45,20 @@ function buildLocalConfig(config: AppConfig): AppConfig {
           description: app.description || '',
         }))
       : [],
+    customAgents: Array.isArray(config.customAgents)
+      ? config.customAgents.map((agent, index) => ({
+          id: agent.id || `custom_agent_${index + 1}`,
+          title: agent.title || `Custom Agent ${index + 1}`,
+          description: agent.description || '',
+          pythonCode: agent.pythonCode || '',
+          systemPrompt: agent.systemPrompt || '',
+          managerRoutingHint: agent.managerRoutingHint || '',
+          status: agent.status || 'draft',
+          statusMessage: agent.statusMessage || '',
+          enabled: agent.enabled ?? false,
+          badgeColor: agent.badgeColor || 'zinc',
+        }))
+      : [],
     settingsAccessPassword: config.settingsAccessPassword || 'MM@2026',
     clickhouseHost: config.clickhouseHost || 'localhost',
     clickhousePort: config.clickhousePort || 8123,
@@ -135,7 +149,7 @@ export function SettingsModal({
   const [testMessage, setTestMessage] = useState('');
   
   // Tab state (LLM, RAG, ClickHouse, MCP, or DB backup settings)
-  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'clickhouse' | 'oracle' | 'apps' | 'mcp' | 'storage'>('llm');
+  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'clickhouse' | 'oracle' | 'apps' | 'agents' | 'mcp' | 'storage'>('llm');
 
   // Connection test states for OpenSearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -144,6 +158,7 @@ export function SettingsModal({
   const [clickhouseTestMessage, setClickhouseTestMessage] = useState('');
   const [clickhouseTablesPreview, setClickhouseTablesPreview] = useState<string[]>([]);
   const [oracleTestStates, setOracleTestStates] = useState<Record<string, { status: 'idle' | 'testing' | 'success' | 'error'; message: string; tables: string[] }>>({});
+  const [customAgentAnalysisState, setCustomAgentAnalysisState] = useState<Record<string, { status: 'idle' | 'running' | 'success' | 'error'; message: string }>>({});
 
   // Setup index status
   const [setupStatus, setSetupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
@@ -705,6 +720,102 @@ export function SettingsModal({
     }));
   };
 
+  const addCustomAgent = () => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      customAgents: [
+        ...(prev.customAgents ?? []),
+        {
+          id: `custom_agent_${Date.now()}`,
+          title: `Custom Agent ${(prev.customAgents?.length ?? 0) + 1}`,
+          description: '',
+          pythonCode: '',
+          systemPrompt: '',
+          managerRoutingHint: '',
+          status: 'draft',
+          statusMessage: 'Paste Python code, then click Analyze & build.',
+          enabled: false,
+          badgeColor: 'zinc',
+        },
+      ],
+    }));
+  };
+
+  const updateCustomAgent = (index: number, patch: Partial<AppConfig['customAgents'][number]>) => {
+    setLocalConfig((prev) => {
+      const nextAgents = [...(prev.customAgents ?? [])];
+      if (!nextAgents[index]) return prev;
+      nextAgents[index] = {
+        ...nextAgents[index],
+        ...patch,
+      };
+      return {
+        ...prev,
+        customAgents: nextAgents,
+      };
+    });
+  };
+
+  const deleteCustomAgent = (index: number) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      customAgents: (prev.customAgents ?? []).filter((_, agentIndex) => agentIndex !== index),
+    }));
+  };
+
+  const analyzeCustomAgent = async (index: number) => {
+    const agent = (localConfig.customAgents ?? [])[index];
+    if (!agent) return;
+    const agentId = agent.id || `custom_agent_${index + 1}`;
+    setCustomAgentAnalysisState((prev) => ({
+      ...prev,
+      [agentId]: { status: 'running', message: '' },
+    }));
+    try {
+      const response = await fetch('/api/custom-agent/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: agent.title,
+          description: agent.description,
+          python_code: agent.pythonCode,
+          llm_base_url: localConfig.baseUrl,
+          llm_model: localConfig.model,
+          llm_api_key: localConfig.apiKey || undefined,
+          llm_provider: localConfig.provider,
+          disable_ssl_verification: localConfig.disableSslVerification ?? false,
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      updateCustomAgent(index, {
+        title: data.profile?.title || agent.title,
+        description: data.profile?.description || agent.description,
+        systemPrompt: data.profile?.systemPrompt || '',
+        managerRoutingHint: data.profile?.managerRoutingHint || '',
+        badgeColor: data.profile?.badgeColor || 'zinc',
+        status: 'ready',
+        statusMessage: data.profile?.statusMessage || 'The custom agent profile is ready.',
+      });
+      setCustomAgentAnalysisState((prev) => ({
+        ...prev,
+        [agentId]: { status: 'success', message: data.profile?.statusMessage || 'The custom agent profile is ready.' },
+      }));
+    } catch (err) {
+      updateCustomAgent(index, {
+        status: 'error',
+        statusMessage: err instanceof Error ? err.message : 'Custom agent analysis failed.',
+      });
+      setCustomAgentAnalysisState((prev) => ({
+        ...prev,
+        [agentId]: { status: 'error', message: err instanceof Error ? err.message : 'Custom agent analysis failed.' },
+      }));
+    }
+  };
+
   const formattedLastSync = lastSyncedAt
     ? new Date(lastSyncedAt).toLocaleString()
     : 'No successful sync has been confirmed yet.';
@@ -766,6 +877,12 @@ export function SettingsModal({
               className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'apps' ? 'border-sky-500 text-sky-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             >
               App Portal
+            </button>
+            <button
+              onClick={() => setActiveTab('agents')}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'agents' ? 'border-slate-500 text-slate-700 dark:text-slate-200' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              Custom Agents
             </button>
             <button
               onClick={() => setActiveTab('storage')}
@@ -1288,6 +1405,154 @@ export function SettingsModal({
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'agents' ? (
+            <div className="space-y-6">
+              <div className="rounded-[1.75rem] border border-slate-200/80 bg-[linear-gradient(135deg,rgba(255,255,255,0.95),rgba(248,250,252,0.92),rgba(241,245,249,0.88))] p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <Bot className="w-4 h-4 text-slate-700" />
+                      <h3 className="text-sm font-semibold text-slate-950">Custom Python agents</h3>
+                    </div>
+                    <p className="text-xs text-slate-700/80 leading-relaxed max-w-2xl">
+                      Paste Python code for a new agent. The local LLM analyzes the implementation draft, proposes a title, a user-facing description, a dedicated system prompt, and a routing hint for the Agent Manager. You can then enable or disable the agent to control whether it appears in the sub-agent menu.
+                    </p>
+                  </div>
+                  <button
+                    onClick={addCustomAgent}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-white/90 text-slate-700 border border-slate-200 rounded-xl hover:bg-white transition-colors shadow-sm"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add custom agent
+                  </button>
+                </div>
+              </div>
+
+              {(localConfig.customAgents ?? []).length === 0 ? (
+                <div className="rounded-[1.75rem] border border-dashed border-slate-200 bg-white/70 px-6 py-10 text-center shadow-[0_10px_24px_rgba(148,163,184,0.08)]">
+                  <p className="text-sm font-medium text-gray-700">No custom agent configured yet.</p>
+                  <p className="text-xs text-gray-500 mt-2">Add one, paste Python code, then analyze it with the local LLM.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {(localConfig.customAgents ?? []).map((agent, index) => {
+                    const analysisState = customAgentAnalysisState[agent.id];
+                    return (
+                      <div
+                        key={agent.id || `custom-agent-${index}`}
+                        className="rounded-[1.9rem] border border-white/70 bg-[linear-gradient(140deg,rgba(255,255,255,0.88),rgba(248,250,252,0.74),rgba(241,245,249,0.70))] backdrop-blur-xl p-5 shadow-[0_20px_40px_rgba(15,23,42,0.08)]"
+                      >
+                        <div className="flex items-start justify-between gap-3 mb-4">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500 font-semibold">Custom agent {index + 1}</p>
+                            <h4 className="text-base font-semibold text-gray-900 mt-1">{agent.title || 'Untitled custom agent'}</h4>
+                            <p className="mt-1 text-xs text-gray-500">{agent.statusMessage || 'Paste Python code, then analyze the draft.'}</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <label className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/85 px-3 py-1.5 text-xs font-medium text-slate-700">
+                              <input
+                                type="checkbox"
+                                checked={agent.enabled}
+                                onChange={(e) => updateCustomAgent(index, { enabled: e.target.checked })}
+                                className="h-4 w-4 rounded text-slate-700 focus:ring-slate-400"
+                              />
+                              Enabled
+                            </label>
+                            <button
+                              onClick={() => deleteCustomAgent(index)}
+                              className="w-9 h-9 rounded-full border border-red-100 bg-white/80 text-red-400 hover:text-red-600 hover:border-red-200 transition-colors flex items-center justify-center"
+                              title="Delete custom agent"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                          <div className="space-y-3">
+                            <div>
+                              <label className="text-xs font-medium text-gray-500 mb-1 block">Agent title</label>
+                              <input
+                                type="text"
+                                value={agent.title}
+                                onChange={(e) => updateCustomAgent(index, { title: e.target.value })}
+                                className="w-full bg-white/85 border border-white/80 rounded-2xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-500/30 transition-all"
+                                placeholder="SQL Governance Reviewer"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500 mb-1 block">User-facing description</label>
+                              <textarea
+                                value={agent.description}
+                                onChange={(e) => updateCustomAgent(index, { description: e.target.value })}
+                                className="w-full min-h-[100px] bg-white/85 border border-white/80 rounded-[1.4rem] px-3 py-3 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-500/30 transition-all resize-none"
+                                placeholder="Short description shown in the chat intro card."
+                              />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="text-xs font-medium text-gray-500 mb-1 block">Badge color</label>
+                                <input
+                                  type="text"
+                                  value={agent.badgeColor}
+                                  onChange={(e) => updateCustomAgent(index, { badgeColor: e.target.value })}
+                                  className="w-full bg-white/85 border border-white/80 rounded-2xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-500/30 transition-all"
+                                  placeholder="zinc"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs font-medium text-gray-500 mb-1 block">Manager routing hint</label>
+                                <input
+                                  type="text"
+                                  value={agent.managerRoutingHint}
+                                  onChange={(e) => updateCustomAgent(index, { managerRoutingHint: e.target.value })}
+                                  className="w-full bg-white/85 border border-white/80 rounded-2xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-500/30 transition-all"
+                                  placeholder="Use when the user asks for..."
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="space-y-3">
+                            <div>
+                              <label className="text-xs font-medium text-gray-500 mb-1 block">Python agent code</label>
+                              <textarea
+                                value={agent.pythonCode}
+                                onChange={(e) => updateCustomAgent(index, { pythonCode: e.target.value, status: 'draft', enabled: false })}
+                                className="w-full min-h-[210px] bg-white/90 border border-white/80 rounded-[1.4rem] px-3 py-3 text-sm font-mono text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-500/30 transition-all resize-y"
+                                placeholder="Paste the Python code that defines the agent behavior."
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-500 mb-1 block">Generated system prompt</label>
+                              <textarea
+                                value={agent.systemPrompt}
+                                onChange={(e) => updateCustomAgent(index, { systemPrompt: e.target.value })}
+                                className="w-full min-h-[120px] bg-white/85 border border-white/80 rounded-[1.4rem] px-3 py-3 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-500/30 transition-all resize-none"
+                                placeholder="Filled automatically after analysis. You can fine-tune it afterwards."
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 flex flex-wrap items-center gap-3">
+                          <button
+                            onClick={() => void analyzeCustomAgent(index)}
+                            disabled={!agent.pythonCode.trim() || analysisState?.status === 'running'}
+                            className="inline-flex items-center gap-2 rounded-full bg-black px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-50"
+                          >
+                            {analysisState?.status === 'running' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                            Analyze & build
+                          </button>
+                          <span className="text-xs text-gray-500">
+                            Status: <strong>{agent.status}</strong>{agent.enabled ? ' · visible in Tools' : ' · hidden from Tools'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1830,7 +2095,7 @@ export function SettingsModal({
                   <h3 className="text-sm font-semibold text-cyan-900 dark:text-cyan-200">ClickHouse SQL</h3>
                 </div>
                 <p className="text-xs text-cyan-800/90 dark:text-cyan-300/90 leading-relaxed">
-                  Configure the ClickHouse connection used by ClickHouse SQL, Data Analyst, Feature Engineer, Auto-ML, and any Manager workflow that needs ClickHouse queries. All existing tests, safety limits, and table previews stay available here.
+                  Configure the ClickHouse connection used by ClickHouse SQL, Data Analyst, Auto-ML, and any Manager workflow that needs ClickHouse queries. All existing tests, safety limits, and table previews stay available here.
                 </p>
               </div>
 

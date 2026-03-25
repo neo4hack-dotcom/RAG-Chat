@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bot, User, ChevronDown, ChevronRight, Loader2, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3 } from "lucide-react";
+import { Bot, User, ChevronDown, ChevronRight, Loader2, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3, Gauge } from "lucide-react";
 import { Message, cn, ChartSpec, ChatAction, preprocessMarkdown } from "../lib/utils";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -73,6 +73,39 @@ const AGENT_INTRO_CARD_CONFIG: Record<string, {
     bodyClass: "text-slate-700 dark:text-slate-200",
     subtleClass: "text-violet-700 dark:text-violet-300",
   },
+  auto_ml: {
+    marker: "<!-- agent-intro:auto_ml -->",
+    title: "Auto-ML Agent",
+    icon: BarChart3,
+    containerClass: "border border-rose-200 bg-white/98 shadow-[0_18px_48px_rgba(244,63,94,0.08)] dark:border-rose-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-rose-50 ring-1 ring-rose-200 dark:bg-rose-900/25 dark:ring-rose-800/80",
+    iconClass: "text-rose-600 dark:text-rose-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-rose-700 dark:text-rose-300",
+  },
+  data_cleaner: {
+    marker: "<!-- agent-intro:data_cleaner -->",
+    title: "Data Cleaner Agent",
+    icon: Check,
+    containerClass: "border border-indigo-200 bg-white/98 shadow-[0_18px_48px_rgba(99,102,241,0.08)] dark:border-indigo-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-indigo-50 ring-1 ring-indigo-200 dark:bg-indigo-900/25 dark:ring-indigo-800/80",
+    iconClass: "text-indigo-600 dark:text-indigo-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-indigo-700 dark:text-indigo-300",
+  },
+  anonymizer: {
+    marker: "<!-- agent-intro:anonymizer -->",
+    title: "Anonymizer Agent",
+    icon: Gauge,
+    containerClass: "border border-zinc-200 bg-white/98 shadow-[0_18px_48px_rgba(63,63,70,0.08)] dark:border-zinc-700/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-zinc-100 ring-1 ring-zinc-200 dark:bg-zinc-800/60 dark:ring-zinc-700/80",
+    iconClass: "text-zinc-700 dark:text-zinc-200",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-zinc-700 dark:text-zinc-300",
+  },
   file_management: {
     marker: "<!-- agent-intro:file_management -->",
     title: "File Management Agent",
@@ -106,17 +139,30 @@ const AGENT_INTRO_CARD_CONFIG: Record<string, {
     bodyClass: "text-slate-700 dark:text-slate-200",
     subtleClass: "text-orange-700 dark:text-orange-300",
   },
+  custom_agent: {
+    marker: "<!-- agent-intro:custom_agent -->",
+    title: "Custom Agent",
+    icon: Bot,
+    containerClass: "border border-slate-200 bg-white/98 shadow-[0_18px_48px_rgba(51,65,85,0.08)] dark:border-slate-700/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-slate-100 ring-1 ring-slate-200 dark:bg-slate-800/60 dark:ring-slate-700/80",
+    iconClass: "text-slate-700 dark:text-slate-200",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-slate-700 dark:text-slate-300",
+  },
 };
 
 function getAgentIntroCardData(content: string) {
   const entry = Object.values(AGENT_INTRO_CARD_CONFIG).find((config) => content.includes(config.marker));
   if (!entry) return null;
+  const headingMatch = content.replace(entry.marker, "").match(/^##\s+(.+?)\s*$/m);
   const body = content
     .replace(entry.marker, "")
     .replace(/^##\s+.+?\n+/m, "")
     .trim();
   return {
     ...entry,
+    title: headingMatch?.[1]?.trim() || entry.title,
     body,
   };
 }

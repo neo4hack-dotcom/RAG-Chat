@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge, Sparkles } from "lucide-react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeFeatureEngineerAgentState, normalizeAutoMlAgentState, normalizeAppConfig } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -18,11 +18,13 @@ interface ChatInterfaceProps {
   workflow: WorkflowMode;
   agentRole: AgentRole;
   mcpToolId: string;
+  selectedCustomAgentId: string;
   onConversationsChange: React.Dispatch<React.SetStateAction<Conversation[]>>;
   onCurrentIdChange: (id: string | null) => void;
   onWorkflowChange: (workflow: WorkflowMode) => void;
   onAgentRoleChange: (role: AgentRole) => void;
   onMcpToolIdChange: (id: string) => void;
+  onSelectedCustomAgentIdChange: (id: string) => void;
   onConfigChange: (config: AppConfig) => void;
   isDark: boolean;
   onToggleDark: () => void;
@@ -36,18 +38,20 @@ const AGENT_INTRO_MARKERS = {
   file_management: "<!-- agent-intro:file_management -->",
   pdf_creator: "<!-- agent-intro:pdf_creator -->",
   oracle_analyst: "<!-- agent-intro:oracle_analyst -->",
-  feature_engineer: "<!-- agent-intro:feature_engineer -->",
   auto_ml: "<!-- agent-intro:auto_ml -->",
+  data_cleaner: "<!-- agent-intro:data_cleaner -->",
+  anonymizer: "<!-- agent-intro:anonymizer -->",
+  custom_agent: "<!-- agent-intro:custom_agent -->",
 } as const;
 
-function getAgentIntroContent(agentRole: AgentRole): string | null {
+function getAgentIntroContent(agentRole: AgentRole, config?: AppConfig, selectedCustomAgentId?: string): string | null {
   if (agentRole === 'manager') {
     return `${AGENT_INTRO_MARKERS.manager}
 ## Agent Manager
 
 This manager works in English and can orchestrate the available specialist agents.
 
-- It routes requests to Clickhouse SQL, Data Analyst, Feature Engineer, Auto-ML, File management, or Oracle SQL when needed.
+- It routes requests to Clickhouse SQL, Data Analyst, Auto-ML, Data Cleaner, Anonymizer, File management, custom agents, or Oracle SQL when needed.
 - It can also route export-ready results to PDF creator when you want a polished document.
 - It keeps the conversation context while delegated agents ask follow-up questions.
 - It answers directly when no specialist tool is required.`;
@@ -77,17 +81,6 @@ This agent works in English and handles deeper ClickHouse investigations through
 - It returns a business-facing markdown answer while keeping analytical steps available from the thinking panel.`;
   }
 
-  if (agentRole === 'feature_engineer') {
-    return `${AGENT_INTRO_MARKERS.feature_engineer}
-## Feature Engineer Agent
-
-This agent works in English and proposes predictive variables from your ClickHouse tables.
-
-- It inspects the schema and a live sample before suggesting engineered features.
-- It returns practical ideas such as calendar features, ratios, recency flags, and derived attributes.
-- Each recommendation includes a rationale and a SQL expression you can reuse in ClickHouse.`;
-  }
-
   if (agentRole === 'auto_ml') {
     return `${AGENT_INTRO_MARKERS.auto_ml}
 ## Auto-ML Agent
@@ -97,6 +90,37 @@ This agent works in English and benchmarks several machine-learning models on a 
 - It selects a table and a prediction target, asks only when those points remain ambiguous, and then prepares a trainable sample.
 - It compares linear/logistic regression, Random Forest, and XGBoost when available on the server.
 - It returns a comparison table of model performance and a practical recommendation on which model to keep as a baseline.`;
+  }
+
+  if (agentRole === 'data_cleaner') {
+    return `${AGENT_INTRO_MARKERS.data_cleaner}
+## Data Cleaner Agent
+
+This agent works in English and audits a ClickHouse table for practical data-quality issues.
+
+- It looks for duplicate risk, missing values, empty strings, and inconsistent formats such as mixed date conventions.
+- It asks you to choose a table only when the intended dataset remains ambiguous.
+- It returns a business-facing audit summary and keeps the suggested SQL cleanup scripts in the technical details section.`;
+  }
+
+  if (agentRole === 'anonymizer') {
+    return `${AGENT_INTRO_MARKERS.anonymizer}
+## Anonymizer Agent
+
+This agent works in English and scans ClickHouse data for personally identifiable information.
+
+- It inspects schema and sample values to identify likely PII such as emails, phone numbers, names, addresses, and similar sensitive fields.
+- It asks you to choose a table only when the intended dataset remains ambiguous.
+- It returns a privacy-oriented summary and keeps the suggested masking or hashing SQL patterns in the technical details section.`;
+  }
+
+  if (agentRole === 'custom_agent') {
+    const customAgent = (config?.customAgents ?? []).find((agent) => agent.id === selectedCustomAgentId);
+    if (!customAgent) return null;
+    return `${AGENT_INTRO_MARKERS.custom_agent}
+## ${customAgent.title}
+
+${customAgent.description || 'This custom agent was generated from Python code in Settings and is ready to use.'}`;
   }
 
   if (agentRole === 'file_management') {
@@ -144,10 +168,14 @@ function hasAgentIntroMessage(messages: Message[], agentRole: AgentRole): boolea
         ? AGENT_INTRO_MARKERS.clickhouse_query
         : agentRole === 'data_analyst'
           ? AGENT_INTRO_MARKERS.data_analyst
-        : agentRole === 'feature_engineer'
-          ? AGENT_INTRO_MARKERS.feature_engineer
         : agentRole === 'auto_ml'
           ? AGENT_INTRO_MARKERS.auto_ml
+        : agentRole === 'data_cleaner'
+          ? AGENT_INTRO_MARKERS.data_cleaner
+        : agentRole === 'anonymizer'
+          ? AGENT_INTRO_MARKERS.anonymizer
+        : agentRole === 'custom_agent'
+          ? AGENT_INTRO_MARKERS.custom_agent
         : agentRole === 'file_management'
           ? AGENT_INTRO_MARKERS.file_management
           : agentRole === 'pdf_creator'
@@ -159,8 +187,8 @@ function hasAgentIntroMessage(messages: Message[], agentRole: AgentRole): boolea
   return messages.some((message) => message.role === 'assistant' && message.content.includes(marker));
 }
 
-function createAgentIntroMessage(agentRole: AgentRole): Message | null {
-  const content = getAgentIntroContent(agentRole);
+function createAgentIntroMessage(agentRole: AgentRole, config?: AppConfig, selectedCustomAgentId?: string): Message | null {
+  const content = getAgentIntroContent(agentRole, config, selectedCustomAgentId);
   if (!content) return null;
   return {
     id: `agent-intro-${agentRole}-${Date.now()}`,
@@ -208,15 +236,11 @@ type SqlDraftPreviewResult = {
   rowLimit: number;
 };
 
-type FeatureEngineerGuideForm = {
-  table: string;
-  goal: string;
-  notes: string;
-};
-
 type AutoMlGuideForm = {
   table: string;
   targetColumn: string;
+  rowFilter: string;
+  sampleRowLimit: number;
   goal: string;
   notes: string;
 };
@@ -225,6 +249,11 @@ type ClickHouseGuideMetadata = {
   availableTables: string[];
   schema: GuideSchemaColumn[];
   targetCandidates: string[];
+};
+
+type AutoMlFilterSuggestion = {
+  whereClause: string;
+  rationale: string;
 };
 
 const CHAT_ZOOM_MIN = 0.85;
@@ -377,8 +406,10 @@ const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
   manager: 'Agent Manager',
   clickhouse_query: 'Clickhouse SQL',
   data_analyst: 'Data Analyst',
-  feature_engineer: 'Feature Engineer',
   auto_ml: 'Auto-ML',
+  data_cleaner: 'Data Cleaner',
+  anonymizer: 'Anonymizer',
+  custom_agent: 'Custom Agent',
   file_management: 'File management',
   pdf_creator: 'PDF creator',
   oracle_analyst: 'Oracle SQL',
@@ -388,8 +419,10 @@ const AGENT_ROLE_SHORT_LABELS: Record<AgentRole, string> = {
   manager: 'MGR',
   clickhouse_query: 'CLICK',
   data_analyst: 'ANALYST',
-  feature_engineer: 'FEATURE',
   auto_ml: 'AUTO-ML',
+  data_cleaner: 'CLEAN',
+  anonymizer: 'PII',
+  custom_agent: 'CUSTOM',
   file_management: 'FILES',
   pdf_creator: 'PDF',
   oracle_analyst: 'ORACLE',
@@ -399,8 +432,9 @@ const AGENT_MENTION_TARGETS: MentionTargetDefinition[] = [
   { id: 'manager', label: 'Agent Manager', shortLabel: 'MGR', aliases: ['manager', 'planner', 'planificateur'], role: 'manager', icon: Star, tone: 'from-amber-500 to-orange-500' },
   { id: 'clickhouse', label: 'Clickhouse SQL', shortLabel: 'CLICK', aliases: ['clickhouse', 'clickhousesql'], role: 'clickhouse_query', icon: Database, tone: 'from-cyan-500 to-sky-500' },
   { id: 'data_analyst', label: 'Data Analyst', shortLabel: 'ANALYST', aliases: ['analyst', 'dataanalyst'], role: 'data_analyst', icon: Cpu, tone: 'from-violet-500 to-fuchsia-500' },
-  { id: 'feature_engineer', label: 'Feature Engineer', shortLabel: 'FEATURE', aliases: ['featureengineer', 'features'], role: 'feature_engineer', icon: BrainCircuit, tone: 'from-lime-500 to-emerald-500' },
   { id: 'auto_ml', label: 'Auto-ML', shortLabel: 'AUTO-ML', aliases: ['automl', 'ml'], role: 'auto_ml', icon: BrainCircuit, tone: 'from-rose-500 to-orange-500' },
+  { id: 'data_cleaner', label: 'Data Cleaner', shortLabel: 'CLEAN', aliases: ['cleaner', 'datacleaner', 'nettoyeur'], role: 'data_cleaner', icon: Check, tone: 'from-indigo-500 to-sky-500' },
+  { id: 'anonymizer', label: 'Anonymizer', shortLabel: 'PII', aliases: ['anonymizer', 'anonymiser', 'anonymiseur', 'gdpr', 'rgpd'], role: 'anonymizer', icon: Gauge, tone: 'from-zinc-700 to-slate-900' },
   { id: 'oracle', label: 'Oracle SQL', shortLabel: 'ORACLE', aliases: ['oracle', 'oraclesql'], role: 'oracle_analyst', icon: Database, tone: 'from-orange-500 to-amber-500' },
   { id: 'files', label: 'File management', shortLabel: 'FILES', aliases: ['file', 'files', 'filemanager'], role: 'file_management', icon: FolderOpen, tone: 'from-emerald-500 to-teal-500' },
   { id: 'pdf', label: 'PDF creator', shortLabel: 'PDF', aliases: ['pdf', 'pdfcreator'], role: 'pdf_creator', icon: File, tone: 'from-slate-600 to-slate-800' },
@@ -547,7 +581,7 @@ RAGnarok peut fonctionner de plusieurs façons selon ton besoin, mais ses **agen
 
 - C'est l'agent **chef d'orchestre**.
 - Tu peux lui décrire directement un objectif métier, par exemple : **"analyse les ventes puis exporte le résultat en CSV"**.
-- Il peut déléguer à d'autres agents comme **Clickhouse SQL**, **Data Analyst**, **Feature Engineer**, **Auto-ML**, **Oracle SQL**, **File management** ou **PDF creator** quand c'est pertinent.
+- Il peut déléguer à d'autres agents comme **Clickhouse SQL**, **Data Analyst**, **Auto-ML**, **Oracle SQL**, **File management** ou **PDF creator** quand c'est pertinent.
 - C'est le bon choix si tu ne sais pas encore quel agent utiliser.
 
 ### Clickhouse SQL
@@ -611,7 +645,7 @@ RAGnarok supports several workflows, but its **specialist agents** are the most 
 
 - This is the **orchestrator** agent.
 - You can give it a business outcome such as **"analyze sales and export the result to CSV"**.
-- It can delegate to **Clickhouse SQL**, **Data Analyst**, **Feature Engineer**, **Auto-ML**, **Oracle SQL**, **File management**, or **PDF creator** when needed.
+- It can delegate to **Clickhouse SQL**, **Data Analyst**, **Auto-ML**, **Oracle SQL**, **File management**, or **PDF creator** when needed.
 - Use it when you want the app to decide the best path for you.
 
 ### Clickhouse SQL
@@ -679,6 +713,8 @@ export function ChatInterface({
   onWorkflowChange,
   onAgentRoleChange,
   onMcpToolIdChange,
+  selectedCustomAgentId,
+  onSelectedCustomAgentIdChange,
   onConfigChange,
   isDark,
   onToggleDark,
@@ -707,7 +743,6 @@ export function ChatInterface({
   const lastAssistantMessageRef = useRef<HTMLDivElement>(null);
   const zoomControlRef = useRef<HTMLDivElement>(null);
   const agentIntroBootstrapRef = useRef<string | null>(null);
-  const featureEngineerGuideAutoOpenRef = useRef(false);
   const autoMlGuideAutoOpenRef = useRef(false);
   const toolsIslandRef = useRef<HTMLDivElement>(null);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
@@ -717,12 +752,16 @@ export function ChatInterface({
   const managerAgentState = normalizeManagerAgentState((currentConversation?.agentState as any)?.manager);
   const clickhouseAgentState = currentConversation?.agentState?.clickhouse;
   const dataAnalystAgentState = normalizeDataAnalystAgentState((currentConversation?.agentState as any)?.dataAnalyst);
-  const featureEngineerAgentState = normalizeFeatureEngineerAgentState((currentConversation?.agentState as any)?.featureEngineer);
   const autoMlAgentState = normalizeAutoMlAgentState((currentConversation?.agentState as any)?.autoMl);
+  const dataCleanerAgentState = normalizeDataCleanerAgentState((currentConversation?.agentState as any)?.dataCleaner);
+  const anonymizerAgentState = normalizeAnonymizerAgentState((currentConversation?.agentState as any)?.anonymizer);
+  const customAgentState = normalizeCustomAgentRuntimeState((currentConversation?.agentState as any)?.customAgent);
   const planningAgentState = normalizePlanningAgentState((currentConversation?.agentState as any)?.planning, browserTimeZone);
   const fileManagerAgentState = normalizeFileManagerAgentState((currentConversation?.agentState as any)?.fileManager);
   const pdfCreatorAgentState = normalizePdfCreatorAgentState((currentConversation?.agentState as any)?.pdfCreator);
   const oracleAnalystAgentState = normalizeOracleAnalystAgentState((currentConversation?.agentState as any)?.oracleAnalyst);
+  const enabledCustomAgents = (config.customAgents ?? []).filter((agent) => agent.enabled && agent.status === 'ready');
+  const selectedCustomAgent = enabledCustomAgents.find((agent) => agent.id === selectedCustomAgentId) ?? null;
   const fallbackMessages = currentConversation?.messages || [
     {
       id: "1",
@@ -737,7 +776,7 @@ export function ChatInterface({
   ];
   const pendingAgentIntro =
     !currentConversation && workflow === 'AGENT'
-      ? createAgentIntroMessage(agentRole)
+      ? createAgentIntroMessage(agentRole, config, selectedCustomAgentId)
       : null;
   const messages = pendingAgentIntro && !hasAgentIntroMessage(fallbackMessages, agentRole)
     ? [...fallbackMessages, pendingAgentIntro]
@@ -785,28 +824,24 @@ export function ChatInterface({
   const [isToolsIslandOpen, setIsToolsIslandOpen] = useState(false);
   const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
   const [isMcpMenuExpanded, setIsMcpMenuExpanded] = useState(workflow === 'MCP');
-  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'feature_engineer' || agentRole === 'auto_ml' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
+  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
-  const [isFeatureEngineerGuideOpen, setIsFeatureEngineerGuideOpen] = useState(false);
   const [isAutoMlGuideOpen, setIsAutoMlGuideOpen] = useState(false);
   const [isGuideMetadataLoading, setIsGuideMetadataLoading] = useState(false);
   const [guideFormError, setGuideFormError] = useState<string | null>(null);
-  const [featureEngineerGuideForm, setFeatureEngineerGuideForm] = useState<FeatureEngineerGuideForm>({
-    table: featureEngineerAgentState.selectedTable ?? "",
-    goal: "",
-    notes: "",
-  });
   const [autoMlGuideForm, setAutoMlGuideForm] = useState<AutoMlGuideForm>({
     table: autoMlAgentState.selectedTable ?? "",
     targetColumn: autoMlAgentState.targetColumn ?? "",
+    rowFilter: autoMlAgentState.rowFilter ?? "",
+    sampleRowLimit: autoMlAgentState.sampleRowLimit ?? 1000,
     goal: "",
     notes: "",
   });
-  const [featureEngineerGuideTables, setFeatureEngineerGuideTables] = useState<string[]>(featureEngineerAgentState.availableTables);
-  const [featureEngineerGuideSchema, setFeatureEngineerGuideSchema] = useState<GuideSchemaColumn[]>(featureEngineerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
   const [autoMlGuideTables, setAutoMlGuideTables] = useState<string[]>(autoMlAgentState.availableTables);
   const [autoMlGuideSchema, setAutoMlGuideSchema] = useState<GuideSchemaColumn[]>(autoMlAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const })));
   const [autoMlTargetCandidates, setAutoMlTargetCandidates] = useState<string[]>([]);
+  const [isAutoMlFilterSuggestionLoading, setIsAutoMlFilterSuggestionLoading] = useState(false);
+  const [autoMlFilterSuggestion, setAutoMlFilterSuggestion] = useState<AutoMlFilterSuggestion | null>(null);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const persistedPlanningDraftKey = JSON.stringify((currentConversation?.agentState as any)?.planning?.draft ?? null);
 
@@ -823,7 +858,6 @@ export function ChatInterface({
     activeRequestControllerRef.current?.abort();
     activeRequestControllerRef.current = null;
     agentIntroBootstrapRef.current = null;
-    featureEngineerGuideAutoOpenRef.current = false;
     autoMlGuideAutoOpenRef.current = false;
     onCurrentIdChange(null);
     setInput("");
@@ -833,7 +867,6 @@ export function ChatInterface({
     setIsPlanningModalOpen(false);
     setIsPlanningMonitorOpen(false);
     setIsFileManagerConfigOpen(false);
-    setIsFeatureEngineerGuideOpen(false);
     setIsAutoMlGuideOpen(false);
     setGuideFormError(null);
     setIsConsoleOpen(false);
@@ -886,8 +919,11 @@ export function ChatInterface({
     onWorkflowChange(nextWorkflow);
   };
 
-  const handleAgentRoleSelection = (nextRole: AgentRole) => {
+  const handleAgentRoleSelection = (nextRole: AgentRole, nextCustomAgentId?: string) => {
     if (workflow === 'AGENT' && agentRole === nextRole) {
+      if (nextRole === 'custom_agent' && nextCustomAgentId && selectedCustomAgentId !== nextCustomAgentId) {
+        onSelectedCustomAgentIdChange(nextCustomAgentId);
+      }
       setIsToolsIslandOpen(true);
       setIsAgentMenuExpanded(true);
       setIsOtherAgentsOpen(nextRole !== 'manager');
@@ -898,6 +934,9 @@ export function ChatInterface({
     setIsAgentMenuExpanded(true);
     setIsMcpMenuExpanded(false);
     setIsOtherAgentsOpen(nextRole !== 'manager');
+    if (nextRole === 'custom_agent') {
+      onSelectedCustomAgentIdChange(nextCustomAgentId || enabledCustomAgents[0]?.id || '');
+    }
     onAgentRoleChange(nextRole);
   };
 
@@ -1117,24 +1156,6 @@ export function ChatInterface({
     return normalizeGuideMetadata(await response.json());
   };
 
-  const loadFeatureEngineerGuideMetadata = async (nextTable?: string) => {
-    setIsGuideMetadataLoading(true);
-    setGuideFormError(null);
-    try {
-      const metadata = await fetchClickHouseGuideMetadata(nextTable);
-      setFeatureEngineerGuideTables(metadata.availableTables);
-      setFeatureEngineerGuideSchema(metadata.schema);
-      setFeatureEngineerGuideForm((prev) => ({
-        ...prev,
-        table: nextTable?.trim() ?? prev.table,
-      }));
-    } catch (error) {
-      setGuideFormError(error instanceof Error ? error.message : 'Unable to load ClickHouse metadata.');
-    } finally {
-      setIsGuideMetadataLoading(false);
-    }
-  };
-
   const loadAutoMlGuideMetadata = async (nextTable?: string) => {
     setIsGuideMetadataLoading(true);
     setGuideFormError(null);
@@ -1158,15 +1179,76 @@ export function ChatInterface({
     }
   };
 
-  const openFeatureEngineerGuide = async () => {
-    setIsFeatureEngineerGuideOpen(true);
-    setIsAutoMlGuideOpen(false);
-    await loadFeatureEngineerGuideMetadata(featureEngineerGuideForm.table || featureEngineerAgentState.selectedTable || undefined);
+  const suggestAutoMlRowFilter = async () => {
+    if (!autoMlGuideForm.table.trim()) {
+      setGuideFormError('Choose a ClickHouse table before asking the AI to suggest a row filter.');
+      return;
+    }
+
+    setGuideFormError(null);
+    setIsAutoMlFilterSuggestionLoading(true);
+    try {
+      const response = await fetch('/api/auto-ml/filter-suggestion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          table: autoMlGuideForm.table.trim(),
+          target_column: autoMlGuideForm.targetColumn.trim() || undefined,
+          goal: autoMlGuideForm.goal.trim(),
+          notes: autoMlGuideForm.notes.trim(),
+          schema_info: autoMlGuideSchema.map((column) => ({
+            name: column.name,
+            type: column.type,
+            category: column.category,
+          })),
+          clickhouse: {
+            host: config.clickhouseHost,
+            port: config.clickhousePort,
+            database: config.clickhouseDatabase,
+            username: config.clickhouseUsername,
+            password: config.clickhousePassword,
+            secure: config.clickhouseSecure,
+            verify_ssl: config.disableSslVerification ? false : (config.clickhouseVerifySsl ?? true),
+            http_path: config.clickhouseHttpPath,
+            query_limit: config.clickhouseQueryLimit,
+          },
+          llm_base_url: config.baseUrl,
+          llm_model: config.model,
+          llm_api_key: config.apiKey || undefined,
+          llm_provider: config.provider,
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Auto-ML filter suggestion error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const suggestion = {
+        whereClause: String(data.where_clause ?? data.whereClause ?? '').trim(),
+        rationale: String(data.rationale ?? '').trim(),
+      };
+      setAutoMlFilterSuggestion(suggestion);
+      if (suggestion.whereClause) {
+        setAutoMlGuideForm((prev) => ({
+          ...prev,
+          rowFilter: suggestion.whereClause,
+        }));
+      }
+      if (!suggestion.whereClause) {
+        setGuideFormError('The local AI could not infer a safe row filter from the current objective. You can still type one manually.');
+      }
+    } catch (error) {
+      setGuideFormError(error instanceof Error ? error.message : 'Unable to generate a row filter suggestion.');
+    } finally {
+      setIsAutoMlFilterSuggestionLoading(false);
+    }
   };
 
   const openAutoMlGuide = async () => {
+    setAutoMlFilterSuggestion(null);
     setIsAutoMlGuideOpen(true);
-    setIsFeatureEngineerGuideOpen(false);
     await loadAutoMlGuideMetadata(autoMlGuideForm.table || autoMlAgentState.selectedTable || undefined);
   };
 
@@ -1177,25 +1259,13 @@ export function ChatInterface({
   }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen]);
 
   useEffect(() => {
-    if (isFeatureEngineerGuideOpen) return;
-    setFeatureEngineerGuideForm((prev) => ({
-      ...prev,
-      table: featureEngineerAgentState.selectedTable ?? prev.table ?? "",
-    }));
-    setFeatureEngineerGuideTables(featureEngineerAgentState.availableTables);
-    if (featureEngineerAgentState.schemaInfo.length > 0) {
-      setFeatureEngineerGuideSchema(
-        featureEngineerAgentState.schemaInfo.map((column) => ({ ...column, category: "other" as const }))
-      );
-    }
-  }, [featureEngineerAgentState, isFeatureEngineerGuideOpen]);
-
-  useEffect(() => {
     if (isAutoMlGuideOpen) return;
     setAutoMlGuideForm((prev) => ({
       ...prev,
       table: autoMlAgentState.selectedTable ?? prev.table ?? "",
       targetColumn: autoMlAgentState.targetColumn ?? prev.targetColumn ?? "",
+      rowFilter: autoMlAgentState.rowFilter ?? prev.rowFilter ?? "",
+      sampleRowLimit: autoMlAgentState.sampleRowLimit ?? prev.sampleRowLimit ?? 1000,
     }));
     setAutoMlGuideTables(autoMlAgentState.availableTables);
     if (autoMlAgentState.schemaInfo.length > 0) {
@@ -1206,24 +1276,10 @@ export function ChatInterface({
   }, [autoMlAgentState, isAutoMlGuideOpen]);
 
   useEffect(() => {
-    if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'feature_engineer' || agentRole === 'auto_ml' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst')) {
+    if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst')) {
       setIsOtherAgentsOpen(true);
     }
   }, [workflow, agentRole, isAgentMenuExpanded]);
-
-  useEffect(() => {
-    if (workflow === 'AGENT' && agentRole === 'feature_engineer' && !isLoading) {
-      if (!featureEngineerGuideAutoOpenRef.current && !hasMeaningfulConversationMessages(currentConversation?.messages ?? [])) {
-        featureEngineerGuideAutoOpenRef.current = true;
-        void openFeatureEngineerGuide();
-      }
-      return;
-    }
-    featureEngineerGuideAutoOpenRef.current = false;
-    if (agentRole !== 'feature_engineer') {
-      setIsFeatureEngineerGuideOpen(false);
-    }
-  }, [workflow, agentRole, isLoading, currentConversation]);
 
   useEffect(() => {
     if (workflow === 'AGENT' && agentRole === 'auto_ml' && !isLoading) {
@@ -1254,7 +1310,7 @@ export function ChatInterface({
 
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
-    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'feature_engineer' && agentRole !== 'auto_ml' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst') return;
+    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'auto_ml' && agentRole !== 'data_cleaner' && agentRole !== 'anonymizer' && agentRole !== 'custom_agent' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst') return;
     if (hasMeaningfulConversationMessages(currentConversation.messages)) return;
     if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
 
@@ -1262,7 +1318,7 @@ export function ChatInterface({
     if (agentIntroBootstrapRef.current === bootstrapKey) return;
     agentIntroBootstrapRef.current = bootstrapKey;
 
-    const introMessage = createAgentIntroMessage(agentRole);
+    const introMessage = createAgentIntroMessage(agentRole, config, selectedCustomAgentId);
     if (!introMessage) return;
 
     onConversationsChange((prev) =>
@@ -1589,24 +1645,6 @@ export function ChatInterface({
     setIsLoading(false);
   };
 
-  const launchFeatureEngineerGuide = async () => {
-    if (!featureEngineerGuideForm.table.trim()) {
-      setGuideFormError('Choose a ClickHouse table before launching Feature Engineer.');
-      return;
-    }
-    setGuideFormError(null);
-    setIsFeatureEngineerGuideOpen(false);
-    const prompt = [
-      `Generate predictive feature ideas for the ClickHouse table \`${featureEngineerGuideForm.table.trim()}\`.`,
-      featureEngineerGuideForm.goal.trim() ? `Business objective: ${featureEngineerGuideForm.goal.trim()}` : "",
-      featureEngineerGuideForm.notes.trim() ? `Additional guidance: ${featureEngineerGuideForm.notes.trim()}` : "",
-      "Return the best engineered variables, explain why they matter, and include reusable SQL expressions.",
-    ]
-      .filter(Boolean)
-      .join("\n");
-    await handleSend(prompt);
-  };
-
   const launchAutoMlGuide = async () => {
     if (!autoMlGuideForm.table.trim()) {
       setGuideFormError('Choose a ClickHouse table before launching Auto-ML.');
@@ -1616,11 +1654,14 @@ export function ChatInterface({
       setGuideFormError('Choose the prediction target column before launching Auto-ML.');
       return;
     }
+    const normalizedSampleRowLimit = Math.max(100, Math.min(10000, Number(autoMlGuideForm.sampleRowLimit) || 1000));
     setGuideFormError(null);
     setIsAutoMlGuideOpen(false);
     const prompt = [
       `Benchmark machine-learning models on the ClickHouse table \`${autoMlGuideForm.table.trim()}\`.`,
       `Use \`${autoMlGuideForm.targetColumn.trim()}\` as the prediction target.`,
+      autoMlGuideForm.rowFilter.trim() ? `Apply this row filter: ${autoMlGuideForm.rowFilter.trim()}` : "",
+      `Use up to ${normalizedSampleRowLimit} rows for the benchmark sample.`,
       autoMlGuideForm.goal.trim() ? `Business objective: ${autoMlGuideForm.goal.trim()}` : "",
       autoMlGuideForm.notes.trim() ? `Additional guidance: ${autoMlGuideForm.notes.trim()}` : "",
       "Compare several baseline models and return a practical recommendation with a comparison table.",
@@ -1745,8 +1786,10 @@ export function ChatInterface({
       let nextManagerAgentState = managerAgentState;
       let nextClickhouseAgentState = clickhouseAgentState;
       let nextDataAnalystAgentState = dataAnalystAgentState;
-      let nextFeatureEngineerAgentState = featureEngineerAgentState;
       let nextAutoMlAgentState = autoMlAgentState;
+      let nextDataCleanerAgentState = dataCleanerAgentState;
+      let nextAnonymizerAgentState = anonymizerAgentState;
+      let nextCustomAgentState = customAgentState;
       let nextPlanningAgentState = planningAgentState;
       let nextFileManagerAgentState = fileManagerAgentState;
       let nextPdfCreatorAgentState = pdfCreatorAgentState;
@@ -1774,18 +1817,6 @@ export function ChatInterface({
           score: hit.score,
         })),
       };
-      const serializedFeatureEngineerState = {
-        stage: featureEngineerAgentState.stage,
-        pending_request: featureEngineerAgentState.pendingRequest,
-        available_tables: featureEngineerAgentState.availableTables,
-        selected_table: featureEngineerAgentState.selectedTable,
-        schema_info: featureEngineerAgentState.schemaInfo,
-        clarification_prompt: featureEngineerAgentState.clarificationPrompt,
-        clarification_options: featureEngineerAgentState.clarificationOptions,
-        feature_ideas: featureEngineerAgentState.featureIdeas,
-        final_answer: featureEngineerAgentState.finalAnswer,
-        last_error: featureEngineerAgentState.lastError,
-      };
       const serializedAutoMlState = {
         stage: autoMlAgentState.stage,
         pending_request: autoMlAgentState.pendingRequest,
@@ -1793,6 +1824,8 @@ export function ChatInterface({
         selected_table: autoMlAgentState.selectedTable,
         schema_info: autoMlAgentState.schemaInfo,
         target_column: autoMlAgentState.targetColumn,
+        row_filter: autoMlAgentState.rowFilter,
+        sample_row_limit: autoMlAgentState.sampleRowLimit,
         feature_columns: autoMlAgentState.featureColumns,
         clarification_prompt: autoMlAgentState.clarificationPrompt,
         clarification_options: autoMlAgentState.clarificationOptions,
@@ -1801,6 +1834,37 @@ export function ChatInterface({
         recommended_model: autoMlAgentState.recommendedModel,
         final_answer: autoMlAgentState.finalAnswer,
         last_error: autoMlAgentState.lastError,
+      };
+      const serializedDataCleanerState = {
+        stage: dataCleanerAgentState.stage,
+        pending_request: dataCleanerAgentState.pendingRequest,
+        available_tables: dataCleanerAgentState.availableTables,
+        selected_table: dataCleanerAgentState.selectedTable,
+        schema_info: dataCleanerAgentState.schemaInfo,
+        clarification_prompt: dataCleanerAgentState.clarificationPrompt,
+        clarification_options: dataCleanerAgentState.clarificationOptions,
+        findings: dataCleanerAgentState.findings,
+        correction_scripts: dataCleanerAgentState.correctionScripts,
+        final_answer: dataCleanerAgentState.finalAnswer,
+        last_error: dataCleanerAgentState.lastError,
+      };
+      const serializedAnonymizerState = {
+        stage: anonymizerAgentState.stage,
+        pending_request: anonymizerAgentState.pendingRequest,
+        available_tables: anonymizerAgentState.availableTables,
+        selected_table: anonymizerAgentState.selectedTable,
+        schema_info: anonymizerAgentState.schemaInfo,
+        clarification_prompt: anonymizerAgentState.clarificationPrompt,
+        clarification_options: anonymizerAgentState.clarificationOptions,
+        pii_findings: anonymizerAgentState.piiFindings,
+        masking_scripts: anonymizerAgentState.maskingScripts,
+        final_answer: anonymizerAgentState.finalAnswer,
+        last_error: anonymizerAgentState.lastError,
+      };
+      const serializedCustomAgentState = {
+        selected_agent_id: customAgentState.selectedAgentId,
+        final_answer: customAgentState.finalAnswer,
+        last_error: customAgentState.lastError,
       };
 
       // Route the request based on the selected workflow
@@ -1963,8 +2027,22 @@ export function ChatInterface({
             manager_state: managerAgentState ?? undefined,
             clickhouse_state: clickhouseAgentState ?? undefined,
             data_analyst_state: serializedDataAnalystState,
-            feature_engineer_state: serializedFeatureEngineerState,
             auto_ml_state: serializedAutoMlState,
+            data_cleaner_state: serializedDataCleanerState,
+            anonymizer_state: serializedAnonymizerState,
+            custom_agent_state: serializedCustomAgentState,
+            custom_agents: (config.customAgents ?? []).map((agent) => ({
+              id: agent.id,
+              title: agent.title,
+              description: agent.description,
+              python_code: agent.pythonCode,
+              system_prompt: agent.systemPrompt,
+              manager_routing_hint: agent.managerRoutingHint,
+              status: agent.status,
+              status_message: agent.statusMessage,
+              enabled: agent.enabled,
+              badge_color: agent.badgeColor,
+            })),
             file_manager_state: fileManagerAgentState ?? undefined,
             pdf_creator_state: pdfCreatorAgentState ?? undefined,
             oracle_analyst_state: oracleAnalystAgentState ?? undefined,
@@ -2022,8 +2100,10 @@ export function ChatInterface({
         nextManagerAgentState = normalizeManagerAgentState((data.agent_state as any)?.manager);
         nextClickhouseAgentState = (data.agent_state as any)?.clickhouse ?? nextClickhouseAgentState;
         nextDataAnalystAgentState = normalizeDataAnalystAgentState((data.agent_state as any)?.dataAnalyst);
-        nextFeatureEngineerAgentState = normalizeFeatureEngineerAgentState((data.agent_state as any)?.featureEngineer);
         nextAutoMlAgentState = normalizeAutoMlAgentState((data.agent_state as any)?.autoMl);
+        nextDataCleanerAgentState = normalizeDataCleanerAgentState((data.agent_state as any)?.dataCleaner);
+        nextAnonymizerAgentState = normalizeAnonymizerAgentState((data.agent_state as any)?.anonymizer);
+        nextCustomAgentState = normalizeCustomAgentRuntimeState((data.agent_state as any)?.customAgent);
         nextFileManagerAgentState = normalizeFileManagerAgentState((data.agent_state as any)?.fileManager);
         nextPdfCreatorAgentState = normalizePdfCreatorAgentState((data.agent_state as any)?.pdfCreator);
         nextOracleAnalystAgentState = normalizeOracleAnalystAgentState((data.agent_state as any)?.oracleAnalyst);
@@ -2050,8 +2130,10 @@ export function ChatInterface({
               manager: nextManagerAgentState,
               clickhouse: nextClickhouseAgentState,
               dataAnalyst: nextDataAnalystAgentState,
-              featureEngineer: nextFeatureEngineerAgentState,
               autoMl: nextAutoMlAgentState,
+              dataCleaner: nextDataCleanerAgentState,
+              anonymizer: nextAnonymizerAgentState,
+              customAgent: nextCustomAgentState,
               fileManager: nextFileManagerAgentState,
               pdfCreator: nextPdfCreatorAgentState,
               oracleAnalyst: nextOracleAnalystAgentState,
@@ -2129,70 +2211,6 @@ export function ChatInterface({
         });
         setIsLoading(false);
         return;
-      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'feature_engineer') {
-        const response = await fetch('/api/chat/feature-engineer-agent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            message: text,
-            history: memoryHistory,
-            agent_state: serializedFeatureEngineerState,
-            clickhouse: {
-              host: config.clickhouseHost,
-              port: config.clickhousePort,
-              database: config.clickhouseDatabase,
-              username: config.clickhouseUsername,
-              password: config.clickhousePassword,
-              secure: config.clickhouseSecure,
-              verify_ssl: effectiveClickhouseVerifySsl,
-              http_path: config.clickhouseHttpPath,
-              query_limit: config.clickhouseQueryLimit,
-            },
-            llm_base_url: config.baseUrl,
-            llm_model: config.model,
-            llm_api_key: config.apiKey || undefined,
-            llm_provider: config.provider,
-            disable_ssl_verification: disableSslVerification,
-          }),
-        });
-
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}));
-          throw new Error(err.detail || `Feature Engineer Agent error: ${response.status}`);
-        }
-
-        const data = await response.json();
-        reply = data.answer;
-        nextFeatureEngineerAgentState = normalizeFeatureEngineerAgentState(data.agent_state);
-        setIsConnected(true);
-
-        const assistantFeatureEngineerMsg: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: reply,
-          timestamp: Date.now(),
-          steps: data.steps,
-        };
-
-        onConversationsChange(prev => {
-          const idx = prev.findIndex(c => c.id === activeConvId);
-          if (idx === -1) return prev;
-          const updated = [...prev];
-          updated[idx] = {
-            ...updated[idx],
-            agentState: {
-              ...(updated[idx].agentState ?? {}),
-              featureEngineer: nextFeatureEngineerAgentState,
-            },
-            messages: [...updated[idx].messages, assistantFeatureEngineerMsg],
-            memory: buildConversationMemory([...updated[idx].messages, assistantFeatureEngineerMsg]),
-            updatedAt: Date.now(),
-          };
-          return updated;
-        });
-        setIsLoading(false);
-        return;
       } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'auto_ml') {
         const response = await fetch('/api/chat/auto-ml-agent', {
           method: 'POST',
@@ -2251,6 +2269,202 @@ export function ChatInterface({
             },
             messages: [...updated[idx].messages, assistantAutoMlMsg],
             memory: buildConversationMemory([...updated[idx].messages, assistantAutoMlMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'custom_agent') {
+        if (!selectedCustomAgent) {
+          throw new Error('No enabled custom agent is selected.');
+        }
+        const response = await fetch('/api/chat/custom-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: serializedCustomAgentState,
+            custom_agent: {
+              id: selectedCustomAgent.id,
+              title: selectedCustomAgent.title,
+              description: selectedCustomAgent.description,
+              python_code: selectedCustomAgent.pythonCode,
+              system_prompt: selectedCustomAgent.systemPrompt,
+              manager_routing_hint: selectedCustomAgent.managerRoutingHint,
+              status: selectedCustomAgent.status,
+              status_message: selectedCustomAgent.statusMessage,
+              enabled: selectedCustomAgent.enabled,
+              badge_color: selectedCustomAgent.badgeColor,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Custom Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextCustomAgentState = normalizeCustomAgentRuntimeState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantCustomMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              customAgent: nextCustomAgentState,
+            },
+            messages: [...updated[idx].messages, assistantCustomMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantCustomMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'data_cleaner') {
+        const response = await fetch('/api/chat/data-cleaner-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: serializedDataCleanerState,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: effectiveClickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Data Cleaner Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextDataCleanerAgentState = normalizeDataCleanerAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantCleanerMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              dataCleaner: nextDataCleanerAgentState,
+            },
+            messages: [...updated[idx].messages, assistantCleanerMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantCleanerMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'anonymizer') {
+        const response = await fetch('/api/chat/anonymizer-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: serializedAnonymizerState,
+            clickhouse: {
+              host: config.clickhouseHost,
+              port: config.clickhousePort,
+              database: config.clickhouseDatabase,
+              username: config.clickhouseUsername,
+              password: config.clickhousePassword,
+              secure: config.clickhouseSecure,
+              verify_ssl: effectiveClickhouseVerifySsl,
+              http_path: config.clickhouseHttpPath,
+              query_limit: config.clickhouseQueryLimit,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Anonymizer Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextAnonymizerAgentState = normalizeAnonymizerAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantAnonymizerMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              anonymizer: nextAnonymizerAgentState,
+            },
+            messages: [...updated[idx].messages, assistantAnonymizerMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantAnonymizerMsg]),
             updatedAt: Date.now(),
           };
           return updated;
@@ -2683,10 +2897,14 @@ export function ChatInterface({
         ? "Ask a ClickHouse question or request a chart..."
       : workflow === 'AGENT' && agentRole === 'data_analyst'
         ? "Ask for a deeper multi-step ClickHouse investigation..."
-      : workflow === 'AGENT' && agentRole === 'feature_engineer'
-        ? "Ask for predictive features or engineered variables from a ClickHouse table..."
       : workflow === 'AGENT' && agentRole === 'auto_ml'
         ? "Ask to benchmark ML models on a ClickHouse target..."
+      : workflow === 'AGENT' && agentRole === 'data_cleaner'
+        ? "Ask to audit duplicates, missing values, or inconsistent formats..."
+      : workflow === 'AGENT' && agentRole === 'anonymizer'
+        ? "Ask to scan a table for PII and suggest masking or hashing..."
+      : workflow === 'AGENT' && agentRole === 'custom_agent'
+        ? `Ask ${selectedCustomAgent?.title || 'the custom agent'} to help from its uploaded Python specification...`
       : workflow === 'AGENT' && agentRole === 'file_management'
         ? "Ask to list, read, create, move, edit, or delete files..."
         : workflow === 'AGENT' && agentRole === 'pdf_creator'
@@ -2730,11 +2948,15 @@ export function ChatInterface({
           ? 'Clickhouse SQL'
         : agentRole === 'data_analyst'
           ? 'Data Analyst'
-          : agentRole === 'feature_engineer'
-            ? 'Feature Engineer'
-            : agentRole === 'auto_ml'
+          : agentRole === 'auto_ml'
               ? 'Auto-ML'
-            : agentRole === 'file_management'
+        : agentRole === 'data_cleaner'
+          ? 'Data Cleaner'
+          : agentRole === 'anonymizer'
+            ? 'Anonymizer'
+          : agentRole === 'custom_agent'
+            ? (selectedCustomAgent?.title || 'Custom Agent')
+          : agentRole === 'file_management'
               ? 'File management'
               : agentRole === 'pdf_creator'
                 ? 'PDF creator'
@@ -2776,15 +2998,6 @@ export function ChatInterface({
               eyebrowClass: 'text-violet-700 dark:text-violet-300',
               buttonClass: 'border-violet-400/60 bg-violet-500 text-white shadow-[0_18px_40px_rgba(139,92,246,0.28)] hover:bg-violet-400 dark:border-violet-300/20 dark:bg-violet-500 dark:hover:bg-violet-400',
             }
-          : agentRole === 'feature_engineer'
-            ? {
-                eyebrow: 'Agent',
-                label: 'Feature Engineer',
-                icon: BrainCircuit,
-                iconWrapClass: 'bg-lime-50 text-lime-600 ring-1 ring-lime-200 dark:bg-lime-900/25 dark:text-lime-300 dark:ring-lime-800/70',
-                eyebrowClass: 'text-lime-700 dark:text-lime-300',
-                buttonClass: 'border-lime-400/60 bg-lime-500 text-white shadow-[0_18px_40px_rgba(132,204,22,0.28)] hover:bg-lime-400 dark:border-lime-300/20 dark:bg-lime-500 dark:hover:bg-lime-400',
-              }
             : agentRole === 'auto_ml'
               ? {
                   eyebrow: 'Agent',
@@ -2793,6 +3006,33 @@ export function ChatInterface({
                   iconWrapClass: 'bg-rose-50 text-rose-600 ring-1 ring-rose-200 dark:bg-rose-900/25 dark:text-rose-300 dark:ring-rose-800/70',
                   eyebrowClass: 'text-rose-700 dark:text-rose-300',
                   buttonClass: 'border-rose-400/60 bg-rose-500 text-white shadow-[0_18px_40px_rgba(244,63,94,0.28)] hover:bg-rose-400 dark:border-rose-300/20 dark:bg-rose-500 dark:hover:bg-rose-400',
+                }
+            : agentRole === 'data_cleaner'
+              ? {
+                  eyebrow: 'Agent',
+                  label: 'Data Cleaner',
+                  icon: Check,
+                  iconWrapClass: 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-200 dark:bg-indigo-900/25 dark:text-indigo-300 dark:ring-indigo-800/70',
+                  eyebrowClass: 'text-indigo-700 dark:text-indigo-300',
+                  buttonClass: 'border-indigo-400/60 bg-indigo-500 text-white shadow-[0_18px_40px_rgba(99,102,241,0.28)] hover:bg-indigo-400 dark:border-indigo-300/20 dark:bg-indigo-500 dark:hover:bg-indigo-400',
+                }
+            : agentRole === 'anonymizer'
+              ? {
+                  eyebrow: 'Agent',
+                  label: 'Anonymizer',
+                  icon: Gauge,
+                  iconWrapClass: 'bg-zinc-100 text-zinc-700 ring-1 ring-zinc-200 dark:bg-zinc-800/70 dark:text-zinc-200 dark:ring-zinc-700/70',
+                  eyebrowClass: 'text-zinc-700 dark:text-zinc-300',
+                  buttonClass: 'border-zinc-400/60 bg-zinc-800 text-white shadow-[0_18px_40px_rgba(63,63,70,0.28)] hover:bg-zinc-700 dark:border-zinc-300/20 dark:bg-zinc-800 dark:hover:bg-zinc-700',
+                }
+            : agentRole === 'custom_agent'
+              ? {
+                  eyebrow: 'Agent',
+                  label: selectedCustomAgent?.title || 'Custom Agent',
+                  icon: Bot,
+                  iconWrapClass: 'bg-slate-100 text-slate-700 ring-1 ring-slate-200 dark:bg-slate-800/70 dark:text-slate-200 dark:ring-slate-700/70',
+                  eyebrowClass: 'text-slate-700 dark:text-slate-300',
+                  buttonClass: 'border-slate-400/60 bg-slate-800 text-white shadow-[0_18px_40px_rgba(51,65,85,0.28)] hover:bg-slate-700 dark:border-slate-300/20 dark:bg-slate-800 dark:hover:bg-slate-700',
                 }
           : agentRole === 'file_management'
             ? {
@@ -2916,10 +3156,14 @@ export function ChatInterface({
             ? FolderOpen
             : delegateRole === 'data_analyst'
               ? Cpu
-              : delegateRole === 'feature_engineer'
-                ? BrainCircuit
-                : delegateRole === 'auto_ml'
-                  ? BrainCircuit
+            : delegateRole === 'auto_ml'
+              ? BrainCircuit
+            : delegateRole === 'data_cleaner'
+              ? Check
+            : delegateRole === 'anonymizer'
+              ? Gauge
+            : delegateRole === 'custom_agent'
+              ? Bot
               : delegateRole === 'oracle_analyst'
                 ? Database
                 : delegateRole === 'pdf_creator'
@@ -3223,47 +3467,6 @@ export function ChatInterface({
         };
       }
 
-      if (agentRole === 'feature_engineer') {
-        return {
-          eyebrow: 'Current mission',
-          headline: isLoading
-            ? `Designing predictive features${featureEngineerAgentState.selectedTable ? ` on ${featureEngineerAgentState.selectedTable}` : ''}`
-            : featureEngineerAgentState.selectedTable
-              ? `Feature ideas ready for ${featureEngineerAgentState.selectedTable}`
-              : 'Ready to propose engineered features',
-          detail: featureEngineerAgentState.finalAnswer
-            ? compactMessagePreview(featureEngineerAgentState.finalAnswer, 170)
-            : featureEngineerAgentState.clarificationPrompt
-              ? compactMessagePreview(featureEngineerAgentState.clarificationPrompt, 170)
-              : 'This agent turns a ClickHouse schema into practical engineered variables with reusable SQL expressions.',
-          statusLabel: isLoading ? 'Designing' : featureEngineerAgentState.clarificationOptions.length > 0 ? 'Waiting' : 'Ready',
-          statusToneClass: isLoading
-            ? 'bg-lime-100 text-lime-700 dark:bg-lime-900/30 dark:text-lime-200'
-            : featureEngineerAgentState.clarificationOptions.length > 0
-              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
-              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
-          progressValue: isLoading ? 74 : featureEngineerAgentState.featureIdeas.length > 0 ? 42 : 14,
-          facts: [
-            featureEngineerAgentState.selectedTable ? `Selected table: ${featureEngineerAgentState.selectedTable}.` : 'No table selected yet.',
-            featureEngineerAgentState.schemaInfo.length > 0 ? `Schema in memory: ${pluralize(featureEngineerAgentState.schemaInfo.length, 'column')}.` : 'No schema cached yet.',
-            featureEngineerAgentState.featureIdeas.length > 0 ? `Feature ideas prepared: ${featureEngineerAgentState.featureIdeas.length}.` : 'No engineered features generated yet.',
-          ],
-          nextLabel: 'Next best action',
-          nextValue: featureEngineerAgentState.clarificationOptions.length > 0
-            ? 'Pick the target table in the chat so the feature proposal can continue.'
-            : 'Ask for predictive variables, derived features, or SQL-ready transformations on a ClickHouse table.',
-          metricCards: [
-            {
-              label: 'Feature set',
-              value: featureEngineerAgentState.featureIdeas.length > 0 ? `${pluralize(featureEngineerAgentState.featureIdeas.length, 'idea')}` : 'No ideas yet',
-              helper: featureEngineerAgentState.selectedTable ? `Working table: ${featureEngineerAgentState.selectedTable}.` : 'A table selection will unlock the feature proposal.',
-              toneClass: 'border-lime-200/80 bg-lime-50/80 text-lime-700 dark:border-lime-800/70 dark:bg-lime-950/20 dark:text-lime-200',
-            },
-            defaultMetricCards[1],
-          ],
-        };
-      }
-
       if (agentRole === 'auto_ml') {
         return {
           eyebrow: 'Current mission',
@@ -3300,6 +3503,125 @@ export function ChatInterface({
               value: autoMlAgentState.comparisonRows.length > 0 ? `${pluralize(autoMlAgentState.comparisonRows.length, 'model')}` : 'No results yet',
               helper: autoMlAgentState.recommendedModel ? `Winner: ${autoMlAgentState.recommendedModel}.` : 'The winning model appears here after the benchmark.',
               toneClass: 'border-rose-200/80 bg-rose-50/80 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/20 dark:text-rose-200',
+            },
+            defaultMetricCards[1],
+          ],
+        };
+      }
+
+      if (agentRole === 'data_cleaner') {
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Auditing ${dataCleanerAgentState.selectedTable || 'the selected table'}`
+            : dataCleanerAgentState.selectedTable
+              ? `Quality audit ready for ${dataCleanerAgentState.selectedTable}`
+              : 'Ready to inspect data quality',
+          detail: dataCleanerAgentState.finalAnswer
+            ? compactMessagePreview(dataCleanerAgentState.finalAnswer, 170)
+            : dataCleanerAgentState.clarificationPrompt
+              ? compactMessagePreview(dataCleanerAgentState.clarificationPrompt, 170)
+              : 'This agent inspects duplicates, missing values, and inconsistent formats on ClickHouse data.',
+          statusLabel: isLoading ? 'Auditing' : dataCleanerAgentState.clarificationOptions.length > 0 ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-200'
+            : dataCleanerAgentState.clarificationOptions.length > 0
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 72 : dataCleanerAgentState.findings.length > 0 ? 48 : 12,
+          facts: [
+            dataCleanerAgentState.selectedTable ? `Selected table: ${dataCleanerAgentState.selectedTable}.` : 'No audit table selected yet.',
+            dataCleanerAgentState.findings.length > 0 ? `${pluralize(dataCleanerAgentState.findings.length, 'finding')} captured.` : 'No findings stored yet.',
+            dataCleanerAgentState.correctionScripts.length > 0 ? `${pluralize(dataCleanerAgentState.correctionScripts.length, 'cleanup script')} prepared.` : 'No cleanup script prepared yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: dataCleanerAgentState.clarificationOptions.length > 0
+            ? 'Pick the source table so the cleaner can start its audit.'
+            : 'Ask to check duplicates, null spikes, or mixed formats on one ClickHouse table.',
+          metricCards: [
+            {
+              label: 'Findings',
+              value: dataCleanerAgentState.findings.length > 0 ? pluralize(dataCleanerAgentState.findings.length, 'issue') : 'No issues yet',
+              helper: dataCleanerAgentState.correctionScripts.length > 0 ? `${pluralize(dataCleanerAgentState.correctionScripts.length, 'SQL fix')} prepared.` : 'Suggested remediation SQL will appear here.',
+              toneClass: 'border-indigo-200/80 bg-indigo-50/80 text-indigo-700 dark:border-indigo-800/70 dark:bg-indigo-950/20 dark:text-indigo-200',
+            },
+            defaultMetricCards[1],
+          ],
+        };
+      }
+
+      if (agentRole === 'anonymizer') {
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Scanning ${anonymizerAgentState.selectedTable || 'the selected table'}`
+            : anonymizerAgentState.selectedTable
+              ? `Privacy scan ready for ${anonymizerAgentState.selectedTable}`
+              : 'Ready to scan for PII',
+          detail: anonymizerAgentState.finalAnswer
+            ? compactMessagePreview(anonymizerAgentState.finalAnswer, 170)
+            : anonymizerAgentState.clarificationPrompt
+              ? compactMessagePreview(anonymizerAgentState.clarificationPrompt, 170)
+              : 'This agent flags likely PII fields and recommends masking or hashing strategies for ClickHouse data.',
+          statusLabel: isLoading ? 'Scanning' : anonymizerAgentState.clarificationOptions.length > 0 ? 'Waiting' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-zinc-200 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-100'
+            : anonymizerAgentState.clarificationOptions.length > 0
+              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200'
+              : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 72 : anonymizerAgentState.piiFindings.length > 0 ? 48 : 12,
+          facts: [
+            anonymizerAgentState.selectedTable ? `Selected table: ${anonymizerAgentState.selectedTable}.` : 'No privacy-scan table selected yet.',
+            anonymizerAgentState.piiFindings.length > 0 ? `${pluralize(anonymizerAgentState.piiFindings.length, 'PII signal')} detected.` : 'No PII signal stored yet.',
+            anonymizerAgentState.maskingScripts.length > 0 ? `${pluralize(anonymizerAgentState.maskingScripts.length, 'masking script')} prepared.` : 'No masking script prepared yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: anonymizerAgentState.clarificationOptions.length > 0
+            ? 'Pick the source table so the anonymizer can start its privacy scan.'
+            : 'Ask to scan a table for emails, names, phone numbers, addresses, IPs, or GDPR-sensitive fields.',
+          metricCards: [
+            {
+              label: 'PII findings',
+              value: anonymizerAgentState.piiFindings.length > 0 ? pluralize(anonymizerAgentState.piiFindings.length, 'column') : 'No PII yet',
+              helper: anonymizerAgentState.maskingScripts.length > 0 ? `${pluralize(anonymizerAgentState.maskingScripts.length, 'masking pattern')} prepared.` : 'Suggested hashing or masking SQL will appear here.',
+              toneClass: 'border-zinc-300/80 bg-zinc-100/80 text-zinc-700 dark:border-zinc-700/80 dark:bg-zinc-900/30 dark:text-zinc-200',
+            },
+            defaultMetricCards[1],
+          ],
+        };
+      }
+
+      if (agentRole === 'custom_agent') {
+        return {
+          eyebrow: 'Current mission',
+          headline: isLoading
+            ? `Running ${selectedCustomAgent?.title || 'the custom agent'}`
+            : selectedCustomAgent?.title || 'Ready to run a custom agent',
+          detail: customAgentState.finalAnswer
+            ? compactMessagePreview(customAgentState.finalAnswer, 170)
+            : selectedCustomAgent?.description
+              ? compactMessagePreview(selectedCustomAgent.description, 170)
+              : 'This custom agent follows the Python specification configured in Settings.',
+          statusLabel: isLoading ? 'Running' : 'Ready',
+          statusToneClass: isLoading
+            ? 'bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-100'
+            : 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200',
+          progressValue: isLoading ? 68 : customAgentState.finalAnswer ? 42 : 12,
+          facts: [
+            selectedCustomAgent ? `Selected agent: ${selectedCustomAgent.title}.` : 'No custom agent selected yet.',
+            selectedCustomAgent?.managerRoutingHint ? `Routing hint: ${selectedCustomAgent.managerRoutingHint}.` : 'No manager routing hint configured yet.',
+            customAgentState.lastError ? `Last issue: ${customAgentState.lastError}.` : 'No runtime issue stored yet.',
+          ],
+          nextLabel: 'Next best action',
+          nextValue: selectedCustomAgent
+            ? `Ask ${selectedCustomAgent.title} to work from its uploaded Python behavior contract.`
+            : 'Select an enabled custom agent from Tools first.',
+          metricCards: [
+            {
+              label: 'Runtime',
+              value: selectedCustomAgent ? (selectedCustomAgent.status === 'ready' ? 'Ready' : selectedCustomAgent.status) : 'Unavailable',
+              helper: selectedCustomAgent?.statusMessage || 'The generated custom-agent profile status appears here.',
+              toneClass: 'border-slate-200/80 bg-slate-50/80 text-slate-700 dark:border-slate-700/70 dark:bg-slate-950/20 dark:text-slate-200',
             },
             defaultMetricCards[1],
           ],
@@ -3612,7 +3934,6 @@ export function ChatInterface({
     managerAgentState,
     clickhouseAgentState,
     dataAnalystAgentState,
-    featureEngineerAgentState,
     autoMlAgentState,
     fileManagerAgentState,
     pdfCreatorAgentState,
@@ -4130,16 +4451,22 @@ export function ChatInterface({
                           <Cpu className="h-3.5 w-3.5" /> Data Analyst
                         </button>
                         <button
-                          onClick={() => handleAgentRoleSelection('feature_engineer')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'feature_engineer' ? 'bg-lime-500 text-white shadow-md shadow-lime-500/20' : 'bg-white/85 text-gray-700 border border-lime-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-lime-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <BrainCircuit className="h-3.5 w-3.5" /> Feature Engineer
-                        </button>
-                        <button
                           onClick={() => handleAgentRoleSelection('auto_ml')}
                           className={`${toolsSecondaryButtonBase} ${agentRole === 'auto_ml' ? 'bg-rose-500 text-white shadow-md shadow-rose-500/20' : 'bg-white/85 text-gray-700 border border-rose-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-rose-800/70 dark:hover:bg-white/10'}`}
                         >
                           <BrainCircuit className="h-3.5 w-3.5" /> Auto-ML
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('data_cleaner')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'data_cleaner' ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/20' : 'bg-white/85 text-gray-700 border border-indigo-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-indigo-800/70 dark:hover:bg-white/10'}`}
+                        >
+                          <Check className="h-3.5 w-3.5" /> Data Cleaner
+                        </button>
+                        <button
+                          onClick={() => handleAgentRoleSelection('anonymizer')}
+                          className={`${toolsSecondaryButtonBase} ${agentRole === 'anonymizer' ? 'bg-zinc-800 text-white shadow-md shadow-zinc-800/20' : 'bg-white/85 text-gray-700 border border-zinc-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-zinc-700 dark:hover:bg-white/10'}`}
+                        >
+                          <Gauge className="h-3.5 w-3.5" /> Anonymizer
                         </button>
                         <button
                           onClick={() => handleAgentRoleSelection('file_management')}
@@ -4161,6 +4488,15 @@ export function ChatInterface({
                         >
                           <Database className="h-3.5 w-3.5" /> Oracle SQL
                         </button>
+                        {enabledCustomAgents.map((agent) => (
+                          <button
+                            key={agent.id}
+                            onClick={() => handleAgentRoleSelection('custom_agent', agent.id)}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'custom_agent' && selectedCustomAgentId === agent.id ? 'bg-slate-800 text-white shadow-md shadow-slate-800/20' : 'bg-white/85 text-gray-700 border border-slate-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-slate-700 dark:hover:bg-white/10'}`}
+                          >
+                            <Bot className="h-3.5 w-3.5" /> {agent.title}
+                          </button>
+                        ))}
                       </div>
                     </div>
                   </div>
@@ -4174,19 +4510,6 @@ export function ChatInterface({
                       >
                         <Settings className="h-3.5 w-3.5" />
                         Configure
-                      </button>
-                    </div>
-                  )}
-
-                  {agentRole === 'feature_engineer' && (
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => void openFeatureEngineerGuide()}
-                        className="inline-flex items-center justify-center gap-1.5 rounded-full bg-lime-500 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-lime-400"
-                      >
-                        <Sparkles className="h-3.5 w-3.5" />
-                        Open guide
                       </button>
                     </div>
                   )}
@@ -4267,10 +4590,10 @@ export function ChatInterface({
                   Agent state
                 </div>
                 <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  Transparent execution view
+                  Current operating picture
                 </div>
                 <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Live activity, cognitive load indicators, execution trace depth, and confidence.
+                  Live execution status, recent route, and answer confidence in one compact view.
                 </div>
               </div>
               <button
@@ -4319,25 +4642,23 @@ export function ChatInterface({
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-[1.35rem] border border-white/70 bg-white/80 p-3 shadow-sm dark:border-white/10 dark:bg-white/5">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
-                    Trace depth
-                  </div>
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">Latest run</div>
                   <div className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
                     {latestTraceSteps.length}
                   </div>
                   <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    step{latestTraceSteps.length > 1 ? 's' : ''} in the latest execution trace
+                    recorded step{latestTraceSteps.length > 1 ? 's' : ''} in the latest completed execution
                   </div>
                 </div>
                 <div className={`rounded-[1.35rem] border p-3 shadow-sm ${confidenceBadge.tone}`}>
                   <div className="text-[10px] font-semibold uppercase tracking-[0.16em] opacity-75">
-                    {confidenceBadge.label}
+                    Answer confidence
                   </div>
                   <div className="mt-1 text-xl font-semibold">
                     {confidenceBadge.value}
                   </div>
                   <div className="mt-1 text-xs opacity-75">
-                    Based on explicit score when available, otherwise inferred from execution quality.
+                    Uses explicit scoring when available, otherwise a lightweight execution-quality estimate.
                   </div>
                 </div>
               </div>
@@ -4752,59 +5073,48 @@ export function ChatInterface({
         }}
       />
       <AgentGuideModal
-        isOpen={isFeatureEngineerGuideOpen}
-        mode="feature_engineer"
-        isBusy={isLoading}
-        isLoadingMetadata={isGuideMetadataLoading}
-        error={guideFormError}
-        tables={featureEngineerGuideTables}
-        schema={featureEngineerGuideSchema}
-        selectedTable={featureEngineerGuideForm.table}
-        goalText={featureEngineerGuideForm.goal}
-        notesText={featureEngineerGuideForm.notes}
-        onClose={() => setIsFeatureEngineerGuideOpen(false)}
-        onRefreshMetadata={() => void loadFeatureEngineerGuideMetadata(featureEngineerGuideForm.table || undefined)}
-        onTableChange={(table) => {
-          setFeatureEngineerGuideForm((prev) => ({ ...prev, table }));
-          void loadFeatureEngineerGuideMetadata(table);
-        }}
-        onGoalTextChange={(value) => {
-          setFeatureEngineerGuideForm((prev) => ({ ...prev, goal: value }));
-        }}
-        onNotesTextChange={(value) => {
-          setFeatureEngineerGuideForm((prev) => ({ ...prev, notes: value }));
-        }}
-        onSubmit={() => void launchFeatureEngineerGuide()}
-        onStop={stopCurrentExecution}
-      />
-      <AgentGuideModal
         isOpen={isAutoMlGuideOpen}
-        mode="auto_ml"
         isBusy={isLoading}
         isLoadingMetadata={isGuideMetadataLoading}
+        isSuggestingRowFilter={isAutoMlFilterSuggestionLoading}
         error={guideFormError}
         tables={autoMlGuideTables}
         schema={autoMlGuideSchema}
         selectedTable={autoMlGuideForm.table}
         targetColumn={autoMlGuideForm.targetColumn}
         targetCandidates={autoMlTargetCandidates}
+        rowFilter={autoMlGuideForm.rowFilter}
+        sampleRowLimit={autoMlGuideForm.sampleRowLimit}
+        filterSuggestionRationale={autoMlFilterSuggestion?.rationale ?? ""}
         goalText={autoMlGuideForm.goal}
         notesText={autoMlGuideForm.notes}
         onClose={() => setIsAutoMlGuideOpen(false)}
         onRefreshMetadata={() => void loadAutoMlGuideMetadata(autoMlGuideForm.table || undefined)}
         onTableChange={(table) => {
+          setAutoMlFilterSuggestion(null);
           setAutoMlGuideForm((prev) => ({ ...prev, table, targetColumn: '' }));
           void loadAutoMlGuideMetadata(table);
         }}
         onTargetColumnChange={(value) => {
+          setAutoMlFilterSuggestion(null);
           setAutoMlGuideForm((prev) => ({ ...prev, targetColumn: value }));
         }}
+        onRowFilterChange={(value) => {
+          setAutoMlFilterSuggestion(null);
+          setAutoMlGuideForm((prev) => ({ ...prev, rowFilter: value }));
+        }}
+        onSampleRowLimitChange={(value) => {
+          setAutoMlGuideForm((prev) => ({ ...prev, sampleRowLimit: value }));
+        }}
         onGoalTextChange={(value) => {
+          setAutoMlFilterSuggestion(null);
           setAutoMlGuideForm((prev) => ({ ...prev, goal: value }));
         }}
         onNotesTextChange={(value) => {
+          setAutoMlFilterSuggestion(null);
           setAutoMlGuideForm((prev) => ({ ...prev, notes: value }));
         }}
+        onSuggestRowFilter={() => void suggestAutoMlRowFilter()}
         onSubmit={() => void launchAutoMlGuide()}
         onStop={stopCurrentExecution}
       />

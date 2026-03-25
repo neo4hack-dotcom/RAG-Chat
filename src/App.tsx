@@ -445,11 +445,13 @@ export default function App() {
               workflow={appState.preferences.workflow}
               agentRole={appState.preferences.agentRole}
               mcpToolId={appState.preferences.selectedMcpToolId}
+              selectedCustomAgentId={appState.preferences.selectedCustomAgentId}
               onConversationsChange={setConversations}
               onCurrentIdChange={(currentConversationId) => updatePreferences({ currentConversationId })}
               onWorkflowChange={(workflow) => updatePreferences({ workflow })}
               onAgentRoleChange={(agentRole) => updatePreferences({ agentRole })}
               onMcpToolIdChange={(selectedMcpToolId) => updatePreferences({ selectedMcpToolId })}
+              onSelectedCustomAgentIdChange={(selectedCustomAgentId) => updatePreferences({ selectedCustomAgentId })}
               onConfigChange={setConfig}
               isDark={isDark}
               onToggleDark={() => updatePreferences((prev) => ({ ...prev, darkMode: !prev.darkMode }))}
