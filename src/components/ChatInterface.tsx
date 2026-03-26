@@ -1,10 +1,12 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge } from "lucide-react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge, Activity } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeEmailSenderAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
+import { McpPlanningModal } from "./McpPlanningModal";
+import { McpPlanningMonitorModal } from "./McpPlanningMonitorModal";
 import { AgentConsoleModal } from "./AgentConsoleModal";
 import { FileManagerConfigModal } from "./FileManagerConfigModal";
 import { AgentGuideModal, type GuideSchemaColumn } from "./AgentGuideModal";
@@ -810,6 +812,7 @@ export function ChatInterface({
   const [isInputCopied, setIsInputCopied] = useState(false);
   const [isDraftPanelOpen, setIsDraftPanelOpen] = useState(false);
   const [isAgentStatePanelOpen, setIsAgentStatePanelOpen] = useState(false);
+  const [isMcpQuickStartOpen, setIsMcpQuickStartOpen] = useState(false);
   const [inputCursor, setInputCursor] = useState(0);
   
   // Refs for DOM elements
@@ -824,6 +827,8 @@ export function ChatInterface({
   const anonymizerGuideAutoOpenRef = useRef(false);
   const toolsIslandRef = useRef<HTMLDivElement>(null);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
+  const mcpPlanningPulseTimeoutRef = useRef<number | null>(null);
+  const lastSeenMcpRunIdRef = useRef<string | null>(null);
   const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   const currentConversation = conversations.find(c => c.id === currentId);
@@ -855,6 +860,14 @@ export function ChatInterface({
     return isBuiltInAgentVisible(target.role as BuiltInAgentRole);
   });
   const selectedCustomAgent = enabledCustomAgents.find((agent) => agent.id === selectedCustomAgentId) ?? null;
+  const activeMcpTool = (config.mcpTools ?? []).find((tool: McpTool) => tool.id === mcpToolId) ?? null;
+  const activeMcpPresetQuestions = useMemo(
+    () =>
+      (activeMcpTool?.presetQuestions ?? []).filter(
+        (preset) => String(preset.label || '').trim() && String(preset.prompt || '').trim()
+      ),
+    [activeMcpTool]
+  );
   const fallbackMessages = currentConversation?.messages || [
     {
       id: "1",
@@ -900,6 +913,9 @@ export function ChatInterface({
   );
   const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
   const [isPlanningMonitorOpen, setIsPlanningMonitorOpen] = useState(false);
+  const [isMcpPlanningModalOpen, setIsMcpPlanningModalOpen] = useState(false);
+  const [isMcpPlanningMonitorOpen, setIsMcpPlanningMonitorOpen] = useState(false);
+  const [mcpPlanningPulse, setMcpPlanningPulse] = useState<"success" | "error" | null>(null);
   const [planningState, setPlanningState] = useState<PlanningBackendState>(() => normalizePlanningBackendState(undefined, browserTimeZone));
   const [plannerDraft, setPlannerDraft] = useState<CrewPlanDraft>(() => normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
   const [editingPlanningPlanId, setEditingPlanningPlanId] = useState<string | null>(null);
@@ -918,6 +934,8 @@ export function ChatInterface({
   const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
   const [isMcpMenuExpanded, setIsMcpMenuExpanded] = useState(workflow === 'MCP');
   const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'email_sender' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
+  const [mcpOrchestratorPromptDraft, setMcpOrchestratorPromptDraft] = useState(config.systemPrompt || "");
+  const [isMcpOrchestratorPromptDirty, setIsMcpOrchestratorPromptDirty] = useState(false);
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
   const [isAutoMlGuideOpen, setIsAutoMlGuideOpen] = useState(false);
   const [isDataCleanerGuideOpen, setIsDataCleanerGuideOpen] = useState(false);
@@ -963,6 +981,16 @@ export function ChatInterface({
   const [anonymizerPreview, setAnonymizerPreview] = useState<ClickHouseGuidePreview | null>(null);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const persistedPlanningDraftKey = JSON.stringify((currentConversation?.agentState as any)?.planning?.draft ?? null);
+  const mcpPlanningState = useMemo<PlanningBackendState>(() => {
+    const plans = planningState.plans.filter((plan) => (plan.useMcpOrchestrator || (plan.mcpToolIds ?? []).length > 0));
+    const allowedPlanIds = new Set(plans.map((plan) => plan.id));
+    const runs = planningState.runs.filter((run) => allowedPlanIds.has(run.planId));
+    return { plans, runs };
+  }, [planningState]);
+  const activeMcpPlanningCount = useMemo(
+    () => mcpPlanningState.plans.filter((plan) => plan.status === "active").length,
+    [mcpPlanningState]
+  );
 
   // --- ACTIONS ---
 
@@ -987,11 +1015,14 @@ export function ChatInterface({
     setIsThinkingPanelOpen(false);
     setIsPlanningModalOpen(false);
     setIsPlanningMonitorOpen(false);
+    setIsMcpPlanningModalOpen(false);
+    setIsMcpPlanningMonitorOpen(false);
     setIsFileManagerConfigOpen(false);
     setIsAutoMlGuideOpen(false);
     setIsDataCleanerGuideOpen(false);
     setIsAnonymizerGuideOpen(false);
     setGuideFormError(null);
+    setIsMcpQuickStartOpen(false);
     setIsConsoleOpen(false);
     setIsAgentStatePanelOpen(false);
   };
@@ -1201,6 +1232,18 @@ export function ChatInterface({
   }, [config.mcpTools, mcpToolId, onMcpToolIdChange]);
 
   useEffect(() => {
+    if (workflow !== 'MCP' || mcpToolId === MCP_ORCHESTRATOR_ID || activeMcpPresetQuestions.length === 0) {
+      setIsMcpQuickStartOpen(false);
+    }
+  }, [workflow, mcpToolId, activeMcpPresetQuestions.length]);
+
+  useEffect(() => {
+    if (!isMcpOrchestratorPromptDirty) {
+      setMcpOrchestratorPromptDraft(config.systemPrompt || "");
+    }
+  }, [config.systemPrompt, isMcpOrchestratorPromptDirty]);
+
+  useEffect(() => {
     if (editingPlanningPlanId) return;
     if (isPlanningModalOpen && isPlanningDraftDirty) return;
     setPlannerDraft(normalizeCrewPlanDraft(planningAgentState.draft, browserTimeZone));
@@ -1242,7 +1285,7 @@ export function ChatInterface({
   };
 
   useEffect(() => {
-    if (!isPlanningModalOpen || !isPlanningDraftDirty) return;
+    if ((!isPlanningModalOpen && !isMcpPlanningModalOpen) || !isPlanningDraftDirty) return;
 
     const timeoutId = window.setTimeout(() => {
       updatePlanningConversationState({
@@ -1258,6 +1301,7 @@ export function ChatInterface({
     };
   }, [
     isPlanningModalOpen,
+    isMcpPlanningModalOpen,
     isPlanningDraftDirty,
     plannerDraft,
     planningAgentState.lastQuestion,
@@ -1282,6 +1326,48 @@ export function ChatInterface({
       setPlanningBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (workflow === 'CREWAI' || workflow === 'MCP' || isPlanningModalOpen || isPlanningMonitorOpen || isMcpPlanningModalOpen || isMcpPlanningMonitorOpen) {
+      void loadPlanningState();
+    }
+  }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen, isMcpPlanningModalOpen, isMcpPlanningMonitorOpen]);
+
+  useEffect(() => {
+    if (workflow !== 'MCP' && !isMcpPlanningModalOpen && !isMcpPlanningMonitorOpen) return undefined;
+    const intervalId = window.setInterval(() => {
+      void loadPlanningState();
+    }, 6000);
+    return () => window.clearInterval(intervalId);
+  }, [workflow, isMcpPlanningModalOpen, isMcpPlanningMonitorOpen]);
+
+  useEffect(() => {
+    const latestRun = mcpPlanningState.runs[0];
+    if (!latestRun?.id) return;
+    if (!lastSeenMcpRunIdRef.current) {
+      lastSeenMcpRunIdRef.current = latestRun.id;
+      return;
+    }
+    if (lastSeenMcpRunIdRef.current === latestRun.id) return;
+
+    lastSeenMcpRunIdRef.current = latestRun.id;
+    if (latestRun.status !== "success" && latestRun.status !== "error") return;
+
+    setMcpPlanningPulse(latestRun.status);
+    if (mcpPlanningPulseTimeoutRef.current) {
+      window.clearTimeout(mcpPlanningPulseTimeoutRef.current);
+    }
+    mcpPlanningPulseTimeoutRef.current = window.setTimeout(() => {
+      setMcpPlanningPulse(null);
+      mcpPlanningPulseTimeoutRef.current = null;
+    }, 3000);
+  }, [mcpPlanningState.runs]);
+
+  useEffect(() => () => {
+    if (mcpPlanningPulseTimeoutRef.current) {
+      window.clearTimeout(mcpPlanningPulseTimeoutRef.current);
+    }
+  }, []);
 
   const fetchClickHouseGuideMetadata = async (table?: string) => {
     const response = await fetch('/api/clickhouse/guide-metadata', {
@@ -1594,12 +1680,6 @@ export function ChatInterface({
   };
 
   useEffect(() => {
-    if (workflow === 'CREWAI' || isPlanningModalOpen || isPlanningMonitorOpen) {
-      void loadPlanningState();
-    }
-  }, [workflow, isPlanningModalOpen, isPlanningMonitorOpen]);
-
-  useEffect(() => {
     if (isAutoMlGuideOpen) return;
     setAutoMlGuideForm((prev) => ({
       ...prev,
@@ -1784,6 +1864,36 @@ export function ChatInterface({
     void loadPlanningState();
   };
 
+  const buildMcpPlanningDraft = (nextDraft?: Partial<CrewPlanDraft> | null): CrewPlanDraft => {
+    const baseDraft = normalizeCrewPlanDraft(nextDraft, browserTimeZone);
+    const useCurrentOrchestrator = mcpToolId === MCP_ORCHESTRATOR_ID;
+    const selectedMcpIds = !useCurrentOrchestrator && activeMcpTool ? [activeMcpTool.id] : baseDraft.mcpToolIds;
+    return normalizeCrewPlanDraft(
+      {
+        ...baseDraft,
+        agents: [],
+        useMcpOrchestrator: useCurrentOrchestrator ? true : baseDraft.useMcpOrchestrator,
+        mcpToolIds: useCurrentOrchestrator ? baseDraft.mcpToolIds : selectedMcpIds,
+      },
+      browserTimeZone
+    );
+  };
+
+  const openMcpPlanningModal = (nextDraft?: Partial<CrewPlanDraft> | null) => {
+    setPlannerDraft(buildMcpPlanningDraft(nextDraft));
+    setEditingPlanningPlanId(null);
+    setIsPlanningDraftDirty(false);
+    setPlanningError(null);
+    setIsMcpPlanningModalOpen(true);
+    void loadPlanningState();
+  };
+
+  const openMcpPlanningMonitor = () => {
+    setPlanningError(null);
+    setIsMcpPlanningMonitorOpen(true);
+    void loadPlanningState();
+  };
+
   const openSqlDraftPreview = (artifact: DraftArtifact) => {
     const defaultEngine = artifact.engineHint ?? (agentRole === 'oracle_analyst' ? 'oracle' : 'clickhouse');
     setSelectedSqlDraft(artifact);
@@ -1891,6 +2001,19 @@ export function ChatInterface({
     });
   };
 
+  const startNewMcpPlanningDraft = () => {
+    const emptyDraft = buildMcpPlanningDraft(createEmptyCrewPlanDraft(browserTimeZone));
+    setEditingPlanningPlanId(null);
+    setPlannerDraft(emptyDraft);
+    setIsPlanningDraftDirty(false);
+    updatePlanningConversationState({
+      draft: emptyDraft,
+      missing_fields: [],
+      last_question: '',
+      ready_to_review: false,
+    });
+  };
+
   const savePlanningPlan = async (draft: CrewPlanDraft, editingPlanId: string | null) => {
     setPlanningBusy(true);
     try {
@@ -1935,6 +2058,14 @@ export function ChatInterface({
     setIsPlanningDraftDirty(false);
     setPlanningError(null);
     setIsPlanningModalOpen(true);
+  };
+
+  const editMcpPlanningPlan = (plan: CrewPlan) => {
+    setEditingPlanningPlanId(plan.id);
+    setPlannerDraft(buildMcpPlanningDraft(plan));
+    setIsPlanningDraftDirty(false);
+    setPlanningError(null);
+    setIsMcpPlanningModalOpen(true);
   };
 
   const togglePlanningPlanStatus = async (plan: CrewPlan) => {
@@ -2082,6 +2213,16 @@ export function ChatInterface({
     navigator.clipboard.writeText(input).then(() => {
       setIsInputCopied(true);
       window.setTimeout(() => setIsInputCopied(false), 1800);
+    });
+  };
+
+  const handleMcpQuickStartRun = (prompt: string, preferredTool?: string) => {
+    const trimmedPrompt = String(prompt || "").trim();
+    if (!trimmedPrompt || !activeMcpTool) return;
+    setIsMcpQuickStartOpen(false);
+    void handleSend(trimmedPrompt, {
+      preferredMcpTool: String(preferredTool || "").trim(),
+      selectedMcpToolId: activeMcpTool.id,
     });
   };
 
@@ -2248,6 +2389,7 @@ export function ChatInterface({
     setInput("");
     setInputCursor(0);
     setAttachments([]);
+    setIsMcpQuickStartOpen(false);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -2416,6 +2558,9 @@ export function ChatInterface({
         const isOrchestratorMode = effectiveMcpToolId === MCP_ORCHESTRATOR_ID;
         const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === effectiveMcpToolId);
         const preferredMcpTool = String(options.preferredMcpTool || '').trim();
+        const effectiveMcpOrchestratorPrompt = withBeautifulResponsePrompt(
+          (mcpOrchestratorPromptDraft || config.systemPrompt || "").trim()
+        );
         if (isOrchestratorMode && (config.mcpTools ?? []).length === 0) {
           throw new Error("No MCP connector is configured. Add at least one MCP tool in Settings before using the MCP orchestrator.");
         }
@@ -2436,7 +2581,7 @@ export function ChatInterface({
                   llm_model: config.model,
                   llm_api_key: config.apiKey || undefined,
                   llm_provider: config.provider,
-                  system_prompt: formattedSystemPrompt,
+                  system_prompt: effectiveMcpOrchestratorPrompt,
                   disable_ssl_verification: disableSslVerification,
                 }
               : {
@@ -4829,6 +4974,97 @@ export function ChatInterface({
               {/* Input Area */}
               <div className="pt-3 z-10 w-full max-w-[77rem] mx-auto">
                 <div className="glass-panel rounded-[1.8rem] p-1.5 flex flex-col gap-1.5 shadow-2xl shadow-black/5">
+                  {workflow === 'MCP' && mcpToolId === MCP_ORCHESTRATOR_ID && (
+                    <div className="mx-1 mt-1 rounded-[1.6rem] border border-teal-200/70 bg-white/82 p-3 shadow-sm backdrop-blur-xl dark:border-teal-800/60 dark:bg-white/5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-teal-700 dark:text-teal-300">
+                            MCP Orchestrator prompt
+                          </div>
+                          <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            Live strategy prompt
+                          </div>
+                          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                            This prompt is sent before the orchestrator plans its steps. Edit it freely for the current session.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMcpOrchestratorPromptDraft(config.systemPrompt || "");
+                            setIsMcpOrchestratorPromptDirty(false);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-3 py-1.5 text-[11px] font-medium text-teal-700 transition-colors hover:bg-teal-100 dark:bg-teal-950/30 dark:text-teal-200 dark:hover:bg-teal-950/45"
+                          title="Reset to the global system prompt"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          Reset
+                        </button>
+                      </div>
+                      <textarea
+                        value={mcpOrchestratorPromptDraft}
+                        onChange={(event) => {
+                          setMcpOrchestratorPromptDraft(event.target.value);
+                          setIsMcpOrchestratorPromptDirty(true);
+                        }}
+                        placeholder="Write the MCP Orchestrator system prompt here..."
+                        className="mt-3 min-h-[132px] w-full rounded-[1.3rem] border border-teal-200/80 bg-white/90 px-3.5 py-3 text-[13px] leading-[1.65] text-gray-900 outline-none transition-colors focus:border-teal-400 dark:border-teal-800/70 dark:bg-slate-950/50 dark:text-gray-100 dark:focus:border-teal-500"
+                      />
+                      <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-gray-500 dark:text-gray-400">
+                        <span>
+                          Current source: {isMcpOrchestratorPromptDirty ? 'custom draft' : 'global system prompt'}
+                        </span>
+                        <span>
+                          {mcpOrchestratorPromptDraft.trim().length} chars
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  {workflow === 'MCP' && activeMcpTool && mcpToolId !== MCP_ORCHESTRATOR_ID && activeMcpPresetQuestions.length > 0 && (
+                    <div
+                      className={`overflow-hidden transition-all duration-300 ease-out ${
+                        isMcpQuickStartOpen ? 'max-h-[20rem] opacity-100 translate-y-0' : 'max-h-0 opacity-0 translate-y-3'
+                      }`}
+                    >
+                      <div className="mx-1 mt-1 rounded-[1.55rem] border border-teal-200/70 bg-white/82 p-3 shadow-sm backdrop-blur-xl dark:border-teal-800/60 dark:bg-white/5">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-teal-700 dark:text-teal-300">
+                              Quick start
+                            </div>
+                            <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
+                              {activeMcpTool.label}
+                            </div>
+                            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                              Launch one of the pre-configured MCP questions immediately.
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsMcpQuickStartOpen(false)}
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/5 text-gray-500 transition-colors hover:bg-black/10 hover:text-gray-800 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/15 dark:hover:text-white"
+                            title="Close quick start"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {activeMcpPresetQuestions.map((preset, index) => (
+                            <button
+                              key={`mcp-quick-start-${activeMcpTool.id}-${preset.id || index}`}
+                              type="button"
+                              onClick={() => handleMcpQuickStartRun(preset.prompt, preset.preferredTool)}
+                              className="inline-flex items-center gap-2 rounded-full border border-teal-200/80 bg-teal-50/90 px-3.5 py-2 text-left text-xs font-medium text-teal-700 transition-colors hover:bg-teal-100 dark:border-teal-800/70 dark:bg-teal-950/30 dark:text-teal-200 dark:hover:bg-teal-950/45"
+                              title={preset.prompt}
+                            >
+                              <Star className="h-3.5 w-3.5 flex-shrink-0" />
+                              <span className="max-w-[20rem] truncate">{preset.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   {activeMentionQuery !== null && (
                     <div className="px-3.5 pt-2.5 pb-1">
                       <div className="rounded-[1.35rem] border border-white/70 bg-white/78 p-2.5 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-white/6">
@@ -4901,6 +5137,21 @@ export function ChatInterface({
                     >
                       <Paperclip className="w-5 h-5" />
                     </button>
+                    {workflow === 'MCP' && activeMcpTool && mcpToolId !== MCP_ORCHESTRATOR_ID && activeMcpPresetQuestions.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setIsMcpQuickStartOpen((open) => !open)}
+                        className={`flex-shrink-0 inline-flex h-11 items-center gap-2 rounded-2xl px-3 text-xs font-medium transition-colors mb-0.5 ${
+                          isMcpQuickStartOpen
+                            ? 'bg-teal-500 text-white hover:bg-teal-400'
+                            : 'text-teal-700 bg-teal-50 hover:bg-teal-100 dark:text-teal-200 dark:bg-teal-950/30 dark:hover:bg-teal-950/45'
+                        }`}
+                        title={`Open quick starts for ${activeMcpTool.label}`}
+                      >
+                        <Star className="h-4 w-4" />
+                        <span className="hidden sm:inline">Quick start</span>
+                      </button>
+                    )}
                     <textarea
                       ref={textareaRef}
                       value={input}
@@ -5290,6 +5541,42 @@ export function ChatInterface({
               </span>
             </div>
           </button>
+          {workflow === 'MCP' && (
+            <button
+              type="button"
+              onClick={() => openMcpPlanningModal(plannerDraft)}
+              className={`${floatingGlassButtonClass} ${isMcpPlanningModalOpen ? 'bg-white/85 ring-1 ring-black/10 dark:bg-black/60 dark:ring-white/10' : ''}`}
+              title="MCP scheduling"
+            >
+              <div className="flex flex-col items-center gap-0.5">
+                <CalendarDays className="h-4.5 w-4.5" />
+                <span className="text-[9px] font-semibold tracking-[0.16em] text-gray-500 dark:text-gray-400">
+                  PLAN
+                </span>
+              </div>
+            </button>
+          )}
+          {workflow === 'MCP' && mcpPlanningState.runs.length > 0 && (
+            <button
+              type="button"
+              onClick={openMcpPlanningMonitor}
+              className={`${floatingGlassButtonClass} ${
+                mcpPlanningPulse === 'success'
+                  ? 'bg-emerald-500 text-white animate-pulse'
+                  : mcpPlanningPulse === 'error'
+                    ? 'bg-red-500 text-white animate-pulse'
+                    : ''
+              } ${isMcpPlanningMonitorOpen ? 'ring-1 ring-black/10 dark:ring-white/10' : ''}`}
+              title="MCP scheduling status"
+            >
+              <div className="flex flex-col items-center gap-0.5">
+                <Activity className="h-4.5 w-4.5" />
+                <span className={`text-[9px] font-semibold tracking-[0.16em] ${mcpPlanningPulse ? 'text-white' : 'text-gray-500 dark:text-gray-400'}`}>
+                  {activeMcpPlanningCount}
+                </span>
+              </div>
+            </button>
+          )}
         </div>
       </div>
 
@@ -5770,6 +6057,34 @@ export function ChatInterface({
         isOpen={isPlanningMonitorOpen}
         onClose={() => setIsPlanningMonitorOpen(false)}
         planningState={planningState}
+        isBusy={planningBusy}
+        onRefresh={loadPlanningState}
+      />
+      <McpPlanningModal
+        isOpen={isMcpPlanningModalOpen}
+        onClose={() => setIsMcpPlanningModalOpen(false)}
+        draft={buildMcpPlanningDraft(plannerDraft)}
+        editingPlanId={editingPlanningPlanId}
+        planningState={mcpPlanningState}
+        mcpTools={config.mcpTools ?? []}
+        isBusy={planningBusy}
+        error={planningError}
+        onDraftChange={(draft) => {
+          setIsPlanningDraftDirty(true);
+          setPlannerDraft(buildMcpPlanningDraft(draft));
+        }}
+        onStartNewDraft={startNewMcpPlanningDraft}
+        onSavePlan={(draft, planId) => savePlanningPlan({ ...buildMcpPlanningDraft(draft), agents: [] }, planId)}
+        onEditPlan={editMcpPlanningPlan}
+        onTogglePlanStatus={togglePlanningPlanStatus}
+        onDeletePlan={deletePlanningPlan}
+        onRunPlan={runPlanningPlan}
+        onRefresh={loadPlanningState}
+      />
+      <McpPlanningMonitorModal
+        isOpen={isMcpPlanningMonitorOpen}
+        onClose={() => setIsMcpPlanningMonitorOpen(false)}
+        planningState={mcpPlanningState}
         isBusy={planningBusy}
         onRefresh={loadPlanningState}
       />

@@ -274,6 +274,26 @@ DEFAULT_APP_CONFIG = {
     "portalApps": [],
     "customAgents": [],
     "settingsAccessPassword": "MM@2026",
+    "ssoConfig": {
+        "enabled": False,
+        "providerType": "oidc",
+        "providerLabel": "Corporate SSO",
+        "issuerUrl": "",
+        "authorizationUrl": "",
+        "tokenUrl": "",
+        "userInfoUrl": "",
+        "jwksUrl": "",
+        "clientId": "",
+        "clientSecret": "",
+        "redirectUri": "",
+        "scopes": "openid profile email",
+        "logoutUrl": "",
+        "allowedDomains": [],
+        "roleClaim": "roles",
+        "emailClaim": "email",
+        "nameClaim": "name",
+        "allowAdminPasswordFallback": True,
+    },
     "clickhouseHost": "localhost",
     "clickhousePort": 8123,
     "clickhouseDatabase": "default",
@@ -435,6 +455,62 @@ def _default_planning_runtime() -> dict:
     }
 
 
+def _default_planning_post_actions() -> dict:
+    return {
+        "exportFile": {
+            "enabled": False,
+            "format": "csv",
+            "path": "",
+        },
+        "sendEmail": {
+            "enabled": False,
+            "to": [],
+            "cc": [],
+            "bcc": [],
+            "subject": "",
+            "bodyTemplate": (
+                "Hello,\n\n"
+                "Here is the latest MCP automation result for {plan_name}.\n\n"
+                "Trigger: {trigger_label}\n\n"
+                "Summary:\n{summary}\n\n"
+                "Detailed outputs:\n{outputs_markdown}"
+            ),
+            "attachExportedFile": False,
+        },
+    }
+
+
+def _normalize_planning_post_actions(payload: Optional[dict]) -> dict:
+    normalized = _default_planning_post_actions()
+    if not isinstance(payload, dict):
+        return normalized
+
+    export_file = payload.get("exportFile")
+    if isinstance(export_file, dict):
+        export_format = str(export_file.get("format") or "csv").strip().lower()
+        if export_format not in {"csv", "tsv", "xlsx"}:
+            export_format = "csv"
+        normalized["exportFile"] = {
+            "enabled": bool(export_file.get("enabled", False)),
+            "format": export_format,
+            "path": str(export_file.get("path") or "").strip(),
+        }
+
+    send_email = payload.get("sendEmail")
+    if isinstance(send_email, dict):
+        normalized["sendEmail"] = {
+            "enabled": bool(send_email.get("enabled", False)),
+            "to": _normalize_email_list(send_email.get("to") or []),
+            "cc": _normalize_email_list(send_email.get("cc") or []),
+            "bcc": _normalize_email_list(send_email.get("bcc") or []),
+            "subject": str(send_email.get("subject") or "").strip(),
+            "bodyTemplate": str(send_email.get("bodyTemplate") or normalized["sendEmail"]["bodyTemplate"]),
+            "attachExportedFile": bool(send_email.get("attachExportedFile", False)),
+        }
+
+    return normalized
+
+
 def _normalize_planning_trigger(trigger: Optional[dict]) -> dict:
     normalized = _default_planning_trigger()
     if not isinstance(trigger, dict):
@@ -477,6 +553,7 @@ def _normalize_planning_plan(plan: Optional[dict]) -> dict:
         "useMcpOrchestrator": False,
         "status": "active",
         "trigger": _default_planning_trigger(),
+        "postActions": _default_planning_post_actions(),
         "createdAt": "",
         "updatedAt": "",
         "nextRunAt": None,
@@ -508,6 +585,7 @@ def _normalize_planning_plan(plan: Optional[dict]) -> dict:
     status = plan.get("status")
     normalized["status"] = status if status in {"active", "paused"} else "active"
     normalized["trigger"] = _normalize_planning_trigger(plan.get("trigger"))
+    normalized["postActions"] = _normalize_planning_post_actions(plan.get("postActions"))
     normalized["createdAt"] = str(plan.get("createdAt") or "").strip()
     normalized["updatedAt"] = str(plan.get("updatedAt") or "").strip()
     normalized["nextRunAt"] = plan.get("nextRunAt") if isinstance(plan.get("nextRunAt"), str) or plan.get("nextRunAt") is None else None
@@ -709,6 +787,24 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
                     for item in (incoming_email_sender.get("allowedRecipients") or [])
                     if str(item).strip()
                 ] if isinstance(incoming_email_sender.get("allowedRecipients"), list) else list(DEFAULT_APP_CONFIG["emailSenderConfig"]["allowedRecipients"]),
+            }
+        incoming_sso = incoming_config.get("ssoConfig")
+        if isinstance(incoming_sso, dict):
+            state["config"]["ssoConfig"] = {
+                **DEFAULT_APP_CONFIG["ssoConfig"],
+                **incoming_sso,
+                "providerType": (
+                    str(incoming_sso.get("providerType") or "oidc").strip().lower()
+                    if str(incoming_sso.get("providerType") or "").strip().lower() in {"oidc", "saml", "generic"}
+                    else DEFAULT_APP_CONFIG["ssoConfig"]["providerType"]
+                ),
+                "allowedDomains": [
+                    str(item).strip()
+                    for item in (incoming_sso.get("allowedDomains") or [])
+                    if str(item).strip()
+                ] if isinstance(incoming_sso.get("allowedDomains"), list) else list(DEFAULT_APP_CONFIG["ssoConfig"]["allowedDomains"]),
+                "enabled": bool(incoming_sso.get("enabled")),
+                "allowAdminPasswordFallback": bool(incoming_sso.get("allowAdminPasswordFallback", True)),
             }
         incoming_portal_apps = incoming_config.get("portalApps")
         if isinstance(incoming_portal_apps, list):
@@ -11095,6 +11191,215 @@ def _build_trigger_context_markdown(trigger_context: dict) -> str:
     return "\n".join(lines)
 
 
+def _planning_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return slug or "automation"
+
+
+def _planning_outputs_markdown(outputs: list[dict[str, Any]]) -> str:
+    if not outputs:
+        return "- No execution output was captured."
+    lines: list[str] = []
+    for item in outputs:
+        agent = str(item.get("agent") or "executor").strip()
+        status = str(item.get("status") or "unknown").strip()
+        content = str(item.get("content") or "").strip()
+        lines.append(f"### {agent} · {status}")
+        if content:
+            lines.append(content)
+        else:
+            lines.append("_No content captured._")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _planning_outputs_tabular_payload(outputs: list[dict[str, Any]]) -> tuple[list[str], list[list[Any]]]:
+    headers = ["agent", "status", "content"]
+    rows = [
+        [
+            str(item.get("agent") or "").strip(),
+            str(item.get("status") or "").strip(),
+            str(item.get("content") or "").strip(),
+        ]
+        for item in outputs
+    ]
+    return headers, rows
+
+
+def _default_planning_export_path(plan: dict, export_format: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"exports/{_planning_slug(plan.get('name') or 'mcp-run')}-{timestamp}.{export_format}"
+
+
+def _planning_safe_export_path(base_path: str, requested_path: str, export_format: str) -> str:
+    candidate = requested_path.strip() or _default_planning_export_path({"name": ""}, export_format)
+    try:
+        resolved = _resolve_agent_path(candidate, base_path)
+    except Exception:
+        return candidate
+
+    if not resolved.exists():
+        return candidate
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    suffix = resolved.suffix or f".{export_format}"
+    stem = resolved.stem
+    parent = resolved.parent
+    replacement = parent / f"{stem}-{timestamp}{suffix}"
+    if base_path:
+        try:
+            return str(replacement.relative_to(Path(base_path).expanduser().resolve()))
+        except Exception:
+            return str(replacement)
+    return str(replacement)
+
+
+def _render_planning_email_template(
+    template: str,
+    *,
+    plan: dict,
+    trigger_context: dict,
+    summary: str,
+    outputs: list[dict[str, Any]],
+) -> str:
+    safe_template = str(template or "").strip()
+    if not safe_template:
+        safe_template = _default_planning_post_actions()["sendEmail"]["bodyTemplate"]
+    replacements = {
+        "{plan_name}": str(plan.get("name") or "Untitled MCP plan"),
+        "{trigger_label}": _planning_trigger_label(trigger_context),
+        "{summary}": summary.strip(),
+        "{outputs_markdown}": _planning_outputs_markdown(outputs),
+    }
+    rendered = safe_template
+    for key, value in replacements.items():
+        rendered = rendered.replace(key, value)
+    return rendered.strip()
+
+
+async def _run_planning_export_post_action(
+    plan: dict,
+    outputs: list[dict[str, Any]],
+    app_config: dict,
+) -> dict[str, Any]:
+    post_actions = _normalize_planning_post_actions(plan.get("postActions"))
+    export_config = post_actions["exportFile"]
+    if not export_config.get("enabled"):
+        return {"status": "skipped", "path": "", "content": ""}
+
+    file_manager_config = _app_file_manager_config(app_config)
+    llm_config = _app_llm_config(app_config)
+    export_format = _normalize_mcp_export_format(str(export_config.get("format") or "csv"))
+    requested_path = str(export_config.get("path") or "").strip() or _default_planning_export_path(plan, export_format)
+    export_path = _planning_safe_export_path(file_manager_config["basePath"], requested_path, export_format)
+    headers, rows = _planning_outputs_tabular_payload(outputs)
+    payload = {
+        "__file_export__": True,
+        "format": export_format,
+        "path": export_path,
+        "sheet_name": "Results",
+        "headers": headers,
+        "rows": rows,
+        "source_request": str(plan.get("prompt") or "").strip() or "Scheduled MCP automation export",
+    }
+    response = await chat_file_manager_agent(
+        FileManagerAgentRequest(
+            message=json.dumps(payload, ensure_ascii=False),
+            history=[],
+            llm_base_url=llm_config["llm_base_url"],
+            llm_model=llm_config["llm_model"],
+            llm_api_key=llm_config["llm_api_key"],
+            llm_provider=llm_config["llm_provider"],
+            disable_ssl_verification=bool(llm_config.get("disable_ssl_verification", False)),
+            agent_state=FileManagerAgentStateModel(),
+            file_manager_config=FileManagerAgentConfigModel(
+                base_path=file_manager_config["basePath"],
+                max_iterations=file_manager_config["maxIterations"],
+                system_prompt=file_manager_config["systemPrompt"],
+            ),
+        )
+    )
+    return {
+        "status": "success",
+        "path": export_path,
+        "content": str(response.get("answer") or "").strip(),
+    }
+
+
+async def _run_planning_email_post_action(
+    plan: dict,
+    trigger_context: dict,
+    summary: str,
+    outputs: list[dict[str, Any]],
+    app_config: dict,
+    exported_path: str = "",
+) -> dict[str, Any]:
+    post_actions = _normalize_planning_post_actions(plan.get("postActions"))
+    email_config = post_actions["sendEmail"]
+    if not email_config.get("enabled"):
+        return {"status": "skipped", "content": ""}
+
+    recipients = _normalize_email_list(email_config.get("to") or [])
+    if not recipients:
+        raise ValueError("Planning email delivery is enabled but no recipient is configured.")
+
+    llm_config = _app_llm_config(app_config)
+    file_manager_config = _app_file_manager_config(app_config)
+    email_sender_config = _normalize_email_sender_config(app_config.get("emailSenderConfig"))
+    rendered_body = _render_planning_email_template(
+        str(email_config.get("bodyTemplate") or ""),
+        plan=plan,
+        trigger_context=trigger_context,
+        summary=summary,
+        outputs=outputs,
+    )
+    subject = str(email_config.get("subject") or "").strip() or f"RAGnarok MCP run · {plan.get('name') or 'Untitled plan'}"
+    attachment_paths = [exported_path] if exported_path and bool(email_config.get("attachExportedFile")) else []
+    payload = {
+        "__email_send__": True,
+        "to": recipients,
+        "cc": _normalize_email_list(email_config.get("cc") or []),
+        "bcc": _normalize_email_list(email_config.get("bcc") or []),
+        "subject": subject,
+        "body": rendered_body,
+        "attachment_paths": attachment_paths,
+    }
+    response = await chat_email_sender_agent(
+        EmailSenderAgentRequest(
+            message=json.dumps(payload, ensure_ascii=False),
+            history=[],
+            llm_base_url=llm_config["llm_base_url"],
+            llm_model=llm_config["llm_model"],
+            llm_api_key=llm_config["llm_api_key"],
+            llm_provider=llm_config["llm_provider"],
+            disable_ssl_verification=bool(llm_config.get("disable_ssl_verification", False)),
+            agent_state=EmailSenderAgentStateModel(),
+            email_sender_config=EmailSenderAgentConfigModel(
+                host=email_sender_config["host"],
+                port=email_sender_config["port"],
+                secure=email_sender_config["secure"],
+                start_tls=email_sender_config["startTls"],
+                username=email_sender_config["username"],
+                password=email_sender_config["password"],
+                from_email=email_sender_config["fromEmail"],
+                from_name=email_sender_config["fromName"],
+                reply_to=email_sender_config["replyTo"],
+                allowed_recipients=email_sender_config["allowedRecipients"],
+                system_prompt=email_sender_config["systemPrompt"],
+            ),
+            file_manager_config=FileManagerAgentConfigModel(
+                base_path=file_manager_config["basePath"],
+                max_iterations=file_manager_config["maxIterations"],
+                system_prompt=file_manager_config["systemPrompt"],
+            ),
+        )
+    )
+    return {
+        "status": "success",
+        "content": str(response.get("answer") or "").strip(),
+    }
+
+
 def _app_llm_config(app_config: dict) -> dict:
     return {
         "llm_base_url": str(app_config.get("baseUrl") or "http://localhost:11434"),
@@ -11810,6 +12115,56 @@ async def execute_planning_run(
         summary = str(graph_result.get("summary") or "").strip()
         if not summary:
             summary = await _summarize_planning_outputs(plan, outputs, context, app_config)
+
+        exported_path = ""
+        post_actions = _normalize_planning_post_actions(plan.get("postActions"))
+        if post_actions["exportFile"]["enabled"]:
+            try:
+                export_result = await _run_planning_export_post_action(plan, outputs, app_config)
+                exported_path = str(export_result.get("path") or "").strip()
+                outputs.append(
+                    {
+                        "agent": "file_management",
+                        "status": "success",
+                        "content": export_result.get("content") or f"Scheduled export generated at {exported_path}.",
+                    }
+                )
+            except Exception as export_error:
+                overall_status = "error"
+                outputs.append(
+                    {
+                        "agent": "file_management",
+                        "status": "error",
+                        "content": f"Scheduled export failed: {export_error}",
+                    }
+                )
+
+        if post_actions["sendEmail"]["enabled"]:
+            try:
+                email_result = await _run_planning_email_post_action(
+                    plan,
+                    context,
+                    summary,
+                    outputs,
+                    app_config,
+                    exported_path=exported_path,
+                )
+                outputs.append(
+                    {
+                        "agent": "email_sender",
+                        "status": "success",
+                        "content": email_result.get("content") or "Scheduled email sent successfully.",
+                    }
+                )
+            except Exception as email_error:
+                overall_status = "error"
+                outputs.append(
+                    {
+                        "agent": "email_sender",
+                        "status": "error",
+                        "content": f"Scheduled email failed: {email_error}",
+                    }
+                )
     except Exception as execution_error:
         overall_status = "error"
         summary = (
@@ -18816,6 +19171,110 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
     }
 
 
+def _truncate_trace_text(value: Any, limit: int = 2200) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _format_mcp_prompt_context_markdown(
+    *,
+    user_message: str,
+    system_prompt: str = "",
+    preferred_tool: str = "",
+    memory_history: Optional[list[dict[str, Any]]] = None,
+    catalog: Optional[list[dict[str, Any]]] = None,
+) -> str:
+    lines = []
+    if system_prompt.strip():
+        lines.append("**System prompt**")
+        lines.append("```text")
+        lines.append(_truncate_trace_text(system_prompt, 1600))
+        lines.append("```")
+    if preferred_tool.strip():
+        lines.append(f"**Preferred tool hint:** `{preferred_tool.strip()}`")
+    lines.append("**User request**")
+    lines.append("```text")
+    lines.append(_truncate_trace_text(user_message, 1600))
+    lines.append("```")
+    if memory_history:
+        lines.append(f"**Conversation memory loaded:** {len(memory_history)} recent message(s)")
+    if catalog:
+        connector_count = len(catalog)
+        tool_count = sum(len(item.get("tools") or []) for item in catalog)
+        lines.append(f"**Discovered MCP catalog:** {connector_count} connector(s), {tool_count} tool(s)")
+    return "\n".join(lines).strip()
+
+
+def _format_mcp_thinking_markdown(entries: list[dict[str, Any]], *, title_prefix: str) -> str:
+    sections: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        label = str(entry.get("label") or f"{title_prefix} {index}").strip()
+        notes = str(entry.get("content") or "").strip()
+        action = str(entry.get("action") or "").strip()
+        selected_tools = entry.get("tools") or []
+        section_lines = [f"#### {label}"]
+        if action:
+            section_lines.append(f"- Action: `{action}`")
+        if selected_tools:
+            section_lines.append("- Tools: " + ", ".join(f"`{tool}`" for tool in selected_tools if str(tool).strip()))
+        if notes:
+            section_lines.append("")
+            section_lines.append("```text")
+            section_lines.append(_truncate_trace_text(notes, 2200))
+            section_lines.append("```")
+        sections.append("\n".join(section_lines).strip())
+    return "\n\n".join(section for section in sections if section.strip()).strip()
+
+
+def _format_mcp_tool_trace_markdown(tool_calls_log: list[dict[str, Any]]) -> str:
+    sections: list[str] = []
+    for index, call in enumerate(tool_calls_log, start=1):
+        tool_name = str(call.get("tool") or "unknown_tool").strip()
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        result = _truncate_trace_text(call.get("result") or "", 2400)
+        connector_label = str(call.get("mcp_label") or call.get("mcp_id") or "").strip()
+        title = f"#### Call {index} — `{tool_name}`"
+        if connector_label:
+            title += f" on **{connector_label}**"
+        section_lines = [title]
+        if args:
+            section_lines.append("**Arguments**")
+            section_lines.append("```json")
+            section_lines.append(json.dumps(args, ensure_ascii=False, indent=2))
+            section_lines.append("```")
+        if result:
+            section_lines.append("**Result preview**")
+            section_lines.append("```text")
+            section_lines.append(result)
+            section_lines.append("```")
+        sections.append("\n".join(section_lines).strip())
+    return "\n\n".join(section for section in sections if section.strip()).strip()
+
+
+def _append_mcp_trace_appendix(
+    answer: str,
+    *,
+    prompt_context: str = "",
+    thinking_markdown: str = "",
+    tool_trace_markdown: str = "",
+) -> str:
+    details_sections: list[str] = []
+    if prompt_context.strip():
+        details_sections.append("### Prompt context\n" + prompt_context.strip())
+    if thinking_markdown.strip():
+        details_sections.append("### MCP thinking\n" + thinking_markdown.strip())
+    if tool_trace_markdown.strip():
+        details_sections.append("### Tool trace\n" + tool_trace_markdown.strip())
+    if not details_sections:
+        return answer
+    appendix = "## Technical details\n\n" + "\n\n".join(details_sections)
+    return f"{str(answer or '').strip()}\n\n{appendix}".strip()
+
+
 async def _discover_mcp_catalog(
     mcp_tools: list[Any],
     *,
@@ -18915,6 +19374,7 @@ async def _run_single_mcp_chat_loop(
         messages.append({"role": "user", "content": message})
 
         tool_calls_log: list[dict] = []
+        thinking_trace: list[dict[str, Any]] = []
         step_log: list[dict[str, Any]] = [
             {
                 "id": "mcp-tool-discovery",
@@ -18975,10 +19435,36 @@ async def _run_single_mcp_chat_loop(
                 content = choice.get("content") or ""
                 raw_tool_calls = choice.get("tool_calls", [])
 
+            tool_names = []
+            for tc in raw_tool_calls or []:
+                if isinstance(tc, dict) and "function" in tc:
+                    tool_names.append(str(((tc.get("function") or {}).get("name")) or "").strip())
+                elif isinstance(tc, dict):
+                    tool_names.append(str(tc.get("name") or "").strip())
+            if str(content or "").strip() or tool_names:
+                thinking_trace.append(
+                    {
+                        "label": f"Turn {turn_index + 1}",
+                        "content": str(content or "").strip(),
+                        "tools": [tool for tool in tool_names if tool],
+                    }
+                )
+
             if not raw_tool_calls:
                 _emit_log("success", "mcp", "Completed MCP conversation without further tool calls", {"target": mcp_url})
+                answer = _append_mcp_trace_appendix(
+                    str(content or "").strip(),
+                    prompt_context=_format_mcp_prompt_context_markdown(
+                        user_message=message,
+                        system_prompt=system_prompt,
+                        preferred_tool=preferred_tool_name,
+                        memory_history=memory_history,
+                    ),
+                    thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Turn"),
+                    tool_trace_markdown=_format_mcp_tool_trace_markdown(tool_calls_log),
+                )
                 return {
-                    "answer": content,
+                    "answer": answer,
                     "tool_calls": tool_calls_log,
                     "steps": step_log,
                 }
@@ -19029,6 +19515,8 @@ async def _run_single_mcp_chat_loop(
                     "tool": tool_name,
                     "args": tool_args,
                     "result": tool_output,
+                    "mcp_id": "selected_mcp",
+                    "mcp_label": "Selected MCP",
                 })
 
                 messages.append({
@@ -19048,7 +19536,18 @@ async def _run_single_mcp_chat_loop(
             disable_ssl_verification=disable_ssl_verification,
         )
         _emit_log("success", "mcp", "Reached MCP safety-net summary", {"target": mcp_url, "tool_call_count": len(tool_calls_log)})
-        return {"answer": final, "tool_calls": tool_calls_log, "steps": step_log}
+        answer = _append_mcp_trace_appendix(
+            str(final or "").strip(),
+            prompt_context=_format_mcp_prompt_context_markdown(
+                user_message=message,
+                system_prompt=system_prompt,
+                preferred_tool=preferred_tool_name,
+                memory_history=memory_history,
+            ),
+            thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Turn"),
+            tool_trace_markdown=_format_mcp_tool_trace_markdown(tool_calls_log),
+        )
+        return {"answer": answer, "tool_calls": tool_calls_log, "steps": step_log}
 
 
 def _mcp_orchestrator_catalog_json(catalog: list[dict[str, Any]]) -> str:
@@ -19186,6 +19685,18 @@ Discovered MCP catalog:
         for item in (plan.get("initial_plan") or [])
         if str(item).strip()
     ][:step_budget]
+    thinking_trace: list[dict[str, Any]] = [
+        {
+            "label": "Initial plan",
+            "action": "plan",
+            "content": (
+                f"Goal: {str(plan.get('goal') or '').strip()}\n"
+                f"Reasoning: {str(plan.get('reasoning') or '').strip()}\n"
+                + ("\nPlanned steps:\n" + "\n".join(f"- {item}" for item in initial_plan) if initial_plan else "")
+            ).strip(),
+            "tools": [],
+        }
+    ]
 
     steps: list[dict[str, Any]] = [
         {
@@ -19248,6 +19759,17 @@ Execution log so far:
                     ),
                 }
             )
+            thinking_trace.append(
+                {
+                    "label": f"Midpoint review at step {step_index}",
+                    "action": "review",
+                    "content": (
+                        f"Review: {str(review.get('plan_update') or '').strip()}\n"
+                        f"Next focus: {str(review.get('next_focus') or '').strip()}"
+                    ).strip(),
+                    "tools": [],
+                }
+            )
             reviewed = True
 
         decision_prompt = f"""
@@ -19296,6 +19818,23 @@ Available MCP catalog:
             disable_ssl_verification=disable_ssl_verification,
         )
         action = str(decision.get("action") or "").strip().lower()
+        decision_tool_name = str(decision.get("tool") or "").strip()
+        decision_mcp_id = str(decision.get("mcp_id") or "").strip()
+        thinking_trace.append(
+            {
+                "label": f"Decision step {step_index}",
+                "action": action or "unknown",
+                "content": (
+                    f"Reasoning: {str(decision.get('reasoning') or '').strip()}\n"
+                    + (
+                        f"MCP: {decision_mcp_id}\nTool: {decision_tool_name}"
+                        if decision_mcp_id or decision_tool_name
+                        else ""
+                    )
+                ).strip(),
+                "tools": [tool for tool in [decision_tool_name] if tool],
+            }
+        )
         if action == "finish":
             final_answer = str(decision.get("final_answer") or "").strip()
             if not final_answer:
@@ -19318,8 +19857,19 @@ Execution log:
                     disable_ssl_verification=disable_ssl_verification,
                 )
             _emit_log("success", "mcp_orchestrator", "Finished orchestration", {"step_count": len(execution_log)})
+            answer = _append_mcp_trace_appendix(
+                final_answer,
+                prompt_context=_format_mcp_prompt_context_markdown(
+                    user_message=message,
+                    system_prompt=system_prompt,
+                    memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
+                    catalog=catalog,
+                ),
+                thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Step"),
+                tool_trace_markdown=_format_mcp_tool_trace_markdown(execution_log),
+            )
             return {
-                "answer": final_answer,
+                "answer": answer,
                 "tool_calls": execution_log,
                 "steps": steps,
                 "plan": {
@@ -19444,8 +19994,19 @@ Execution log:
                 {"step": step_index, "path": export_path, "source_step": export_source.get("step")},
             )
             if file_manager_state.get("pending_confirmation"):
+                answer = _append_mcp_trace_appendix(
+                    str(file_response.get("answer") or ""),
+                    prompt_context=_format_mcp_prompt_context_markdown(
+                        user_message=message,
+                        system_prompt=system_prompt,
+                        memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
+                        catalog=catalog,
+                    ),
+                    thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Step"),
+                    tool_trace_markdown=_format_mcp_tool_trace_markdown(execution_log),
+                )
                 return {
-                    "answer": str(file_response.get("answer") or ""),
+                    "answer": answer,
                     "tool_calls": execution_log,
                     "steps": steps,
                     "plan": {
@@ -19559,8 +20120,19 @@ Execution log:
                 }
             )
             if _email_sender_state_needs_followup(email_sender_state):
+                answer = _append_mcp_trace_appendix(
+                    str(email_response.get("answer") or ""),
+                    prompt_context=_format_mcp_prompt_context_markdown(
+                        user_message=message,
+                        system_prompt=system_prompt,
+                        memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
+                        catalog=catalog,
+                    ),
+                    thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Step"),
+                    tool_trace_markdown=_format_mcp_tool_trace_markdown(execution_log),
+                )
                 return {
-                    "answer": str(email_response.get("answer") or ""),
+                    "answer": answer,
                     "tool_calls": execution_log,
                     "steps": steps,
                     "plan": {
@@ -19665,8 +20237,19 @@ Execution log:
         disable_ssl_verification=disable_ssl_verification,
     )
     _emit_log("success", "mcp_orchestrator", "Finished orchestration at step budget", {"step_count": len(execution_log)})
+    answer = _append_mcp_trace_appendix(
+        str(final_answer or "").strip(),
+        prompt_context=_format_mcp_prompt_context_markdown(
+            user_message=message,
+            system_prompt=system_prompt,
+            memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
+            catalog=catalog,
+        ),
+        thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Step"),
+        tool_trace_markdown=_format_mcp_tool_trace_markdown(execution_log),
+    )
     return {
-        "answer": final_answer,
+        "answer": answer,
         "tool_calls": execution_log,
         "steps": steps,
         "plan": {
