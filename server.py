@@ -3560,6 +3560,14 @@ async def get_embedding(
                 raise UpstreamServiceError(
                     f"Embedding endpoint returned an unexpected JSON payload at `{url}`."
                 ) from exc
+    except httpx.HTTPStatusError as exc:
+        hint = ""
+        if exc.response is not None and exc.response.status_code == 401:
+            hint = " Authentication failed. Check the embedding API key, or leave it empty to reuse the main LLM API key."
+        raise UpstreamServiceError(
+            f"Embedding endpoint error at `{url}`: {exc}.{hint} "
+            "Check that the embedding service is running and reachable from `server.py`."
+        ) from exc
     except httpx.HTTPError as exc:
         raise UpstreamServiceError(
             f"Embedding endpoint error at `{url}`: {exc}. "
@@ -8586,9 +8594,11 @@ def _app_opensearch_config(app_config: dict) -> Optional[OSConfig]:
 
 def _app_embedding_config(app_config: dict) -> dict[str, Any]:
     disable_ssl_verification = _ssl_verification_disabled(app_config)
+    explicit_embedding_api_key = str(app_config.get("embeddingApiKey") or "").strip()
+    fallback_llm_api_key = str(app_config.get("apiKey") or "").strip()
     return {
         "embedding_base_url": str(app_config.get("embeddingBaseUrl") or "http://localhost:11434/v1").strip() or "http://localhost:11434/v1",
-        "embedding_api_key": str(app_config.get("embeddingApiKey") or "").strip() or None,
+        "embedding_api_key": explicit_embedding_api_key or fallback_llm_api_key or None,
         "embedding_model": str(app_config.get("embeddingModel") or "nomic-embed-text").strip() or "nomic-embed-text",
         "embedding_verify_ssl": _effective_verify_ssl(bool(app_config.get("embeddingVerifySsl", True)), disable_ssl_verification),
         "knn_neighbors": max(1, min(int(app_config.get("knnNeighbors") or 50), 100)),
@@ -18700,6 +18710,14 @@ async def list_embedding_models(req: EmbeddingModelsRequest):
         if not models:
             message += " The endpoint responded, but no models were listed."
         return {"status": "ok", "models": models, "model_count": len(models), "message": message, "models_endpoint": endpoint}
+    except httpx.HTTPStatusError as exc:
+        hint = ""
+        if exc.response is not None and exc.response.status_code == 401:
+            hint = " Authentication failed. Check the embedding API key, or leave it empty to reuse the main LLM API key."
+        raise HTTPException(
+            status_code=400,
+            detail=f"Embedding model discovery failed via `{endpoint}` ({resolution_message}): {exc}.{hint}",
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=400,
