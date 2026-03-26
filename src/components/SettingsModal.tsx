@@ -251,6 +251,7 @@ export function SettingsModal({
   const [dbMessage, setDbMessage] = useState('');
   const isDirectEmbeddingEndpoint = /(?:\/embeddings|:embeddings)$/i.test((localConfig.embeddingBaseUrl || '').trim());
   const embeddingUrlScheme = inferUrlScheme(localConfig.embeddingBaseUrl);
+  const effectiveEmbeddingApiKey = (localConfig.embeddingApiKey || localConfig.apiKey || '').trim() || undefined;
 
   useEffect(() => {
     currentDraftFingerprintRef.current = JSON.stringify(localConfig);
@@ -594,7 +595,7 @@ export function SettingsModal({
             password: localConfig.elasticsearchPassword || undefined,
           },
           embedding_base_url: localConfig.embeddingBaseUrl,
-          embedding_api_key: localConfig.embeddingApiKey || undefined,
+          embedding_api_key: effectiveEmbeddingApiKey,
           embedding_model: localConfig.embeddingModel,
           embedding_verify_ssl: localConfig.disableSslVerification ? false : localConfig.embeddingVerifySsl,
           chunk_size: localConfig.chunkSize,
@@ -627,7 +628,7 @@ export function SettingsModal({
         body: JSON.stringify({
           embedding_base_url: localConfig.embeddingBaseUrl,
           embedding_model: localConfig.embeddingModel,
-          embedding_api_key: localConfig.embeddingApiKey || undefined,
+          embedding_api_key: effectiveEmbeddingApiKey,
           embedding_verify_ssl: localConfig.disableSslVerification ? false : localConfig.embeddingVerifySsl,
           opensearch: localConfig.elasticsearchUrl ? {
             url: localConfig.elasticsearchUrl,
@@ -672,7 +673,7 @@ export function SettingsModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           base_url: localConfig.embeddingBaseUrl,
-          api_key: localConfig.embeddingApiKey || undefined,
+          api_key: effectiveEmbeddingApiKey,
           disable_ssl_verification: (localConfig.disableSslVerification ?? false) || !localConfig.embeddingVerifySsl,
         }),
       });
@@ -933,7 +934,7 @@ export function SettingsModal({
         onClick={onClose}
         className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 animate-fade-in"
       />
-      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-[55rem] z-50 p-6 animate-scale-in">
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-[64rem] z-50 p-6 animate-scale-in">
         <div className="glass-panel rounded-[2rem] p-8 shadow-2xl max-h-[90vh] overflow-y-auto">
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-semibold flex items-center gap-3 dark:text-white">
@@ -2442,6 +2443,11 @@ export function SettingsModal({
                     <p className="text-xs text-gray-500 mt-1">
                       Optional when your embedding provider infers the model from the endpoint. Keep it filled when your provider still expects a model in the request body.
                     </p>
+                    {!localConfig.embeddingApiKey.trim() && !!localConfig.apiKey.trim() && (
+                      <p className="text-xs text-sky-600 mt-1">
+                        No dedicated embedding API key is set. RAGnarok will reuse the main LLM API key for model discovery, embedding tests, and live RAG vectorization.
+                      </p>
+                    )}
                     {embeddingModelsMessage && (
                       <p className="text-xs text-gray-500 mt-1">{embeddingModelsMessage}</p>
                     )}
