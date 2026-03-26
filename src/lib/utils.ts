@@ -426,14 +426,18 @@ export type Conversation = {
 export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP' | 'CREWAI';
 
 export type AgentRole = 'manager' | 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'auto_ml' | 'data_cleaner' | 'anonymizer' | 'custom_agent';
+export type BuiltInAgentRole = Exclude<AgentRole, 'custom_agent'>;
 
 export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 
 const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer', 'custom_agent'];
+export const BUILT_IN_AGENT_ROLES: BuiltInAgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer'];
 
 function isValidAgentRole(value: unknown): value is AgentRole {
   return typeof value === 'string' && VALID_AGENT_ROLES.includes(value as AgentRole);
 }
+
+export type AgentVisibilityConfig = Record<BuiltInAgentRole, boolean>;
 
 /**
  * Represents a single MCP tool entry configurable by the user.
@@ -485,6 +489,7 @@ export type AppConfig = {
   model: string;
   systemPrompt: string;
   managerUseRagFunctionalContext: boolean;
+  agentVisibility: AgentVisibilityConfig;
   disableSslVerification: boolean;
   elasticsearchUrl: string;
   elasticsearchIndex: string;
@@ -550,6 +555,17 @@ export const DEFAULT_CONFIG: AppConfig = {
   model: "llama3",
   systemPrompt: "You are a helpful, smart, and concise AI assistant. Present non-JSON answers in polished Markdown with clear sections, concise bullets, tasteful **bold** emphasis, and tables when they help. Safe semantic HTML fragments such as <section>, <article>, <details>, <summary>, <table>, <ul>, <ol>, and <blockquote> are allowed when they genuinely improve the layout. Never return a full HTML document, CSS, or JavaScript. When offering choices or clarification options, always use markdown task lists (- [ ] Option) so the UI can present clickable replies. If the user explicitly asks for a table, rows/columns, a matrix, a grid, a schema list, or a tabular preview, return the relevant structured result as a valid Markdown table whenever the data is naturally tabular.",
   managerUseRagFunctionalContext: false,
+  agentVisibility: {
+    manager: true,
+    clickhouse_query: true,
+    data_analyst: true,
+    file_management: true,
+    pdf_creator: true,
+    oracle_analyst: true,
+    auto_ml: true,
+    data_cleaner: true,
+    anonymizer: true,
+  },
   disableSslVerification: false,
   elasticsearchUrl: "http://localhost:9200",
   elasticsearchIndex: "rag_documents",
@@ -1131,6 +1147,10 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
     ...(config ?? {}),
     disableSslVerification: config?.disableSslVerification ?? DEFAULT_CONFIG.disableSslVerification,
     managerUseRagFunctionalContext: config?.managerUseRagFunctionalContext ?? DEFAULT_CONFIG.managerUseRagFunctionalContext,
+    agentVisibility: {
+      ...DEFAULT_CONFIG.agentVisibility,
+      ...(config?.agentVisibility ?? {}),
+    },
     settingsAccessPassword: config?.settingsAccessPassword || DEFAULT_CONFIG.settingsAccessPassword,
     agenticDataVizUrl: config?.agenticDataVizUrl ?? DEFAULT_CONFIG.agenticDataVizUrl,
     portalApps: incomingPortalApps
@@ -1221,12 +1241,21 @@ export function normalizePersistedAppState(
   const selectedCustomAgentId = config.customAgents.some((agent) => agent.id === preferences.selectedCustomAgentId && agent.enabled)
     ? preferences.selectedCustomAgentId
     : (config.customAgents.find((agent) => agent.enabled)?.id ?? '');
+  const isRoleVisible = (role: AgentRole): boolean =>
+    role === 'custom_agent'
+      ? config.customAgents.some((agent) => agent.enabled)
+      : config.agentVisibility[role as BuiltInAgentRole] !== false;
+  const fallbackBuiltInRole = BUILT_IN_AGENT_ROLES.find((role) => config.agentVisibility[role] !== false) ?? 'manager';
+  const agentRole = isRoleVisible(preferences.agentRole)
+    ? preferences.agentRole
+    : (config.customAgents.some((agent) => agent.enabled) ? 'custom_agent' : fallbackBuiltInRole);
 
   return {
     config,
     conversations,
     preferences: {
       ...preferences,
+      agentRole,
       currentConversationId: wantsFreshChat
         ? null
         : hasCurrentConversation
