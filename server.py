@@ -249,8 +249,8 @@ DEFAULT_APP_CONFIG = {
     "chunkOverlap": 50,
     "knnNeighbors": 50,
     "mcpTools": [
-        {"id": "mcp_1", "label": "MCP Tool 1", "url": ""},
-        {"id": "mcp_2", "label": "MCP Tool 2", "url": ""},
+        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "presetQuestions": []},
+        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "presetQuestions": []},
     ],
     "documentationUrl": "",
     "agenticDataVizUrl": "",
@@ -11379,6 +11379,7 @@ class MCPChatRequest(BaseModel):
     message: str
     history: list[dict] = []
     mcp_url: str
+    preferred_tool: str = ""
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3"
     llm_api_key: Optional[str] = None
@@ -11387,10 +11388,19 @@ class MCPChatRequest(BaseModel):
     disable_ssl_verification: bool = False
 
 
+class MCPPresetQuestionModel(BaseModel):
+    id: str
+    label: str = ""
+    prompt: str = ""
+    preferredTool: str = ""
+
+
 class MCPToolConfigModel(BaseModel):
     id: str
     label: str
     url: str
+    description: str = ""
+    presetQuestions: list[MCPPresetQuestionModel] = Field(default_factory=list)
 
 
 class MCPOrchestratorChatRequest(BaseModel):
@@ -17774,17 +17784,53 @@ def _mcp_tool_to_openai(tool) -> dict:
     }
 
 
-def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, str]:
-    if isinstance(tool, dict):
+def _normalize_mcp_preset_question_entry(preset: Any, fallback_prefix: str = "preset") -> dict[str, str]:
+    if isinstance(preset, dict):
         return {
-            "id": str(tool.get("id") or "").strip(),
-            "label": str(tool.get("label") or tool.get("id") or "MCP").strip(),
-            "url": str(tool.get("url") or "").strip(),
+            "id": str(preset.get("id") or f"{fallback_prefix}_{uuid.uuid4().hex[:8]}").strip(),
+            "label": str(preset.get("label") or "").strip(),
+            "prompt": str(preset.get("prompt") or "").strip(),
+            "preferredTool": str(preset.get("preferredTool") or "").strip(),
         }
     return {
-        "id": str(getattr(tool, "id", "") or "").strip(),
+        "id": str(getattr(preset, "id", "") or f"{fallback_prefix}_{uuid.uuid4().hex[:8]}").strip(),
+        "label": str(getattr(preset, "label", "") or "").strip(),
+        "prompt": str(getattr(preset, "prompt", "") or "").strip(),
+        "preferredTool": str(getattr(preset, "preferredTool", "") or "").strip(),
+    }
+
+
+def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
+    if isinstance(tool, dict):
+        tool_id = str(tool.get("id") or "").strip()
+        return {
+            "id": tool_id,
+            "label": str(tool.get("label") or tool.get("id") or "MCP").strip(),
+            "url": str(tool.get("url") or "").strip(),
+            "description": str(tool.get("description") or "").strip(),
+            "presetQuestions": [
+                question
+                for question in (
+                    _normalize_mcp_preset_question_entry(item, f"{tool_id or 'mcp'}_preset")
+                    for item in (tool.get("presetQuestions") or [])
+                )
+                if question["label"] or question["prompt"] or question["preferredTool"]
+            ],
+        }
+    tool_id = str(getattr(tool, "id", "") or "").strip()
+    return {
+        "id": tool_id,
         "label": str(getattr(tool, "label", "") or getattr(tool, "id", "") or "MCP").strip(),
         "url": str(getattr(tool, "url", "") or "").strip(),
+        "description": str(getattr(tool, "description", "") or "").strip(),
+        "presetQuestions": [
+            question
+            for question in (
+                _normalize_mcp_preset_question_entry(item, f"{tool_id or 'mcp'}_preset")
+                for item in (getattr(tool, "presetQuestions", []) or [])
+            )
+            if question["label"] or question["prompt"] or question["preferredTool"]
+        ],
     }
 
 
@@ -17809,6 +17855,7 @@ async def _discover_mcp_catalog(
                     "id": tool["id"],
                     "label": tool["label"] or tool["id"],
                     "url": tool["url"],
+                    "description": tool.get("description") or "",
                     "tools": [
                         {
                             "name": item.name,
@@ -17832,6 +17879,7 @@ async def _run_single_mcp_chat_loop(
     message: str,
     history: list[dict],
     mcp_url: str,
+    preferred_tool: str,
     llm_base_url: str,
     llm_model: str,
     llm_provider: str,
@@ -17846,6 +17894,7 @@ async def _run_single_mcp_chat_loop(
     ) as session:
         tool_result = await session.list_tools()
         tool_definitions = list(tool_result.tools or [])
+        preferred_tool_name = str(preferred_tool or "").strip()
         openai_tools = [_mcp_tool_to_openai(tool) for tool in tool_definitions]
         memory_history = _normalized_history_messages(
             history,
@@ -17856,6 +17905,28 @@ async def _run_single_mcp_chat_loop(
         messages: list[dict] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
+        if preferred_tool_name:
+            preferred_tool_exists = any(str(tool.name or "") == preferred_tool_name for tool in tool_definitions)
+            preferred_note = (
+                f"A starter question suggested the MCP tool `{preferred_tool_name}`. "
+                "If it is relevant to the request, prefer that tool first before considering others."
+            )
+            if not preferred_tool_exists:
+                preferred_note += " That exact tool was not found in the live MCP catalog, so fall back gracefully to the closest valid tool."
+                _emit_log(
+                    "warning",
+                    "mcp",
+                    f"Preferred MCP tool `{preferred_tool_name}` was not found in the live catalog",
+                    {"target": mcp_url, "preferred_tool": preferred_tool_name},
+                )
+            else:
+                _emit_log(
+                    "decision",
+                    "mcp",
+                    f"Biasing MCP planning toward preferred tool `{preferred_tool_name}`",
+                    {"target": mcp_url, "preferred_tool": preferred_tool_name},
+                )
+            messages.append({"role": "system", "content": preferred_note})
         for item in memory_history:
             role = "user" if item.get("role") == "user" else "assistant"
             messages.append({"role": role, "content": item.get("content", "")})
@@ -18003,6 +18074,7 @@ def _mcp_orchestrator_catalog_json(catalog: list[dict[str, Any]]) -> str:
         {
             "id": item.get("id"),
             "label": item.get("label"),
+            "description": item.get("description"),
             "tool_count": len(item.get("tools") or []),
             "tools": [
                 {
@@ -18366,6 +18438,7 @@ async def chat_mcp(req: MCPChatRequest):
             message=req.message,
             history=req.history,
             mcp_url=req.mcp_url,
+            preferred_tool=req.preferred_tool,
             llm_base_url=req.llm_base_url,
             llm_model=req.llm_model,
             llm_provider=req.llm_provider,

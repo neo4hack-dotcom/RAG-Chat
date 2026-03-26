@@ -34,7 +34,8 @@ export type ChatAction = {
     | 'refresh_planning_state'
     | 'confirm_file_action'
     | 'cancel_file_action'
-    | 'export_data_quality_pdf';
+    | 'export_data_quality_pdf'
+    | 'run_mcp_preset';
   variant?: 'primary' | 'secondary';
   payload?: Record<string, unknown>;
 };
@@ -437,10 +438,19 @@ function isValidAgentRole(value: unknown): value is AgentRole {
 /**
  * Represents a single MCP tool entry configurable by the user.
  */
+export type McpPresetQuestion = {
+  id: string;
+  label: string;
+  prompt: string;
+  preferredTool: string;
+};
+
 export type McpTool = {
   id: string;
   label: string;
   url: string;
+  description: string;
+  presetQuestions: McpPresetQuestion[];
 };
 
 export const MCP_ORCHESTRATOR_ID = '__mcp_orchestrator__';
@@ -553,8 +563,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   chunkOverlap: 50,
   knnNeighbors: 50,
   mcpTools: [
-    { id: 'mcp_1', label: 'MCP Tool 1', url: '' },
-    { id: 'mcp_2', label: 'MCP Tool 2', url: '' },
+    { id: 'mcp_1', label: 'MCP Tool 1', url: '', description: '', presetQuestions: [] },
+    { id: 'mcp_2', label: 'MCP Tool 2', url: '', description: '', presetQuestions: [] },
   ],
   documentationUrl: '',
   agenticDataVizUrl: '',
@@ -1170,6 +1180,15 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
           id: tool.id || `mcp_${Date.now()}`,
           label: tool.label || 'New Tool',
           url: tool.url || '',
+          description: tool.description || '',
+          presetQuestions: Array.isArray(tool.presetQuestions)
+            ? tool.presetQuestions.map((preset, presetIndex) => ({
+                id: preset?.id || `${tool.id || 'mcp'}_preset_${presetIndex + 1}`,
+                label: String(preset?.label || '').trim(),
+                prompt: String(preset?.prompt || '').trim(),
+                preferredTool: String(preset?.preferredTool || '').trim(),
+              }))
+            : [],
         }))
       : DEFAULT_CONFIG.mcpTools.map((tool) => ({ ...tool })),
   };

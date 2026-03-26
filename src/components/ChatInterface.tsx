@@ -44,6 +44,8 @@ const AGENT_INTRO_MARKERS = {
   custom_agent: "<!-- agent-intro:custom_agent -->",
 } as const;
 
+const MCP_STARTER_MARKER_PREFIX = "<!-- mcp-starter:";
+
 function getAgentIntroContent(agentRole: AgentRole, config?: AppConfig, selectedCustomAgentId?: string): string | null {
   if (agentRole === 'manager') {
     return `${AGENT_INTRO_MARKERS.manager}
@@ -288,8 +290,12 @@ function isAgentIntroMessage(message: Message): boolean {
   return Object.values(AGENT_INTRO_MARKERS).some((marker) => message.content.includes(marker));
 }
 
+function isMcpStarterMessage(message: Message): boolean {
+  return message.role === 'assistant' && message.content.includes(MCP_STARTER_MARKER_PREFIX);
+}
+
 function isIntroductoryAssistantMessage(message: Message): boolean {
-  return isDefaultWelcomeMessage(message) || isAgentIntroMessage(message);
+  return isDefaultWelcomeMessage(message) || isAgentIntroMessage(message) || isMcpStarterMessage(message);
 }
 
 function hasMeaningfulConversationMessages(messages: Message[]): boolean {
@@ -332,6 +338,44 @@ function compactMessagePreview(content: string, maxLength = 132): string {
   if (!plain) return 'Assistant response';
   return plain.length > maxLength ? `${plain.slice(0, maxLength - 1)}…` : plain;
 }
+
+function buildMcpStarterMessage(tool: McpTool): Message | null {
+  const presets = (tool.presetQuestions ?? []).filter(
+    (preset) => String(preset.label || '').trim() && String(preset.prompt || '').trim()
+  );
+  if (presets.length === 0) return null;
+
+  const content = [
+    `${MCP_STARTER_MARKER_PREFIX}${tool.id} -->`,
+    `## ${tool.label}`,
+    tool.description?.trim() || "Choose one of the starter questions below, or type your own request.",
+    "",
+    "Pick a starter question below, or type your own request to begin.",
+  ].join("\n");
+
+  return {
+    id: `mcp-starter-${tool.id}-${Date.now()}`,
+    role: "assistant",
+    content,
+    timestamp: Date.now(),
+    actions: presets.map((preset, index) => ({
+      id: `${tool.id}-preset-${preset.id || index + 1}`,
+      label: String(preset.label || '').trim(),
+      actionType: 'run_mcp_preset',
+      variant: index === 0 ? 'primary' : 'secondary',
+      payload: {
+        mcpToolId: tool.id,
+        prompt: String(preset.prompt || '').trim(),
+        preferredTool: String(preset.preferredTool || '').trim(),
+      },
+    })),
+  };
+}
+
+type SendOptions = {
+  preferredMcpTool?: string;
+  selectedMcpToolId?: string;
+};
 
 type AgentStateMetricCard = {
   label: string;
@@ -999,6 +1043,27 @@ export function ChatInterface({
     setIsMcpMenuExpanded(true);
     setIsOtherAgentsOpen(false);
     onMcpToolIdChange(nextToolId);
+
+    if (nextToolId === MCP_ORCHESTRATOR_ID) {
+      return;
+    }
+
+    const selectedTool = (config.mcpTools ?? []).find((tool: McpTool) => tool.id === nextToolId);
+    const starterMessage = selectedTool ? buildMcpStarterMessage(selectedTool) : null;
+    if (!starterMessage) {
+      return;
+    }
+
+    const nextConversationId = `mcp-starter-${Date.now()}`;
+    const nextConversation: Conversation = {
+      id: nextConversationId,
+      title: `${selectedTool?.label || 'MCP'} starter`,
+      messages: [starterMessage],
+      memory: buildConversationMemory([starterMessage]),
+      updatedAt: Date.now(),
+    };
+    onConversationsChange((prev) => [nextConversation, ...prev]);
+    onCurrentIdChange(nextConversationId);
   };
 
   // Reset the current chat to its initial state (welcome message only)
@@ -1862,6 +1927,20 @@ export function ChatInterface({
   };
 
   const handleChatAction = (action: ChatAction, message: Message) => {
+    if (action.actionType === 'run_mcp_preset') {
+      const prompt = String(action.payload?.prompt || '').trim();
+      const targetMcpToolId = String(action.payload?.mcpToolId || mcpToolId);
+      const preferredTool = String(action.payload?.preferredTool || '').trim();
+      if (!prompt) return;
+      if (workflow !== 'MCP') {
+        onWorkflowChange('MCP');
+      }
+      if (targetMcpToolId && targetMcpToolId !== mcpToolId) {
+        onMcpToolIdChange(targetMcpToolId);
+      }
+      void handleSend(prompt, { preferredMcpTool: preferredTool, selectedMcpToolId: targetMcpToolId });
+      return;
+    }
     if (action.actionType === 'open_planning_form') {
       openPlanningModal(planningAgentState.draft);
       return;
@@ -2024,7 +2103,7 @@ export function ChatInterface({
   };
 
   // Main function to handle sending a message
-  const handleSend = async (text: string = input) => {
+  const handleSend = async (text: string = input, options: SendOptions = {}) => {
     const mentionedTargets = extractMentionTargets(text);
     const mentionedRoles = Array.from(
       new Set(
@@ -2234,8 +2313,10 @@ export function ChatInterface({
         confidence = data.confidence;
         setIsConnected(true);
       } else if (resolvedWorkflow === 'MCP') {
-        const isOrchestratorMode = mcpToolId === MCP_ORCHESTRATOR_ID;
-        const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === mcpToolId);
+        const effectiveMcpToolId = options.selectedMcpToolId || mcpToolId;
+        const isOrchestratorMode = effectiveMcpToolId === MCP_ORCHESTRATOR_ID;
+        const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === effectiveMcpToolId);
+        const preferredMcpTool = String(options.preferredMcpTool || '').trim();
         if (isOrchestratorMode && (config.mcpTools ?? []).length === 0) {
           throw new Error("No MCP connector is configured. Add at least one MCP tool in Settings before using the MCP orchestrator.");
         }
@@ -2263,6 +2344,7 @@ export function ChatInterface({
                   message: text,
                   history: memoryHistory,
                   mcp_url: activeTool!.url,
+                  preferred_tool: preferredMcpTool || undefined,
                   llm_base_url: config.baseUrl,
                   llm_model: config.model,
                   llm_api_key: config.apiKey || undefined,
