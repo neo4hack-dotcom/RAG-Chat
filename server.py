@@ -385,6 +385,7 @@ PLANNER_TRIGGER_KINDS = {
 PLANNER_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 PLANNER_WATCH_MODES = {"returns_rows", "count_increases", "result_changes"}
 PLANNER_MAX_RUNS = 60
+PLANNER_AUTOMATION_CHAT_MAX_MESSAGES = 20
 PLANNER_MAX_KNOWN_FILES = 2000
 PLANNER_LOOP_INTERVAL_SECONDS = 20
 CHAT_MEMORY_MIN_STEPS = 5
@@ -429,6 +430,10 @@ def _default_planning_state() -> dict:
     }
 
 
+def _default_automation_conversations_state() -> list[dict]:
+    return []
+
+
 def _default_planning_trigger() -> dict:
     return {
         "kind": "daily",
@@ -457,6 +462,9 @@ def _default_planning_runtime() -> dict:
 
 def _default_planning_post_actions() -> dict:
     return {
+        "publishToChat": {
+            "enabled": False,
+        },
         "exportFile": {
             "enabled": False,
             "format": "csv",
@@ -484,6 +492,10 @@ def _normalize_planning_post_actions(payload: Optional[dict]) -> dict:
     normalized = _default_planning_post_actions()
     if not isinstance(payload, dict):
         return normalized
+
+    publish_to_chat = payload.get("publishToChat")
+    if isinstance(publish_to_chat, dict):
+        normalized["publishToChat"]["enabled"] = bool(publish_to_chat.get("enabled"))
 
     export_file = payload.get("exportFile")
     if isinstance(export_file, dict):
@@ -709,14 +721,79 @@ def _normalize_user_db_state(payload: Optional[dict]) -> dict:
     return state
 
 
+def _normalize_automation_conversation(payload: Any) -> Optional[dict]:
+    if not isinstance(payload, dict):
+        return None
+
+    conversation_id = str(payload.get("id") or "").strip()
+    if not conversation_id:
+        return None
+
+    raw_messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+    normalized_messages: list[dict[str, Any]] = []
+    for index, raw_message in enumerate(raw_messages):
+        if not isinstance(raw_message, dict):
+            continue
+        role = str(raw_message.get("role") or "assistant").strip().lower()
+        if role not in {"assistant", "system", "user"}:
+            role = "assistant"
+        content = str(raw_message.get("content") or "").strip()
+        if not content:
+            continue
+        timestamp = raw_message.get("timestamp")
+        try:
+            normalized_timestamp = int(timestamp)
+        except Exception:
+            normalized_timestamp = int(time.time() * 1000)
+        normalized_messages.append(
+            {
+                "id": str(raw_message.get("id") or f"{conversation_id}_msg_{index + 1}").strip(),
+                "role": role,
+                "content": content,
+                "timestamp": normalized_timestamp,
+            }
+        )
+
+    normalized_messages = normalized_messages[-PLANNER_AUTOMATION_CHAT_MAX_MESSAGES:]
+    updated_at_raw = payload.get("updatedAt")
+    try:
+        updated_at = int(updated_at_raw)
+    except Exception:
+        updated_at = normalized_messages[-1]["timestamp"] if normalized_messages else int(time.time() * 1000)
+
+    return {
+        "id": conversation_id,
+        "title": str(payload.get("title") or "Automation run").strip() or "Automation run",
+        "messages": normalized_messages,
+        "memory": payload.get("memory") if isinstance(payload.get("memory"), dict) else None,
+        "updatedAt": updated_at,
+        "kind": "automation",
+        "accentTone": str(payload.get("accentTone") or "emerald").strip() or "emerald",
+        "automationPlanId": str(payload.get("automationPlanId") or "").strip() or None,
+    }
+
+
 def _db_state_for_user(full_state: dict, user_id: str) -> dict:
     users = full_state.get("users") or {}
     user_bucket = _normalize_user_db_state(users.get(user_id))
+    automation_conversations = full_state.get("automationConversations") or _default_automation_conversations_state()
+    merged_conversations = [
+        *[
+            conversation
+            for conversation in automation_conversations
+            if isinstance(conversation, dict)
+        ],
+        *[
+            conversation
+            for conversation in (user_bucket.get("conversations") or [])
+            if isinstance(conversation, dict)
+        ],
+    ]
     return {
         "schemaVersion": full_state.get("schemaVersion", 2),
         "updatedAt": full_state.get("updatedAt") or _utc_now_iso(),
         "config": full_state.get("config") or json.loads(json.dumps(DEFAULT_APP_CONFIG)),
-        "conversations": user_bucket.get("conversations") or [],
+        "conversations": merged_conversations,
         "preferences": user_bucket.get("preferences") or json.loads(json.dumps(DEFAULT_PREFERENCES)),
         "planning": full_state.get("planning") or _default_planning_state(),
     }
@@ -748,6 +825,7 @@ def _default_db_state() -> dict:
         "config": json.loads(json.dumps(DEFAULT_APP_CONFIG)),
         "users": {},
         "planning": _default_planning_state(),
+        "automationConversations": _default_automation_conversations_state(),
     }
 
 
@@ -874,6 +952,16 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
     state["users"] = normalized_users
 
     state["planning"] = _normalize_planning_state(payload.get("planning"))
+    incoming_automation_conversations = payload.get("automationConversations")
+    if isinstance(incoming_automation_conversations, list):
+        state["automationConversations"] = [
+            conversation
+            for conversation in (
+                _normalize_automation_conversation(item)
+                for item in incoming_automation_conversations
+            )
+            if conversation is not None
+        ]
 
     incoming_updated_at = payload.get("updatedAt")
     if isinstance(incoming_updated_at, str) and incoming_updated_at:
@@ -10520,6 +10608,7 @@ def _default_planning_draft(timezone_name: str = "UTC") -> dict:
         "mcpToolIds": [],
         "useMcpOrchestrator": False,
         "status": "active",
+        "postActions": _default_planning_post_actions(),
         "trigger": {
             "kind": "daily",
             "timezone": timezone_name or "UTC",
@@ -10558,8 +10647,9 @@ def _normalize_planner_agent_role(value: Any) -> Optional[str]:
 def _merge_planning_draft(current_draft: Optional[dict], updates: Optional[dict], timezone_name: str = "UTC") -> dict:
     current = _default_planning_draft(timezone_name)
     if isinstance(current_draft, dict):
-        current.update({k: v for k, v in current_draft.items() if k != "trigger"})
+        current.update({k: v for k, v in current_draft.items() if k not in {"trigger", "postActions"}})
         current["trigger"].update((current_draft.get("trigger") or {}))
+        current["postActions"] = _normalize_planning_post_actions(current_draft.get("postActions"))
 
     if not isinstance(updates, dict):
         return current
@@ -10596,6 +10686,9 @@ def _merge_planning_draft(current_draft: Optional[dict], updates: Optional[dict]
             if value in (None, "", []):
                 continue
             current["trigger"][key] = value
+
+    if isinstance(updates.get("postActions"), dict):
+        current["postActions"] = _normalize_planning_post_actions(updates.get("postActions"))
 
     current["trigger"] = _normalize_planning_trigger(current["trigger"])
     if not current["name"] and current["prompt"]:
@@ -11281,6 +11374,68 @@ def _render_planning_email_template(
     for key, value in replacements.items():
         rendered = rendered.replace(key, value)
     return rendered.strip()
+
+
+def _append_planning_summary_to_automation_chat(
+    state: dict,
+    *,
+    plan: dict,
+    summary: str,
+    run_id: str,
+    finished_at_iso: str,
+) -> None:
+    if not str(summary or "").strip():
+        return
+
+    automation_conversations = state.get("automationConversations")
+    if not isinstance(automation_conversations, list):
+        automation_conversations = _default_automation_conversations_state()
+        state["automationConversations"] = automation_conversations
+
+    conversation_id = f"automation-plan-{str(plan.get('id') or '').strip()}"
+    if not conversation_id or conversation_id == "automation-plan-":
+        return
+
+    title = f"Automation · {str(plan.get('name') or 'Untitled MCP plan').strip() or 'Untitled MCP plan'}"
+    finished_at_dt = _parse_iso_datetime(finished_at_iso) or datetime.now(timezone.utc)
+    timestamp_ms = int(finished_at_dt.timestamp() * 1000)
+    next_message = {
+        "id": f"{conversation_id}-run-{run_id}",
+        "role": "assistant",
+        "content": str(summary).strip(),
+        "timestamp": timestamp_ms,
+    }
+
+    existing = next((item for item in automation_conversations if isinstance(item, dict) and item.get("id") == conversation_id), None)
+    if existing is None:
+        automation_conversations.insert(
+            0,
+            {
+                "id": conversation_id,
+                "title": title,
+                "messages": [next_message],
+                "updatedAt": timestamp_ms,
+                "kind": "automation",
+                "accentTone": "emerald",
+                "automationPlanId": str(plan.get("id") or "").strip() or None,
+            },
+        )
+        return
+
+    messages = existing.get("messages") if isinstance(existing.get("messages"), list) else []
+    messages = [message for message in messages if isinstance(message, dict)]
+    messages.append(next_message)
+    existing["messages"] = messages[-PLANNER_AUTOMATION_CHAT_MAX_MESSAGES:]
+    existing["title"] = title
+    existing["updatedAt"] = timestamp_ms
+    existing["kind"] = "automation"
+    existing["accentTone"] = "emerald"
+    existing["automationPlanId"] = str(plan.get("id") or "").strip() or None
+
+    automation_conversations.sort(
+        key=lambda item: int(item.get("updatedAt") or 0) if isinstance(item, dict) else 0,
+        reverse=True,
+    )
 
 
 async def _run_planning_export_post_action(
@@ -12198,6 +12353,15 @@ async def execute_planning_run(
     latest_plan["lastRunAt"] = finished_at
     latest_plan["lastStatus"] = overall_status
     latest_plan["lastSummary"] = summary
+    post_actions = _normalize_planning_post_actions(latest_plan.get("postActions"))
+    if post_actions["publishToChat"]["enabled"]:
+        _append_planning_summary_to_automation_chat(
+            latest_state,
+            plan=latest_plan,
+            summary=summary,
+            run_id=run_id,
+            finished_at_iso=finished_at,
+        )
     if (latest_plan.get("trigger") or {}).get("kind") == "once":
         latest_plan["status"] = "paused"
         latest_plan["nextRunAt"] = None
@@ -12950,10 +13114,21 @@ async def save_app_state(req: PersistedStateRequest, request: Request):
     payload["schemaVersion"] = payload.get("schemaVersion", 2)
     if req.include_config:
         payload["config"] = req.config
+    filtered_conversations = [
+        conversation
+        for conversation in req.conversations
+        if not (
+            isinstance(conversation, dict)
+            and (
+                str(conversation.get("kind") or "").strip().lower() == "automation"
+                or str(conversation.get("id") or "").strip().startswith("automation-plan-")
+            )
+        )
+    ]
     payload.setdefault("users", {})
     payload["users"][user_id] = _normalize_user_db_state(
         {
-            "conversations": req.conversations,
+            "conversations": filtered_conversations,
             "preferences": req.preferences.model_dump(),
             "updatedAt": _utc_now_iso(),
         }

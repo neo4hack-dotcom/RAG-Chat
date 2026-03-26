@@ -13,6 +13,7 @@ import {
   Page,
   PersistedAppState,
   hasMeaningfulPersistedAppState,
+  isAutomationConversation,
   normalizePersistedAppState,
 } from './lib/utils';
 
@@ -105,9 +106,17 @@ function buildDbHeaders(userId: string, includeJson = false): HeadersInit {
 function pickPersistedPayload(state: PersistedAppState) {
   return {
     config: state.config,
-    conversations: state.conversations,
+    conversations: state.conversations.filter((conversation) => !isAutomationConversation(conversation)),
     preferences: state.preferences,
   };
+}
+
+function mergeAutomationConversations(local: Conversation[], remote: Conversation[]) {
+  const standardConversations = local.filter((conversation) => !isAutomationConversation(conversation));
+  const automationConversations = remote
+    .filter((conversation) => isAutomationConversation(conversation))
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  return [...automationConversations, ...standardConversations];
 }
 
 function loadLocalFallbackState(userId: string): PersistedAppState {
@@ -528,6 +537,59 @@ export default function App() {
   const page = appState.preferences.page;
   const isDark = appState.preferences.darkMode;
   const effectiveSettingsPassword = appState.config.settingsAccessPassword || 'MM@2026';
+
+  useEffect(() => {
+    if (page !== 'chat') return;
+
+    const syncAutomationConversations = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (isSettingsOpenRef.current) return;
+
+      try {
+        const response = await fetch(DB_STATE_URL, {
+          headers: buildDbHeaders(clientUserIdRef.current),
+        });
+        if (!response.ok) return;
+
+        const remoteState = applyRouteToState(normalizePersistedAppState(await response.json()));
+        const localState = latestStateRef.current;
+        const remoteAutomationConversations = remoteState.conversations.filter((conversation) => isAutomationConversation(conversation));
+        const localAutomationConversations = localState.conversations.filter((conversation) => isAutomationConversation(conversation));
+
+        const remoteFingerprint = JSON.stringify(remoteAutomationConversations);
+        const localFingerprint = JSON.stringify(localAutomationConversations);
+        if (remoteFingerprint === localFingerprint) return;
+
+        const newestRemoteAutomation = [...remoteAutomationConversations].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] ?? null;
+        const newestLocalAutomation = [...localAutomationConversations].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] ?? null;
+        const hasFreshAutomationUpdate =
+          Boolean(newestRemoteAutomation)
+          && ((newestRemoteAutomation?.updatedAt || 0) > (newestLocalAutomation?.updatedAt || 0));
+
+        skipNextPersistRef.current = true;
+        setAppState((prev) =>
+          normalizePersistedAppState({
+            ...prev,
+            conversations: mergeAutomationConversations(prev.conversations, remoteState.conversations),
+            preferences: {
+              ...prev.preferences,
+              currentConversationId:
+                hasFreshAutomationUpdate && newestRemoteAutomation
+                  ? newestRemoteAutomation.id
+                  : prev.preferences.currentConversationId,
+            },
+            updatedAt: remoteState.updatedAt,
+          })
+        );
+      } catch {
+        // Keep background automation sync quiet to avoid UI noise.
+      }
+    };
+
+    void syncAutomationConversations();
+    const intervalId = window.setInterval(syncAutomationConversations, 8000);
+    return () => window.clearInterval(intervalId);
+  }, [page]);
 
   useEffect(() => {
     if (page === 'chat' && isDark) {

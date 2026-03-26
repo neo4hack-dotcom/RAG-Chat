@@ -144,6 +144,9 @@ export type PlanningEmailPostAction = {
 };
 
 export type PlanningPostActions = {
+  publishToChat: {
+    enabled: boolean;
+  };
   exportFile: PlanningExportPostAction;
   sendEmail: PlanningEmailPostAction;
 };
@@ -466,6 +469,9 @@ export type Conversation = {
   memory?: ConversationMemory;
   updatedAt: number;
   agentState?: ConversationAgentState;
+  kind?: 'standard' | 'automation';
+  accentTone?: 'blue' | 'green' | 'teal' | 'sky' | 'violet' | 'amber' | 'rose' | 'slate' | 'emerald';
+  automationPlanId?: string | null;
 };
 
 export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP' | 'CREWAI';
@@ -806,6 +812,9 @@ export function createEmptyCrewPlanDraft(timezone = 'UTC'): CrewPlanDraft {
       recursive: false,
     },
     postActions: {
+      publishToChat: {
+        enabled: false,
+      },
       exportFile: {
         enabled: false,
         format: 'csv',
@@ -847,6 +856,10 @@ export function normalizeCrewPlanDraft(
         : base.trigger.weekdays,
     },
     postActions: {
+      publishToChat: {
+        ...base.postActions.publishToChat,
+        enabled: Boolean((draft as any)?.postActions?.publishToChat?.enabled),
+      },
       exportFile: {
         ...base.postActions.exportFile,
         ...(((draft as any)?.postActions?.exportFile ?? {}) as Partial<PlanningExportPostAction>),
@@ -1515,6 +1528,12 @@ export function normalizePersistedAppState(
     },
     updatedAt: state?.updatedAt,
   };
+}
+
+export function isAutomationConversation(conversation?: Partial<Conversation> | null): boolean {
+  if (!conversation || typeof conversation !== 'object') return false;
+  if (conversation.kind === 'automation') return true;
+  return typeof conversation.id === 'string' && conversation.id.startsWith('automation-plan-');
 }
 
 export function hasMeaningfulPersistedAppState(state: PersistedAppState): boolean {

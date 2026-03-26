@@ -473,10 +473,46 @@ export function McpPlanningModal({
                       Post-actions
                     </div>
                     <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                      After the MCP run completes, optionally generate a file export and/or send the result by email.
+                      After the MCP run completes, optionally publish the result into the app chat, generate a file export, and/or send the result by email.
                     </div>
 
                     <div className="mt-4 space-y-4">
+                      <div className="rounded-[1.35rem] border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            <div className="mt-0.5 rounded-full bg-violet-50 p-2 text-violet-600 dark:bg-violet-950/35 dark:text-violet-300">
+                              <Workflow className="h-4 w-4" />
+                            </div>
+                            <div>
+                              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Publish into the app chat</div>
+                              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                Reuse a dedicated automation conversation for this schedule and append the final formatted answer after each run.
+                              </div>
+                            </div>
+                          </div>
+                          <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-300">
+                            <input
+                              type="checkbox"
+                              checked={draft.postActions.publishToChat.enabled}
+                              onChange={(event) =>
+                                updateDraft({
+                                  postActions: {
+                                    ...draft.postActions,
+                                    publishToChat: { enabled: event.target.checked },
+                                  },
+                                })
+                              }
+                            />
+                            Enabled
+                          </label>
+                        </div>
+                        {draft.postActions.publishToChat.enabled && (
+                          <div className="mt-3 rounded-2xl border border-violet-100 bg-violet-50/70 px-4 py-3 text-xs leading-6 text-violet-900 dark:border-violet-900/40 dark:bg-violet-950/20 dark:text-violet-100">
+                            The scheduler will reuse the same automation conversation for this plan, append each new result without clearing the history, and automatically keep only the latest 20 injected runs.
+                          </div>
+                        )}
+                      </div>
+
                       <div className="rounded-[1.35rem] border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-950">
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex items-start gap-3">

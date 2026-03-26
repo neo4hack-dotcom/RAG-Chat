@@ -330,6 +330,20 @@ export function LandingPage({ onNavigate, documentationUrl, agenticDataVizUrl, p
       <section className="relative z-10 flex flex-col items-center text-center px-6 pt-16 pb-20 max-w-5xl mx-auto">
         <HeroHeadline />
 
+        <motion.div
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.7, delay: 0.45, ease: [0.16, 1, 0.3, 1] }}
+          className="mt-6 max-w-3xl"
+        >
+          <div className="text-[13px] font-semibold uppercase tracking-[0.28em] text-slate-500">
+            Your AI Augmented AI assistant
+          </div>
+          <p className="mt-5 text-[18px] leading-[1.8] text-slate-600 md:text-[20px]">
+            The true power of AI agents with MCP providers. Building the bridge that connects the autonomy to real-world data and tools.
+          </p>
+        </motion.div>
+
         {/* Scroll hint */}
         <motion.div
           initial={{ opacity: 0 }}
