@@ -127,6 +127,27 @@ export type CrewPlanTrigger = {
   recursive: boolean;
 };
 
+export type PlanningExportPostAction = {
+  enabled: boolean;
+  format: 'csv' | 'tsv' | 'xlsx';
+  path: string;
+};
+
+export type PlanningEmailPostAction = {
+  enabled: boolean;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  bodyTemplate: string;
+  attachExportedFile: boolean;
+};
+
+export type PlanningPostActions = {
+  exportFile: PlanningExportPostAction;
+  sendEmail: PlanningEmailPostAction;
+};
+
 export type CrewPlanDraft = {
   name: string;
   prompt: string;
@@ -135,6 +156,7 @@ export type CrewPlanDraft = {
   useMcpOrchestrator: boolean;
   status: 'active' | 'paused';
   trigger: CrewPlanTrigger;
+  postActions: PlanningPostActions;
 };
 
 export type CrewPlan = CrewPlanDraft & {
@@ -451,7 +473,7 @@ export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP' | 'CREWAI';
 export type AgentRole = 'manager' | 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'auto_ml' | 'data_cleaner' | 'anonymizer' | 'email_sender' | 'custom_agent';
 export type BuiltInAgentRole = Exclude<AgentRole, 'custom_agent'>;
 
-export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
+export type Page = 'landing' | 'chat' | 'dataviz' | 'agents' | 'admin';
 
 const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer', 'email_sender', 'custom_agent'];
 export const BUILT_IN_AGENT_ROLES: BuiltInAgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer', 'email_sender'];
@@ -531,6 +553,7 @@ export type AppConfig = {
   portalApps: PortalApp[];
   customAgents: CustomAgentConfig[];
   settingsAccessPassword: string;
+  ssoConfig: SsoConfig;
   clickhouseHost: string;
   clickhousePort: number;
   clickhouseDatabase: string;
@@ -564,6 +587,27 @@ export type EmailSenderAgentConfig = {
   replyTo: string;
   allowedRecipients: string[];
   systemPrompt: string;
+};
+
+export type SsoConfig = {
+  enabled: boolean;
+  providerType: 'oidc' | 'saml' | 'generic';
+  providerLabel: string;
+  issuerUrl: string;
+  authorizationUrl: string;
+  tokenUrl: string;
+  userInfoUrl: string;
+  jwksUrl: string;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  scopes: string;
+  logoutUrl: string;
+  allowedDomains: string[];
+  roleClaim: string;
+  emailClaim: string;
+  nameClaim: string;
+  allowAdminPasswordFallback: boolean;
 };
 
 export type AppPreferences = {
@@ -626,6 +670,26 @@ export const DEFAULT_CONFIG: AppConfig = {
   portalApps: [],
   customAgents: [],
   settingsAccessPassword: 'MM@2026',
+  ssoConfig: {
+    enabled: false,
+    providerType: 'oidc',
+    providerLabel: 'Corporate SSO',
+    issuerUrl: '',
+    authorizationUrl: '',
+    tokenUrl: '',
+    userInfoUrl: '',
+    jwksUrl: '',
+    clientId: '',
+    clientSecret: '',
+    redirectUri: '',
+    scopes: 'openid profile email',
+    logoutUrl: '',
+    allowedDomains: [],
+    roleClaim: 'roles',
+    emailClaim: 'email',
+    nameClaim: 'name',
+    allowAdminPasswordFallback: true,
+  },
   clickhouseHost: 'localhost',
   clickhousePort: 8123,
   clickhouseDatabase: 'default',
@@ -740,6 +804,23 @@ export function createEmptyCrewPlanDraft(timezone = 'UTC'): CrewPlanDraft {
       pattern: '*',
       recursive: false,
     },
+    postActions: {
+      exportFile: {
+        enabled: false,
+        format: 'csv',
+        path: '',
+      },
+      sendEmail: {
+        enabled: false,
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: '',
+        bodyTemplate:
+          "Hello,\n\nHere is the latest MCP automation result for {plan_name}.\n\nTrigger: {trigger_label}\n\nSummary:\n{summary}\n\nDetailed outputs:\n{outputs_markdown}",
+        attachExportedFile: false,
+      },
+    },
   };
 }
 
@@ -763,6 +844,35 @@ export function normalizeCrewPlanDraft(
       weekdays: Array.isArray(incomingTrigger.weekdays)
         ? incomingTrigger.weekdays.filter(Boolean) as PlanningWeekday[]
         : base.trigger.weekdays,
+    },
+    postActions: {
+      exportFile: {
+        ...base.postActions.exportFile,
+        ...(((draft as any)?.postActions?.exportFile ?? {}) as Partial<PlanningExportPostAction>),
+        format:
+          ((draft as any)?.postActions?.exportFile?.format === 'tsv' || (draft as any)?.postActions?.exportFile?.format === 'xlsx')
+            ? (draft as any).postActions.exportFile.format
+            : 'csv',
+        path: String((draft as any)?.postActions?.exportFile?.path ?? '').trim(),
+        enabled: Boolean((draft as any)?.postActions?.exportFile?.enabled),
+      },
+      sendEmail: {
+        ...base.postActions.sendEmail,
+        ...(((draft as any)?.postActions?.sendEmail ?? {}) as Partial<PlanningEmailPostAction>),
+        to: Array.isArray((draft as any)?.postActions?.sendEmail?.to)
+          ? (draft as any).postActions.sendEmail.to.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+          : base.postActions.sendEmail.to,
+        cc: Array.isArray((draft as any)?.postActions?.sendEmail?.cc)
+          ? (draft as any).postActions.sendEmail.cc.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+          : base.postActions.sendEmail.cc,
+        bcc: Array.isArray((draft as any)?.postActions?.sendEmail?.bcc)
+          ? (draft as any).postActions.sendEmail.bcc.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+          : base.postActions.sendEmail.bcc,
+        subject: String((draft as any)?.postActions?.sendEmail?.subject ?? '').trim(),
+        bodyTemplate: String((draft as any)?.postActions?.sendEmail?.bodyTemplate ?? base.postActions.sendEmail.bodyTemplate),
+        attachExportedFile: Boolean((draft as any)?.postActions?.sendEmail?.attachExportedFile),
+        enabled: Boolean((draft as any)?.postActions?.sendEmail?.enabled),
+      },
     },
   };
 }
@@ -1216,6 +1326,7 @@ export function normalizeEmailSenderAgentState(
 export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfig {
   const incomingFileManager = config?.fileManagerConfig;
   const incomingEmailSender = config?.emailSenderConfig;
+  const incomingSso = config?.ssoConfig;
   const incomingOracleAnalyst = config?.oracleAnalystConfig;
   const incomingOracleConnections = Array.isArray(config?.oracleConnections) ? config!.oracleConnections : [];
   const incomingPortalApps = Array.isArray(config?.portalApps) ? config!.portalApps : [];
@@ -1244,6 +1355,33 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
       ...(config?.agentVisibility ?? {}),
     },
     settingsAccessPassword: config?.settingsAccessPassword || DEFAULT_CONFIG.settingsAccessPassword,
+    ssoConfig: {
+      ...DEFAULT_CONFIG.ssoConfig,
+      ...(incomingSso ?? {}),
+      enabled: incomingSso?.enabled ?? DEFAULT_CONFIG.ssoConfig.enabled,
+      providerType:
+        incomingSso?.providerType === 'saml' || incomingSso?.providerType === 'generic'
+          ? incomingSso.providerType
+          : 'oidc',
+      providerLabel: String(incomingSso?.providerLabel ?? DEFAULT_CONFIG.ssoConfig.providerLabel),
+      issuerUrl: String(incomingSso?.issuerUrl ?? DEFAULT_CONFIG.ssoConfig.issuerUrl),
+      authorizationUrl: String(incomingSso?.authorizationUrl ?? DEFAULT_CONFIG.ssoConfig.authorizationUrl),
+      tokenUrl: String(incomingSso?.tokenUrl ?? DEFAULT_CONFIG.ssoConfig.tokenUrl),
+      userInfoUrl: String(incomingSso?.userInfoUrl ?? DEFAULT_CONFIG.ssoConfig.userInfoUrl),
+      jwksUrl: String(incomingSso?.jwksUrl ?? DEFAULT_CONFIG.ssoConfig.jwksUrl),
+      clientId: String(incomingSso?.clientId ?? DEFAULT_CONFIG.ssoConfig.clientId),
+      clientSecret: String(incomingSso?.clientSecret ?? DEFAULT_CONFIG.ssoConfig.clientSecret),
+      redirectUri: String(incomingSso?.redirectUri ?? DEFAULT_CONFIG.ssoConfig.redirectUri),
+      scopes: String(incomingSso?.scopes ?? DEFAULT_CONFIG.ssoConfig.scopes),
+      logoutUrl: String(incomingSso?.logoutUrl ?? DEFAULT_CONFIG.ssoConfig.logoutUrl),
+      allowedDomains: Array.isArray(incomingSso?.allowedDomains)
+        ? incomingSso!.allowedDomains.filter(Boolean).map(String)
+        : DEFAULT_CONFIG.ssoConfig.allowedDomains,
+      roleClaim: String(incomingSso?.roleClaim ?? DEFAULT_CONFIG.ssoConfig.roleClaim),
+      emailClaim: String(incomingSso?.emailClaim ?? DEFAULT_CONFIG.ssoConfig.emailClaim),
+      nameClaim: String(incomingSso?.nameClaim ?? DEFAULT_CONFIG.ssoConfig.nameClaim),
+      allowAdminPasswordFallback: incomingSso?.allowAdminPasswordFallback ?? DEFAULT_CONFIG.ssoConfig.allowAdminPasswordFallback,
+    },
     agenticDataVizUrl: config?.agenticDataVizUrl ?? DEFAULT_CONFIG.agenticDataVizUrl,
     portalApps: incomingPortalApps
       .filter((app): app is PortalApp => Boolean(app))

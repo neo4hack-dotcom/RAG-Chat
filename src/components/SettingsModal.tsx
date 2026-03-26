@@ -99,6 +99,26 @@ function buildLocalConfig(config: AppConfig): AppConfig {
         }))
       : [],
     settingsAccessPassword: config.settingsAccessPassword || 'MM@2026',
+    ssoConfig: {
+      enabled: config.ssoConfig?.enabled ?? false,
+      providerType: config.ssoConfig?.providerType ?? 'oidc',
+      providerLabel: config.ssoConfig?.providerLabel ?? 'Corporate SSO',
+      issuerUrl: config.ssoConfig?.issuerUrl ?? '',
+      authorizationUrl: config.ssoConfig?.authorizationUrl ?? '',
+      tokenUrl: config.ssoConfig?.tokenUrl ?? '',
+      userInfoUrl: config.ssoConfig?.userInfoUrl ?? '',
+      jwksUrl: config.ssoConfig?.jwksUrl ?? '',
+      clientId: config.ssoConfig?.clientId ?? '',
+      clientSecret: config.ssoConfig?.clientSecret ?? '',
+      redirectUri: config.ssoConfig?.redirectUri ?? '',
+      scopes: config.ssoConfig?.scopes ?? 'openid profile email',
+      logoutUrl: config.ssoConfig?.logoutUrl ?? '',
+      allowedDomains: Array.isArray(config.ssoConfig?.allowedDomains) ? config.ssoConfig!.allowedDomains.filter(Boolean) : [],
+      roleClaim: config.ssoConfig?.roleClaim ?? 'roles',
+      emailClaim: config.ssoConfig?.emailClaim ?? 'email',
+      nameClaim: config.ssoConfig?.nameClaim ?? 'name',
+      allowAdminPasswordFallback: config.ssoConfig?.allowAdminPasswordFallback ?? true,
+    },
     clickhouseHost: config.clickhouseHost || 'localhost',
     clickhousePort: config.clickhousePort || 8123,
     clickhouseDatabase: config.clickhouseDatabase || 'default',
@@ -216,7 +236,7 @@ export function SettingsModal({
   const [testMessage, setTestMessage] = useState('');
   
   // Tab state (LLM, RAG, ClickHouse, MCP, or DB backup settings)
-  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'clickhouse' | 'oracle' | 'apps' | 'agents' | 'mcp' | 'storage'>('llm');
+  const [activeTab, setActiveTab] = useState<'llm' | 'rag' | 'clickhouse' | 'oracle' | 'apps' | 'agents' | 'mcp' | 'storage' | 'access'>('llm');
 
   // Connection test states for OpenSearch
   const [esTestStatus, setEsTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -987,6 +1007,12 @@ export function SettingsModal({
               App Portal
             </button>
             <button
+              onClick={() => setActiveTab('access')}
+              className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'access' ? 'border-violet-500 text-violet-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              Access
+            </button>
+            <button
               onClick={() => setActiveTab('agents')}
               className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'agents' ? 'border-slate-500 text-slate-700 dark:text-slate-200' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             >
@@ -1000,7 +1026,257 @@ export function SettingsModal({
             </button>
           </div>
 
-          {activeTab === 'storage' ? (
+          {activeTab === 'access' ? (
+            <div className="space-y-6">
+              <div className="p-4 rounded-2xl bg-violet-50/80 border border-violet-200/70">
+                <div className="flex items-center gap-2 mb-2">
+                  <Network className="w-4 h-4 text-violet-600" />
+                  <h3 className="text-sm font-semibold text-violet-900">Admin access and optional SSO</h3>
+                </div>
+                <p className="text-xs text-violet-900/85 leading-relaxed">
+                  This section controls who can administer the platform. The current app still uses the admin password route directly, but you can already store a full SSO profile here so the future authentication layer has consistent OIDC / enterprise identity settings.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="p-4 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Key className="w-4 h-4 text-amber-600 dark:text-amber-300" />
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Admin password</h3>
+                  </div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                    This password currently protects the dedicated <code>/admin</code> route. Keep it enabled even when preparing SSO, unless you want to rely solely on the identity provider later.
+                  </p>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Access password</label>
+                    <input
+                      type="password"
+                      value={localConfig.settingsAccessPassword}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, settingsAccessPassword: e.target.value }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500/40 transition-all"
+                      placeholder="MM@2026"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Network className="w-4 h-4 text-violet-600" />
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">SSO profile</h3>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+                    <input
+                      type="checkbox"
+                      checked={localConfig.ssoConfig.enabled}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, enabled: e.target.checked } }))}
+                      className="rounded border-gray-300 text-violet-600 focus:ring-violet-500"
+                    />
+                    Enable SSO configuration
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+                    <input
+                      type="checkbox"
+                      checked={localConfig.ssoConfig.allowAdminPasswordFallback}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, allowAdminPasswordFallback: e.target.checked } }))}
+                      className="rounded border-gray-300 text-violet-600 focus:ring-violet-500"
+                    />
+                    Keep the admin password fallback active
+                  </label>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    The profile is shared for all users and stored in <code>DB.json</code>. It is optional and intended for admin-grade rollout preparation.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Provider type</label>
+                    <select
+                      value={localConfig.ssoConfig.providerType}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, providerType: e.target.value as 'oidc' | 'saml' | 'generic' } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                    >
+                      <option value="oidc">OIDC / OpenID Connect</option>
+                      <option value="saml">SAML (metadata reference only)</option>
+                      <option value="generic">Generic enterprise SSO</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Provider label</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.providerLabel}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, providerLabel: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="Okta / Entra ID / Ping"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Allowed email domains</label>
+                    <input
+                      type="text"
+                      value={(localConfig.ssoConfig.allowedDomains ?? []).join(', ')}
+                      onChange={(e) => setLocalConfig(prev => ({
+                        ...prev,
+                        ssoConfig: {
+                          ...prev.ssoConfig,
+                          allowedDomains: e.target.value.split(',').map((item) => item.trim()).filter(Boolean),
+                        },
+                      }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="company.com, subsidiary.org"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Issuer URL</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.issuerUrl}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, issuerUrl: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="https://login.example.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Redirect URI</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.redirectUri}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, redirectUri: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="https://app.example.com/auth/callback"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Authorization URL</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.authorizationUrl}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, authorizationUrl: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="https://login.example.com/oauth2/v1/authorize"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Token URL</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.tokenUrl}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, tokenUrl: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="https://login.example.com/oauth2/v1/token"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">UserInfo URL</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.userInfoUrl}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, userInfoUrl: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="https://login.example.com/oauth2/v1/userinfo"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">JWKS URL</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.jwksUrl}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, jwksUrl: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="https://login.example.com/oauth2/v1/keys"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Logout URL</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.logoutUrl}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, logoutUrl: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="https://login.example.com/logout"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Client ID</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.clientId}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, clientId: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="app-client-id"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Client secret</label>
+                    <input
+                      type="password"
+                      value={localConfig.ssoConfig.clientSecret}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, clientSecret: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="••••••••"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Scopes</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.scopes}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, scopes: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="openid profile email"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Role claim</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.roleClaim}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, roleClaim: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="roles"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Email claim</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.emailClaim}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, emailClaim: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="email"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Name claim</label>
+                    <input
+                      type="text"
+                      value={localConfig.ssoConfig.nameClaim}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, ssoConfig: { ...prev.ssoConfig, nameClaim: e.target.value } }))}
+                      className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      placeholder="name"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : activeTab === 'storage' ? (
             <div className="space-y-5">
               <div className="p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-900/20 border border-amber-200/70 dark:border-amber-700/40">
                 <div className="flex items-center gap-2 mb-2">
@@ -1068,25 +1344,6 @@ export function SettingsModal({
                 )}
               </div>
 
-              <div className="p-4 rounded-2xl bg-white/70 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Key className="w-4 h-4 text-amber-600 dark:text-amber-300" />
-                  <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Settings access protection</h3>
-                </div>
-                <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-                  The discreet button on the landing page asks for this password before opening Settings. Default value: <span className="font-mono">MM@2026</span>.
-                </p>
-                <div>
-                  <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Access password</label>
-                  <input
-                    type="password"
-                    value={localConfig.settingsAccessPassword}
-                    onChange={(e) => setLocalConfig(prev => ({ ...prev, settingsAccessPassword: e.target.value }))}
-                    className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500/40 transition-all"
-                    placeholder="MM@2026"
-                  />
-                </div>
-              </div>
             </div>
           ) : activeTab === 'oracle' ? (
             <div className="space-y-6">

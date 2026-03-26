@@ -333,15 +333,20 @@ The ClickHouse agent uses the backend only and always relies on the configured l
 3. The backend Python agent prepares a clean export with a professional layout.
 4. If the target PDF path already exists, the agent asks for explicit confirmation before overwrite.
 
-### CrewAI Planning
+### LangGraph Planning
 
-The **CrewAI - Planning** mode is a backend Python scheduler for existing agents.
+The **LangGraph Planning** mode is a backend Python scheduler for existing agents, MCP connectors, and the MCP Orchestrator.
 
 It supports:
 
 - fixed schedules (`once`, `daily`, `weekly`, `interval`),
 - ClickHouse watch triggers based on a read-only SQL result,
 - file-arrival triggers on a watched directory,
+- MCP-only planning with a lightweight guided form,
+- post-actions after a scheduled run:
+  - generate a file through **File Management** (`csv`, `tsv`, `xlsx`),
+  - send an email through **Email Sender** with a configurable subject/body template,
+  - optionally attach the generated export to the email,
 - pause/resume, edit, delete and `Run now`,
 - recent run history in the planner overlay.
 
@@ -386,10 +391,17 @@ In **Settings → DB Backup**, you can:
 Connect any [Model Context Protocol](https://modelcontextprotocol.io) server and have the LLM call its tools autonomously:
 
 1. Open **Settings → MCP Tools**.
-2. Add a tool: give it a label and its MCP endpoint URL (for example `http://localhost:3000/sse` or a streamable HTTP endpoint).
+2. Add a tool: give it a label, an English description, and its MCP endpoint URL (for example `http://localhost:3000/sse` or a streamable HTTP endpoint).
 3. Click **Test** — available tools appear as badges on success.
 4. In the chat, switch to **MCP** mode and select the tool.
 5. Send a message — the backend runs the full agentic loop (list tools → LLM decides → call tool via MCP → feed result → final answer). Tool calls are visible in the collapsible "Agent Thinking Process" panel.
+
+Optional MCP UX helpers:
+
+- each MCP can expose starter questions configured in **Settings**,
+- these starter questions can appear in chat and in the composer quick-start drawer,
+- each question can optionally prefer a specific MCP tool,
+- MCP scheduled runs can chain into file export or email delivery after the MCP execution finishes.
 
 ---
 
@@ -912,7 +924,10 @@ Each MCP tool entry has:
 | Field | Description |
 |-------|-------------|
 | Label | Display name shown in the chat mode selector |
+| Description | English capability summary used by the MCP Orchestrator to choose the right connector |
 | URL (SSE or HTTP) | Full MCP endpoint URL for either SSE or streamable HTTP |
+| Starter questions | Optional quick-start prompts shown in chat/composer for the selected MCP |
+| Preferred MCP tool | Optional tool hint attached to a starter question |
 
 ### Backend Environment Variables
 

@@ -33,6 +33,52 @@ const LEGACY_CONFIG_KEY = 'liquid-ai-config';
 const LEGACY_CONVERSATIONS_KEY = 'ragnarok_conversations';
 const LEGACY_DARK_KEY = 'ragnarok-dark';
 
+function readPageFromLocation(): Page {
+  if (typeof window === 'undefined') return 'landing';
+  const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+  const hash = window.location.hash.replace(/^#/, '').replace(/\/+$/, '');
+  const candidate = hash || pathname;
+  switch (candidate) {
+    case '/chat':
+      return 'chat';
+    case '/dataviz':
+      return 'dataviz';
+    case '/agents':
+      return 'agents';
+    case '/admin':
+      return 'admin';
+    default:
+      return 'landing';
+  }
+}
+
+function urlForPage(page: Page): string {
+  switch (page) {
+    case 'chat':
+      return '/chat';
+    case 'dataviz':
+      return '/dataviz';
+    case 'agents':
+      return '/agents';
+    case 'admin':
+      return '/admin';
+    default:
+      return '/';
+  }
+}
+
+function applyRouteToState(state: PersistedAppState): PersistedAppState {
+  const routePage = readPageFromLocation();
+  if (state.preferences.page === routePage) return state;
+  return normalizePersistedAppState({
+    ...state,
+    preferences: {
+      ...state.preferences,
+      page: routePage,
+    },
+  });
+}
+
 function getOrCreateClientUserId(): string {
   if (typeof window === 'undefined') return 'anonymous';
   const existing = localStorage.getItem(CLIENT_USER_ID_KEY);
@@ -140,13 +186,82 @@ function HydrationScreen({ syncError }: { syncError: string | null }) {
   );
 }
 
+function AdminAccessScreen({
+  password,
+  passwordInput,
+  error,
+  onPasswordChange,
+  onSubmit,
+  onBack,
+}: {
+  password: string;
+  passwordInput: string;
+  error: string;
+  onPasswordChange: (value: string) => void;
+  onSubmit: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <div className="min-h-screen bg-[#f5f5f5] dark:bg-[#0f0f13] flex items-center justify-center px-6">
+      <div className="glass-panel max-w-lg w-full rounded-[2rem] p-8 shadow-2xl">
+        <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-slate-700 to-slate-900 flex items-center justify-center shadow-md shadow-slate-900/20 mb-5">
+          <span className="text-white text-xl font-semibold">A</span>
+        </div>
+        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Admin Settings</h1>
+        <p className="mt-3 text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
+          This route is reserved for configuration. End users do not see any settings button in the main application.
+        </p>
+        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          Current admin route: <code>/admin</code>
+        </p>
+        <div className="mt-6 space-y-3">
+          <input
+            type="password"
+            value={passwordInput}
+            onChange={(e) => onPasswordChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                onSubmit();
+              }
+            }}
+            autoFocus
+            placeholder="Admin password"
+            className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none focus:border-slate-400"
+          />
+          {error && <p className="text-xs text-red-600">{error}</p>}
+        </div>
+        <div className="mt-6 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onBack}
+            className="px-4 py-2 rounded-full text-sm font-medium text-gray-500 hover:text-gray-800 hover:bg-gray-100 transition-colors"
+          >
+            Back to app
+          </button>
+          <button
+            type="button"
+            onClick={onSubmit}
+            className="px-4 py-2 rounded-full bg-gray-900 text-white text-sm font-medium hover:bg-black transition-colors"
+          >
+            Unlock settings
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Main Application Component
  */
 export default function App() {
   const clientUserIdRef = useRef<string>(getOrCreateClientUserId());
-  const [appState, setAppState] = useState<PersistedAppState>(() => loadLocalFallbackState(clientUserIdRef.current));
+  const [appState, setAppState] = useState<PersistedAppState>(() => applyRouteToState(loadLocalFallbackState(clientUserIdRef.current)));
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAdminUnlocked, setIsAdminUnlocked] = useState(false);
+  const [adminPasswordInput, setAdminPasswordInput] = useState('');
+  const [adminAccessError, setAdminAccessError] = useState('');
   const [isHydrating, setIsHydrating] = useState(true);
   const [isDbBusy, setIsDbBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -210,19 +325,20 @@ export default function App() {
         }
 
         const savedState = normalizePersistedAppState(await response.json());
+        const routedSavedState = applyRouteToState(savedState);
         const requestedFingerprint = JSON.stringify(pickPersistedPayload(snapshot));
         const currentFingerprint = JSON.stringify(pickPersistedPayload(latestStateRef.current));
 
-        setLastSyncedAt(savedState.updatedAt ?? null);
+        setLastSyncedAt(routedSavedState.updatedAt ?? null);
         setSyncError(null);
-        lastSavedConfigFingerprintRef.current = JSON.stringify(savedState.config);
+        lastSavedConfigFingerprintRef.current = JSON.stringify(routedSavedState.config);
 
         if (adoptSavedState && requestedFingerprint === currentFingerprint) {
           skipNextPersistRef.current = true;
-          setAppState(savedState);
+          setAppState(routedSavedState);
         }
 
-        return savedState;
+        return routedSavedState;
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unable to save DB state.';
         setSyncError(message);
@@ -247,7 +363,7 @@ export default function App() {
           throw new Error(errorPayload.detail || `HTTP ${response.status}`);
         }
 
-        const remoteState = normalizePersistedAppState(await response.json());
+        const remoteState = applyRouteToState(normalizePersistedAppState(await response.json()));
         const localState = latestStateRef.current;
         const remoteUpdatedAt = Date.parse(remoteState.updatedAt ?? '');
         const localUpdatedAt = Date.parse(localState.updatedAt ?? '');
@@ -327,7 +443,7 @@ export default function App() {
         throw new Error(errorPayload.detail || `HTTP ${response.status}`);
       }
 
-      const importedState = normalizePersistedAppState(await response.json());
+      const importedState = applyRouteToState(normalizePersistedAppState(await response.json()));
       skipNextPersistRef.current = true;
       initialSyncCompleteRef.current = true;
       setAppState(importedState);
@@ -370,6 +486,30 @@ export default function App() {
   }, [syncFromDb]);
 
   useEffect(() => {
+    const syncRoute = () => {
+      const routePage = readPageFromLocation();
+      setAppState((prev) => (
+        prev.preferences.page === routePage
+          ? prev
+          : normalizePersistedAppState({
+              ...prev,
+              preferences: {
+                ...prev.preferences,
+                page: routePage,
+              },
+            })
+      ));
+    };
+
+    window.addEventListener('popstate', syncRoute);
+    window.addEventListener('hashchange', syncRoute);
+    return () => {
+      window.removeEventListener('popstate', syncRoute);
+      window.removeEventListener('hashchange', syncRoute);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!initialSyncCompleteRef.current) return;
     if (skipNextPersistRef.current) {
       skipNextPersistRef.current = false;
@@ -387,6 +527,7 @@ export default function App() {
 
   const page = appState.preferences.page;
   const isDark = appState.preferences.darkMode;
+  const effectiveSettingsPassword = appState.config.settingsAccessPassword || 'MM@2026';
 
   useEffect(() => {
     if (page === 'chat' && isDark) {
@@ -397,8 +538,27 @@ export default function App() {
   }, [isDark, page]);
 
   const navigate = useCallback((target: Page) => {
+    if (typeof window !== 'undefined') {
+      const nextUrl = urlForPage(target);
+      const currentUrl = `${window.location.pathname}${window.location.search}`;
+      if (currentUrl !== nextUrl) {
+        window.history.pushState({}, '', nextUrl);
+      }
+    }
     updatePreferences({ page: target });
+    if (target !== 'admin') {
+      setIsSettingsOpen(false);
+      setIsAdminUnlocked(false);
+      setAdminPasswordInput('');
+      setAdminAccessError('');
+    }
   }, [updatePreferences]);
+
+  useEffect(() => {
+    if (page === 'admin' && isAdminUnlocked && !isSettingsOpen) {
+      setIsSettingsOpen(true);
+    }
+  }, [page, isAdminUnlocked, isSettingsOpen]);
 
   if (isHydrating) {
     return <HydrationScreen syncError={syncError} />;
@@ -422,8 +582,6 @@ export default function App() {
               documentationUrl={appState.config.documentationUrl}
               agenticDataVizUrl={appState.config.agenticDataVizUrl}
               portalAppsCount={appState.config.portalApps.filter((app) => app.name.trim() && app.url.trim()).length}
-              settingsAccessPassword={appState.config.settingsAccessPassword}
-              onOpenSettings={() => setIsSettingsOpen(true)}
             />
           </motion.div>
         )}
@@ -490,11 +648,50 @@ export default function App() {
             />
           </motion.div>
         )}
+
+        {page === 'admin' && (
+          <motion.div
+            key="admin"
+            variants={pageVariants}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+            transition={pageTransition}
+            style={{ position: 'fixed', inset: 0, overflow: 'auto' }}
+          >
+            <AdminAccessScreen
+              password={effectiveSettingsPassword}
+              passwordInput={adminPasswordInput}
+              error={adminAccessError}
+              onPasswordChange={(value) => {
+                setAdminPasswordInput(value);
+                if (adminAccessError) setAdminAccessError('');
+              }}
+              onSubmit={() => {
+                if (adminPasswordInput === effectiveSettingsPassword) {
+                  setAdminAccessError('');
+                  setAdminPasswordInput('');
+                  setIsAdminUnlocked(true);
+                  setIsSettingsOpen(true);
+                  return;
+                }
+                setAdminAccessError('Incorrect password.');
+              }}
+              onBack={() => navigate('landing')}
+            />
+          </motion.div>
+        )}
       </AnimatePresence>
 
       <SettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={() => {
+          setIsSettingsOpen(false);
+          if (page === 'admin') {
+            setIsAdminUnlocked(false);
+            navigate('landing');
+          }
+        }}
         config={appState.config}
         onSave={setConfig}
         onExportDb={exportDbBackup}
