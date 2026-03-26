@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge, Activity } from "lucide-react";
+import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge, Activity, Workflow } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeEmailSenderAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeEmailSenderAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig, isAutomationConversation } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -861,6 +861,7 @@ export function ChatInterface({
   });
   const selectedCustomAgent = enabledCustomAgents.find((agent) => agent.id === selectedCustomAgentId) ?? null;
   const activeMcpTool = (config.mcpTools ?? []).find((tool: McpTool) => tool.id === mcpToolId) ?? null;
+  const isAutomationConversationActive = isAutomationConversation(currentConversation);
   const activeMcpPresetQuestions = useMemo(
     () =>
       (activeMcpTool?.presetQuestions ?? []).filter(
@@ -1166,6 +1167,8 @@ export function ChatInterface({
   // Delete a specific conversation from history
   const deleteConversation = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    const targetConversation = conversations.find((conversation) => conversation.id === id);
+    if (isAutomationConversation(targetConversation)) return;
     const updated = conversations.filter(c => c.id !== id);
     onConversationsChange(updated);
     if (currentId === id) {
@@ -1821,6 +1824,7 @@ export function ChatInterface({
 
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
+    if (isAutomationConversation(currentConversation)) return;
     if (!isCurrentAgentRoleVisible) return;
     if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'auto_ml' && agentRole !== 'data_cleaner' && agentRole !== 'anonymizer' && agentRole !== 'email_sender' && agentRole !== 'custom_agent' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst') return;
     if (hasMeaningfulConversationMessages(currentConversation.messages)) return;
@@ -3659,7 +3663,9 @@ export function ChatInterface({
   };
 
   const inputPlaceholder =
-    workflow === 'CREWAI'
+    isAutomationConversationActive
+      ? "This automation conversation is read-only. New scheduled runs will appear here automatically."
+      : workflow === 'CREWAI'
       ? "Describe the automation you want to schedule..."
       : workflow === 'AGENT' && agentRole === 'clickhouse_query'
         ? "Ask a ClickHouse question or request a chart..."
@@ -4776,6 +4782,19 @@ export function ChatInterface({
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {conversations.map((conv) => (
+            (() => {
+              const isAutomation = isAutomationConversation(conv);
+              const automationTone = isAutomation
+                ? currentId === conv.id
+                  ? "bg-emerald-50/90 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800/60 shadow-sm"
+                  : "border-emerald-100/70 bg-emerald-50/50 hover:bg-emerald-50/80 dark:border-emerald-900/40 dark:bg-emerald-950/10 dark:hover:bg-emerald-950/20"
+                : "";
+              const iconTone = isAutomation
+                ? "text-emerald-500"
+                : currentId === conv.id
+                  ? "text-blue-500"
+                  : "text-gray-400";
+              return (
             <div
               key={conv.id}
               onClick={() => onCurrentIdChange(conv.id)}
@@ -4783,25 +4802,36 @@ export function ChatInterface({
                 currentId === conv.id
                   ? "bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 shadow-sm"
                   : "border-transparent hover:bg-white/50 dark:hover:bg-white/5 hover:border-gray-200/50 dark:hover:border-gray-700/50"
-              }`}
+              } ${automationTone}`}
             >
               <div className="flex items-start gap-3">
-                <MessageSquare className={`w-4 h-4 mt-0.5 flex-shrink-0 ${currentId === conv.id ? 'text-blue-500' : 'text-gray-400'}`} />
+                <MessageSquare className={`w-4 h-4 mt-0.5 flex-shrink-0 ${iconTone}`} />
                 <div className="flex-1 overflow-hidden">
-                  <div className="truncate font-medium text-gray-900 dark:text-gray-100">{conv.title}</div>
+                  <div className="flex items-center gap-2">
+                    <div className="truncate font-medium text-gray-900 dark:text-gray-100">{conv.title}</div>
+                    {isAutomation && (
+                      <span className="inline-flex shrink-0 items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/30 dark:text-emerald-200">
+                        AUTO
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-gray-400 mt-1">
                     {new Date(conv.updatedAt).toLocaleDateString()}
                   </div>
                 </div>
               </div>
-              <button
-                onClick={(e) => deleteConversation(e, conv.id)}
-                className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors ${currentId === conv.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-                title="Delete chat"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {!isAutomation && (
+                <button
+                  onClick={(e) => deleteConversation(e, conv.id)}
+                  className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors ${currentId === conv.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                  title="Delete chat"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
             </div>
+              );
+            })()
           ))}
           {conversations.length === 0 && (
             <div className="text-center text-sm text-gray-400 mt-10 px-4">
@@ -4845,7 +4875,7 @@ export function ChatInterface({
 
         {/* Right: Settings */}
         <div className="flex items-center justify-end w-1/3 gap-1">
-          {currentId && (
+          {currentId && !isAutomationConversationActive && (
             <button
               onClick={clearCurrentChat}
               className="glass-button p-2 rounded-xl text-red-600 dark:text-red-400 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30 flex items-center gap-1.5"
@@ -4882,6 +4912,17 @@ export function ChatInterface({
               {/* Chat Area */}
               <main ref={chatScrollContainerRef} className="flex-1 overflow-y-auto z-10 scroll-smooth">
                 <div className="max-w-[77rem] mx-auto pb-16">
+                  {isAutomationConversationActive && (
+                    <div className="max-w-[77rem] mx-auto mb-4 p-3 rounded-xl bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-950/20 dark:to-teal-950/20 border border-emerald-200/60 dark:border-emerald-800/50 shadow-sm animate-fade-in-up">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <Workflow className="w-4 h-4 text-emerald-600 dark:text-emerald-300" />
+                        <h3 className="font-semibold text-emerald-900 dark:text-emerald-200 text-[13px]">Automation conversation</h3>
+                      </div>
+                      <div className="text-[11px] text-emerald-900/85 dark:text-emerald-300/90 leading-relaxed">
+                        This thread is fed by a scheduled MCP automation. Each run is appended here automatically, and the history is capped to the latest 20 injected results.
+                      </div>
+                    </div>
+                  )}
                   {visibleMessages.map((msg) => (
                     <div
                       key={msg.id}
@@ -5133,6 +5174,7 @@ export function ChatInterface({
                     />
                     <button
                       onClick={() => fileInputRef.current?.click()}
+                      disabled={isAutomationConversationActive}
                       className="flex-shrink-0 w-11 h-11 rounded-2xl text-gray-400 dark:text-gray-500 hover:text-blue-500 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 flex items-center justify-center transition-colors mb-0.5 ml-1"
                       title="Attach file"
                     >
@@ -5161,6 +5203,7 @@ export function ChatInterface({
                       onSelect={(event) => setInputCursor(event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
                       onKeyDown={handleKeyDown}
                       placeholder={inputPlaceholder}
+                      disabled={isAutomationConversationActive}
                       className="w-full min-h-[48px] bg-transparent border-none resize-none focus:ring-0 px-2 py-3 text-[14px] leading-[1.65] text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 outline-none overflow-y-auto"
                       rows={1}
                     />
@@ -5175,13 +5218,14 @@ export function ChatInterface({
                     </button>
                     <button
                       onClick={() => {
+                        if (isAutomationConversationActive) return;
                         if (isLoading) {
                           stopCurrentExecution();
                           return;
                         }
                         handleSend();
                       }}
-                      disabled={!isLoading && (!input.trim() && attachments.length === 0)}
+                      disabled={isAutomationConversationActive || (!isLoading && (!input.trim() && attachments.length === 0))}
                       className={`flex-shrink-0 w-11 h-11 rounded-2xl flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors mb-0.5 mr-0.5 ${
                         isLoading
                           ? 'bg-rose-600 text-white hover:bg-rose-700'
