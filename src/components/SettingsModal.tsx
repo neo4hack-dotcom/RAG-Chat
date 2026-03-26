@@ -1,6 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2, FolderOpen, UploadCloud, Download } from "lucide-react";
-import { AppConfig, McpTool } from "../lib/utils";
+import { AppConfig, McpTool, BuiltInAgentRole } from "../lib/utils";
+
+const BUILT_IN_AGENT_OPTIONS: { role: BuiltInAgentRole; title: string; description: string }[] = [
+  { role: 'manager', title: 'Agent Manager', description: 'Routes requests and orchestrates the specialist agents.' },
+  { role: 'clickhouse_query', title: 'Clickhouse SQL', description: 'Handles direct ClickHouse questions, schema lookups, previews, and charts.' },
+  { role: 'data_analyst', title: 'Data Analyst', description: 'Runs deeper multi-step ClickHouse investigations.' },
+  { role: 'auto_ml', title: 'Auto-ML', description: 'Benchmarks machine-learning models on a scoped ClickHouse dataset.' },
+  { role: 'data_cleaner', title: 'Data Cleaner', description: 'Profiles data quality issues and proposes cleanup SQL.' },
+  { role: 'anonymizer', title: 'Anonymizer', description: 'Scans ClickHouse tables for likely PII and masking strategies.' },
+  { role: 'file_management', title: 'File Management', description: 'Browses, edits, creates, and moves files through backend Python tools.' },
+  { role: 'pdf_creator', title: 'PDF Creator', description: 'Turns analyses or text into polished PDF exports.' },
+  { role: 'oracle_analyst', title: 'Oracle SQL', description: 'Handles natural-language analysis and SQL execution against Oracle.' },
+];
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -23,6 +35,17 @@ function buildLocalConfig(config: AppConfig): AppConfig {
     model: config.model || '',
     systemPrompt: config.systemPrompt || '',
     managerUseRagFunctionalContext: config.managerUseRagFunctionalContext ?? false,
+    agentVisibility: {
+      manager: config.agentVisibility?.manager ?? true,
+      clickhouse_query: config.agentVisibility?.clickhouse_query ?? true,
+      data_analyst: config.agentVisibility?.data_analyst ?? true,
+      file_management: config.agentVisibility?.file_management ?? true,
+      pdf_creator: config.agentVisibility?.pdf_creator ?? true,
+      oracle_analyst: config.agentVisibility?.oracle_analyst ?? true,
+      auto_ml: config.agentVisibility?.auto_ml ?? true,
+      data_cleaner: config.agentVisibility?.data_cleaner ?? true,
+      anonymizer: config.agentVisibility?.anonymizer ?? true,
+    },
     disableSslVerification: config.disableSslVerification ?? false,
     elasticsearchUrl: config.elasticsearchUrl || 'http://localhost:9200',
     elasticsearchIndex: config.elasticsearchIndex || 'rag_documents',
@@ -1441,6 +1464,47 @@ export function SettingsModal({
             </div>
           ) : activeTab === 'agents' ? (
             <div className="space-y-6">
+              <div className="rounded-[1.75rem] border border-slate-200/80 bg-[linear-gradient(135deg,rgba(255,255,255,0.95),rgba(248,250,252,0.92),rgba(241,245,249,0.88))] p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Bot className="w-4 h-4 text-slate-700" />
+                  <h3 className="text-sm font-semibold text-slate-950">Built-in agent visibility</h3>
+                </div>
+                <p className="text-xs text-slate-700/80 leading-relaxed max-w-3xl">
+                  Disable an agent here to remove it from the Tools island in chat. The setting is shared for every user because it lives in the global configuration.
+                </p>
+                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {BUILT_IN_AGENT_OPTIONS.map((agent) => {
+                    const enabled = localConfig.agentVisibility?.[agent.role] !== false;
+                    return (
+                      <label
+                        key={agent.role}
+                        className="flex items-start justify-between gap-3 rounded-[1.35rem] border border-white/80 bg-white/85 px-4 py-3 shadow-[0_10px_24px_rgba(148,163,184,0.08)]"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-slate-900">{agent.title}</p>
+                          <p className="mt-1 text-[11px] leading-relaxed text-slate-600">{agent.description}</p>
+                        </div>
+                        <span className="inline-flex flex-col items-end gap-1 text-[11px] font-medium text-slate-500">
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={(e) => setLocalConfig((prev) => ({
+                              ...prev,
+                              agentVisibility: {
+                                ...prev.agentVisibility,
+                                [agent.role]: e.target.checked,
+                              },
+                            }))}
+                            className="h-4 w-4 rounded text-slate-700 focus:ring-slate-400"
+                          />
+                          {enabled ? 'Visible' : 'Hidden'}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="rounded-[1.75rem] border border-slate-200/80 bg-[linear-gradient(135deg,rgba(255,255,255,0.95),rgba(248,250,252,0.92),rgba(241,245,249,0.88))] p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
                 <div className="flex items-center justify-between gap-4">
                   <div>

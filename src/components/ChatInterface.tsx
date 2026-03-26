@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -511,14 +511,14 @@ function normalizeMentionToken(value: string): string {
     .replace(/[^a-z0-9_-]/g, '');
 }
 
-function extractMentionTargets(text: string): MentionTargetDefinition[] {
+function extractMentionTargets(text: string, availableTargets: MentionTargetDefinition[] = AGENT_MENTION_TARGETS): MentionTargetDefinition[] {
   const matches = String(text || '').match(/@([A-Za-zÀ-ÖØ-öø-ÿ0-9_-]+)/g) ?? [];
   const seen = new Set<string>();
   const resolved: MentionTargetDefinition[] = [];
 
   for (const rawMatch of matches) {
     const token = normalizeMentionToken(rawMatch.slice(1));
-    const target = AGENT_MENTION_TARGETS.find((entry) => entry.aliases.some((alias) => normalizeMentionToken(alias) === token));
+    const target = availableTargets.find((entry) => entry.aliases.some((alias) => normalizeMentionToken(alias) === token));
     if (!target || seen.has(target.id)) continue;
     seen.add(target.id);
     resolved.push(target);
@@ -822,6 +822,20 @@ export function ChatInterface({
   const pdfCreatorAgentState = normalizePdfCreatorAgentState((currentConversation?.agentState as any)?.pdfCreator);
   const oracleAnalystAgentState = normalizeOracleAnalystAgentState((currentConversation?.agentState as any)?.oracleAnalyst);
   const enabledCustomAgents = (config.customAgents ?? []).filter((agent) => agent.enabled && agent.status === 'ready');
+  const isBuiltInAgentVisible = (role: BuiltInAgentRole) => config.agentVisibility?.[role] !== false;
+  const visibleBuiltInAgentRoles = BUILT_IN_AGENT_ROLES.filter((role) => isBuiltInAgentVisible(role));
+  const visibleSecondaryAgentRoles = visibleBuiltInAgentRoles.filter((role) => role !== 'manager');
+  const hasVisibleAgentChoices = visibleBuiltInAgentRoles.length > 0 || enabledCustomAgents.length > 0;
+  const hasVisibleOtherAgents = visibleSecondaryAgentRoles.length > 0 || enabledCustomAgents.length > 0;
+  const isCurrentAgentRoleVisible =
+    agentRole === 'custom_agent'
+      ? enabledCustomAgents.length > 0
+      : isBuiltInAgentVisible(agentRole as BuiltInAgentRole);
+  const availableMentionTargets = AGENT_MENTION_TARGETS.filter((target) => {
+    if (!target.role) return true;
+    if (target.role === 'custom_agent') return enabledCustomAgents.length > 0;
+    return isBuiltInAgentVisible(target.role as BuiltInAgentRole);
+  });
   const selectedCustomAgent = enabledCustomAgents.find((agent) => agent.id === selectedCustomAgentId) ?? null;
   const fallbackMessages = currentConversation?.messages || [
     {
@@ -836,7 +850,7 @@ export function ChatInterface({
     },
   ];
   const pendingAgentIntro =
-    !currentConversation && workflow === 'AGENT'
+    !currentConversation && workflow === 'AGENT' && isCurrentAgentRoleVisible
       ? createAgentIntroMessage(agentRole, config, selectedCustomAgentId)
       : null;
   const messages = pendingAgentIntro && !hasAgentIntroMessage(fallbackMessages, agentRole)
@@ -863,8 +877,8 @@ export function ChatInterface({
     : "";
   const latestUserMessage = [...messages].reverse().find((message) => message.role === 'user') ?? null;
   const latestMentionTargets = useMemo(
-    () => extractMentionTargets(latestUserMessage?.content ?? ''),
-    [latestUserMessage?.content]
+    () => extractMentionTargets(latestUserMessage?.content ?? '', availableMentionTargets),
+    [latestUserMessage?.content, availableMentionTargets]
   );
   const [isPlanningModalOpen, setIsPlanningModalOpen] = useState(false);
   const [isPlanningMonitorOpen, setIsPlanningMonitorOpen] = useState(false);
@@ -970,6 +984,9 @@ export function ChatInterface({
   };
 
   const handleWorkflowSelection = (nextWorkflow: WorkflowMode) => {
+    if (nextWorkflow === 'AGENT' && !hasVisibleAgentChoices) {
+      return;
+    }
     if (workflow === nextWorkflow) {
       setIsToolsIslandOpen(true);
       if (nextWorkflow === 'AGENT') {
@@ -1011,6 +1028,13 @@ export function ChatInterface({
   };
 
   const handleAgentRoleSelection = (nextRole: AgentRole, nextCustomAgentId?: string) => {
+    const nextRoleVisible =
+      nextRole === 'custom_agent'
+        ? enabledCustomAgents.length > 0
+        : isBuiltInAgentVisible(nextRole as BuiltInAgentRole);
+    if (!nextRoleVisible) {
+      return;
+    }
     if (workflow === 'AGENT' && agentRole === nextRole) {
       if (nextRole === 'custom_agent' && nextCustomAgentId && selectedCustomAgentId !== nextCustomAgentId) {
         onSelectedCustomAgentIdChange(nextCustomAgentId);
@@ -1662,7 +1686,44 @@ export function ChatInterface({
   }, [workflow]);
 
   useEffect(() => {
+    if (workflow !== 'AGENT') return;
+    if (hasVisibleAgentChoices) {
+      const currentRoleVisible =
+        agentRole === 'custom_agent'
+          ? enabledCustomAgents.length > 0
+          : isBuiltInAgentVisible(agentRole as BuiltInAgentRole);
+      if (currentRoleVisible) return;
+
+      if (isBuiltInAgentVisible('manager')) {
+        onAgentRoleChange('manager');
+        return;
+      }
+      if (visibleSecondaryAgentRoles.length > 0) {
+        onAgentRoleChange(visibleSecondaryAgentRoles[0]);
+        return;
+      }
+      if (enabledCustomAgents.length > 0) {
+        onSelectedCustomAgentIdChange(enabledCustomAgents[0].id);
+        onAgentRoleChange('custom_agent');
+      }
+      return;
+    }
+
+    onWorkflowChange('LLM');
+  }, [
+    workflow,
+    agentRole,
+    enabledCustomAgents,
+    visibleSecondaryAgentRoles,
+    hasVisibleAgentChoices,
+    onAgentRoleChange,
+    onSelectedCustomAgentIdChange,
+    onWorkflowChange,
+  ]);
+
+  useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
+    if (!isCurrentAgentRoleVisible) return;
     if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'auto_ml' && agentRole !== 'data_cleaner' && agentRole !== 'anonymizer' && agentRole !== 'custom_agent' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst') return;
     if (hasMeaningfulConversationMessages(currentConversation.messages)) return;
     if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
@@ -1686,7 +1747,7 @@ export function ChatInterface({
           : conversation
       )
     );
-  }, [workflow, agentRole, currentConversation, isLoading, onConversationsChange]);
+  }, [workflow, agentRole, currentConversation, isLoading, onConversationsChange, isCurrentAgentRoleVisible]);
 
   const openPlanningModal = (nextDraft?: Partial<CrewPlanDraft> | null) => {
     if (nextDraft) {
@@ -2104,7 +2165,7 @@ export function ChatInterface({
 
   // Main function to handle sending a message
   const handleSend = async (text: string = input, options: SendOptions = {}) => {
-    const mentionedTargets = extractMentionTargets(text);
+    const mentionedTargets = extractMentionTargets(text, availableMentionTargets);
     const mentionedRoles = Array.from(
       new Set(
         mentionedTargets
@@ -3562,12 +3623,12 @@ export function ChatInterface({
   const mentionSuggestions = useMemo(() => {
     if (activeMentionQuery === null) return [];
     const normalizedQuery = normalizeMentionToken(activeMentionQuery);
-    return AGENT_MENTION_TARGETS.filter((target) => (
+    return availableMentionTargets.filter((target) => (
       !normalizedQuery
         || target.aliases.some((alias) => normalizeMentionToken(alias).startsWith(normalizedQuery))
         || normalizeMentionToken(target.label).includes(normalizedQuery)
     )).slice(0, 6);
-  }, [activeMentionQuery]);
+  }, [activeMentionQuery, availableMentionTargets]);
   const breadcrumbNodes = useMemo<BreadcrumbNode[]>(() => {
     const nodes: BreadcrumbNode[] = [
       {
@@ -4795,12 +4856,14 @@ export function ChatInterface({
                 >
                   <Database className="h-4 w-4" /> RAG Knowledge
                 </button>
-                <button
-                  onClick={() => handleWorkflowSelection('AGENT')}
-                  className={`${toolsPrimaryButtonBase} ${workflow === 'AGENT' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
-                >
-                  <Network className="h-4 w-4" /> Agents
-                </button>
+                {hasVisibleAgentChoices && (
+                  <button
+                    onClick={() => handleWorkflowSelection('AGENT')}
+                    className={`${toolsPrimaryButtonBase} ${workflow === 'AGENT' ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
+                  >
+                    <Network className="h-4 w-4" /> Agents
+                  </button>
+                )}
                 <button
                   onClick={() => handleWorkflowSelection('MCP')}
                   className={`${toolsPrimaryButtonBase} ${workflow === 'MCP' ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/80 text-gray-700 border border-gray-200/80 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-white/10'}`}
@@ -4872,76 +4935,96 @@ export function ChatInterface({
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={() => handleAgentRoleSelection('manager')}
-                      className={`${toolsSecondaryButtonBase} ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/25' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
-                    >
-                      <Star className={`h-3.5 w-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'fill-amber-500 text-amber-500'}`} />
-                      Agent Manager
-                    </button>
+                    {isBuiltInAgentVisible('manager') && (
+                      <button
+                        onClick={() => handleAgentRoleSelection('manager')}
+                        className={`${toolsSecondaryButtonBase} ${agentRole === 'manager' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/25' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
+                      >
+                        <Star className={`h-3.5 w-3.5 ${agentRole === 'manager' ? 'fill-white text-white' : 'fill-amber-500 text-amber-500'}`} />
+                        Agent Manager
+                      </button>
+                    )}
 
-                    <button
-                      onClick={() => setIsOtherAgentsOpen((open) => !open)}
-                      className={`${toolsSecondaryButtonBase} ${isOtherAgentsOpen ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
-                    >
-                      {isOtherAgentsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                      Other agents
-                    </button>
+                    {hasVisibleOtherAgents && (
+                      <button
+                        onClick={() => setIsOtherAgentsOpen((open) => !open)}
+                        className={`${toolsSecondaryButtonBase} ${isOtherAgentsOpen ? 'bg-purple-500 text-white shadow-md shadow-purple-500/20' : 'bg-white/85 text-gray-700 border border-purple-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-purple-800/70 dark:hover:bg-white/10'}`}
+                      >
+                        {isOtherAgentsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                        Other agents
+                      </button>
+                    )}
                   </div>
 
-                  <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen ? 'max-h-[24rem] opacity-100' : 'max-h-0 opacity-0'}`}>
+                  <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isOtherAgentsOpen && hasVisibleOtherAgents ? 'max-h-[24rem] opacity-100' : 'max-h-0 opacity-0'}`}>
                     <div className="rounded-[1.4rem] border border-cyan-200/70 bg-cyan-50/70 p-2.5 dark:border-cyan-800/60 dark:bg-cyan-950/20">
                       <div className="flex flex-wrap gap-2">
-                        <button
-                          onClick={() => handleAgentRoleSelection('clickhouse_query')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/85 text-gray-700 border border-cyan-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-cyan-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <Database className="h-3.5 w-3.5" /> Clickhouse SQL
-                        </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('data_analyst')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/85 text-gray-700 border border-violet-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-violet-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <Cpu className="h-3.5 w-3.5" /> Data Analyst
-                        </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('auto_ml')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'auto_ml' ? 'bg-rose-500 text-white shadow-md shadow-rose-500/20' : 'bg-white/85 text-gray-700 border border-rose-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-rose-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <BrainCircuit className="h-3.5 w-3.5" /> Auto-ML
-                        </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('data_cleaner')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'data_cleaner' ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/20' : 'bg-white/85 text-gray-700 border border-indigo-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-indigo-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <Check className="h-3.5 w-3.5" /> Data Cleaner
-                        </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('anonymizer')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'anonymizer' ? 'bg-zinc-800 text-white shadow-md shadow-zinc-800/20' : 'bg-white/85 text-gray-700 border border-zinc-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-zinc-700 dark:hover:bg-white/10'}`}
-                        >
-                          <Gauge className="h-3.5 w-3.5" /> Anonymizer
-                        </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('file_management')}
-                          onDoubleClick={() => setIsFileManagerConfigOpen(true)}
-                          title="Double-click to configure"
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/85 text-gray-700 border border-emerald-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-emerald-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <FolderOpen className="h-3.5 w-3.5" /> File management
-                        </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('pdf_creator')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/85 text-gray-700 border border-slate-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-slate-700 dark:hover:bg-white/10'}`}
-                        >
-                          <File className="h-3.5 w-3.5" /> PDF creator
-                        </button>
-                        <button
-                          onClick={() => handleAgentRoleSelection('oracle_analyst')}
-                          className={`${toolsSecondaryButtonBase} ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/85 text-gray-700 border border-orange-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-orange-800/70 dark:hover:bg-white/10'}`}
-                        >
-                          <Database className="h-3.5 w-3.5" /> Oracle SQL
-                        </button>
+                        {isBuiltInAgentVisible('clickhouse_query') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('clickhouse_query')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'clickhouse_query' ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/20' : 'bg-white/85 text-gray-700 border border-cyan-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-cyan-800/70 dark:hover:bg-white/10'}`}
+                          >
+                            <Database className="h-3.5 w-3.5" /> Clickhouse SQL
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('data_analyst') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('data_analyst')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'data_analyst' ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20' : 'bg-white/85 text-gray-700 border border-violet-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-violet-800/70 dark:hover:bg-white/10'}`}
+                          >
+                            <Cpu className="h-3.5 w-3.5" /> Data Analyst
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('auto_ml') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('auto_ml')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'auto_ml' ? 'bg-rose-500 text-white shadow-md shadow-rose-500/20' : 'bg-white/85 text-gray-700 border border-rose-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-rose-800/70 dark:hover:bg-white/10'}`}
+                          >
+                            <BrainCircuit className="h-3.5 w-3.5" /> Auto-ML
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('data_cleaner') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('data_cleaner')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'data_cleaner' ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/20' : 'bg-white/85 text-gray-700 border border-indigo-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-indigo-800/70 dark:hover:bg-white/10'}`}
+                          >
+                            <Check className="h-3.5 w-3.5" /> Data Cleaner
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('anonymizer') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('anonymizer')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'anonymizer' ? 'bg-zinc-800 text-white shadow-md shadow-zinc-800/20' : 'bg-white/85 text-gray-700 border border-zinc-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-zinc-700 dark:hover:bg-white/10'}`}
+                          >
+                            <Gauge className="h-3.5 w-3.5" /> Anonymizer
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('file_management') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('file_management')}
+                            onDoubleClick={() => setIsFileManagerConfigOpen(true)}
+                            title="Double-click to configure"
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'file_management' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'bg-white/85 text-gray-700 border border-emerald-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-emerald-800/70 dark:hover:bg-white/10'}`}
+                          >
+                            <FolderOpen className="h-3.5 w-3.5" /> File management
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('pdf_creator') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('pdf_creator')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'pdf_creator' ? 'bg-slate-700 text-white shadow-md shadow-slate-700/20' : 'bg-white/85 text-gray-700 border border-slate-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-slate-700 dark:hover:bg-white/10'}`}
+                          >
+                            <File className="h-3.5 w-3.5" /> PDF creator
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('oracle_analyst') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('oracle_analyst')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'oracle_analyst' ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-white/85 text-gray-700 border border-orange-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-orange-800/70 dark:hover:bg-white/10'}`}
+                          >
+                            <Database className="h-3.5 w-3.5" /> Oracle SQL
+                          </button>
+                        )}
                         {enabledCustomAgents.map((agent) => (
                           <button
                             key={agent.id}

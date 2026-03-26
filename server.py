@@ -236,6 +236,17 @@ DEFAULT_APP_CONFIG = {
         "return the relevant structured result as a valid Markdown table whenever the data is naturally tabular."
     ),
     "managerUseRagFunctionalContext": False,
+    "agentVisibility": {
+        "manager": True,
+        "clickhouse_query": True,
+        "data_analyst": True,
+        "file_management": True,
+        "pdf_creator": True,
+        "oracle_analyst": True,
+        "auto_ml": True,
+        "data_cleaner": True,
+        "anonymizer": True,
+    },
     "disableSslVerification": False,
     "elasticsearchUrl": "http://localhost:9200",
     "elasticsearchIndex": "rag_documents",
@@ -648,6 +659,16 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
     incoming_config = payload.get("config")
     if isinstance(incoming_config, dict):
         state["config"].update(incoming_config)
+        incoming_agent_visibility = incoming_config.get("agentVisibility")
+        if isinstance(incoming_agent_visibility, dict):
+            state["config"]["agentVisibility"] = {
+                **DEFAULT_APP_CONFIG["agentVisibility"],
+                **{
+                    str(key): bool(value)
+                    for key, value in incoming_agent_visibility.items()
+                    if str(key) in DEFAULT_APP_CONFIG["agentVisibility"]
+                },
+            }
         incoming_file_manager = incoming_config.get("fileManagerConfig")
         if isinstance(incoming_file_manager, dict):
             state["config"]["fileManagerConfig"] = {
