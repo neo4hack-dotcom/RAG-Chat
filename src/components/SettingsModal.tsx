@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2, FolderOpen, UploadCloud, Download } from "lucide-react";
+import { Settings, X, Save, Server, Key, Bot, MessageSquare, RefreshCw, CheckCircle2, XCircle, Zap, Loader2, Database, Layers, SlidersHorizontal, Network, Plus, Trash2, FolderOpen, UploadCloud, Download, Send } from "lucide-react";
 import { AppConfig, McpTool, BuiltInAgentRole } from "../lib/utils";
 
 const BUILT_IN_AGENT_OPTIONS: { role: BuiltInAgentRole; title: string; description: string }[] = [
@@ -9,6 +9,7 @@ const BUILT_IN_AGENT_OPTIONS: { role: BuiltInAgentRole; title: string; descripti
   { role: 'auto_ml', title: 'Auto-ML', description: 'Benchmarks machine-learning models on a scoped ClickHouse dataset.' },
   { role: 'data_cleaner', title: 'Data Cleaner', description: 'Profiles data quality issues and proposes cleanup SQL.' },
   { role: 'anonymizer', title: 'Anonymizer', description: 'Scans ClickHouse tables for likely PII and masking strategies.' },
+  { role: 'email_sender', title: 'Email Sender', description: 'Sends text and file attachments through the configured SMTP server.' },
   { role: 'file_management', title: 'File Management', description: 'Browses, edits, creates, and moves files through backend Python tools.' },
   { role: 'pdf_creator', title: 'PDF Creator', description: 'Turns analyses or text into polished PDF exports.' },
   { role: 'oracle_analyst', title: 'Oracle SQL', description: 'Handles natural-language analysis and SQL execution against Oracle.' },
@@ -45,6 +46,7 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       auto_ml: config.agentVisibility?.auto_ml ?? true,
       data_cleaner: config.agentVisibility?.data_cleaner ?? true,
       anonymizer: config.agentVisibility?.anonymizer ?? true,
+      email_sender: config.agentVisibility?.email_sender ?? true,
     },
     disableSslVerification: config.disableSslVerification ?? false,
     elasticsearchUrl: config.elasticsearchUrl || 'http://localhost:9200',
@@ -146,6 +148,19 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       maxIterations: Math.min(15, Math.max(1, config.fileManagerConfig?.maxIterations ?? 10)),
       systemPrompt: config.fileManagerConfig?.systemPrompt ?? 'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, ask for confirmation before destructive or overwrite actions, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis.',
     },
+    emailSenderConfig: {
+      host: config.emailSenderConfig?.host ?? '',
+      port: Math.min(65535, Math.max(1, Number(config.emailSenderConfig?.port ?? 587) || 587)),
+      secure: config.emailSenderConfig?.secure ?? false,
+      startTls: config.emailSenderConfig?.startTls ?? true,
+      username: config.emailSenderConfig?.username ?? '',
+      password: config.emailSenderConfig?.password ?? '',
+      fromEmail: config.emailSenderConfig?.fromEmail ?? '',
+      fromName: config.emailSenderConfig?.fromName ?? 'RAGnarok',
+      replyTo: config.emailSenderConfig?.replyTo ?? '',
+      allowedRecipients: Array.isArray(config.emailSenderConfig?.allowedRecipients) ? config.emailSenderConfig!.allowedRecipients.filter(Boolean) : [],
+      systemPrompt: config.emailSenderConfig?.systemPrompt ?? 'You are the Email Sender agent. Reply in English. Help the user prepare and send an email with text and optional file attachments. Ask only for the missing delivery details, never send to recipients outside the configured allowlist, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis.',
+    },
   };
 }
 
@@ -211,6 +226,8 @@ export function SettingsModal({
   const [clickhouseTablesPreview, setClickhouseTablesPreview] = useState<string[]>([]);
   const [oracleTestStates, setOracleTestStates] = useState<Record<string, { status: 'idle' | 'testing' | 'success' | 'error'; message: string; tables: string[] }>>({});
   const [customAgentAnalysisState, setCustomAgentAnalysisState] = useState<Record<string, { status: 'idle' | 'running' | 'success' | 'error'; message: string }>>({});
+  const [smtpTestStatus, setSmtpTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [smtpTestMessage, setSmtpTestMessage] = useState('');
 
   // Setup index status
   const [setupStatus, setSetupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
@@ -351,6 +368,42 @@ export function SettingsModal({
     } catch (err) {
       setClickhouseTestStatus('error');
       setClickhouseTestMessage(err instanceof Error ? err.message : 'Failed to connect');
+    }
+  };
+
+  const testEmailSenderConnection = async () => {
+    setSmtpTestStatus('testing');
+    setSmtpTestMessage('');
+    try {
+      const response = await fetch('/api/email-sender/test-smtp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email_sender_config: {
+            host: localConfig.emailSenderConfig.host,
+            port: localConfig.emailSenderConfig.port,
+            secure: localConfig.emailSenderConfig.secure,
+            start_tls: localConfig.emailSenderConfig.startTls,
+            username: localConfig.emailSenderConfig.username,
+            password: localConfig.emailSenderConfig.password,
+            from_email: localConfig.emailSenderConfig.fromEmail,
+            from_name: localConfig.emailSenderConfig.fromName,
+            reply_to: localConfig.emailSenderConfig.replyTo,
+            allowed_recipients: localConfig.emailSenderConfig.allowedRecipients,
+            system_prompt: localConfig.emailSenderConfig.systemPrompt,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      setSmtpTestStatus('success');
+      setSmtpTestMessage(`Connected to ${data.host}:${data.port} · ${data.allowedRecipients?.length ?? 0} allowed recipient(s)`);
+    } catch (err) {
+      setSmtpTestStatus('error');
+      setSmtpTestMessage(err instanceof Error ? err.message : 'SMTP connection failed');
     }
   };
 
@@ -880,7 +933,7 @@ export function SettingsModal({
         onClick={onClose}
         className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 animate-fade-in"
       />
-      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl z-50 p-6 animate-scale-in">
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-[55rem] z-50 p-6 animate-scale-in">
         <div className="glass-panel rounded-[2rem] p-8 shadow-2xl max-h-[90vh] overflow-y-auto">
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-semibold flex items-center gap-3 dark:text-white">
@@ -1502,6 +1555,153 @@ export function SettingsModal({
                       </label>
                     );
                   })}
+                </div>
+              </div>
+
+              <div className="rounded-[1.75rem] border border-slate-200/80 bg-[linear-gradient(135deg,rgba(255,255,255,0.95),rgba(248,250,252,0.92),rgba(241,245,249,0.88))] p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <Send className="w-4 h-4 text-slate-700" />
+                      <h3 className="text-sm font-semibold text-slate-950">Email Sender</h3>
+                    </div>
+                    <p className="text-xs text-slate-700/80 leading-relaxed max-w-3xl">
+                      Configure the SMTP delivery used by the Email Sender agent. Allowed recipients are enforced globally and also reused by the Agent Manager and the MCP Orchestrator when they delegate email delivery.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={testEmailSenderConnection}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm hover:bg-white transition-colors"
+                  >
+                    {smtpTestStatus === 'testing' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    Test SMTP
+                  </button>
+                </div>
+
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">SMTP host</label>
+                    <input
+                      type="text"
+                      value={localConfig.emailSenderConfig.host}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, host: e.target.value } }))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      placeholder="smtp.example.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">Port</label>
+                    <input
+                      type="number"
+                      value={localConfig.emailSenderConfig.port}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, port: Number(e.target.value) || 587 } }))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">Username</label>
+                    <input
+                      type="text"
+                      value={localConfig.emailSenderConfig.username}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, username: e.target.value } }))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      placeholder="smtp-user"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">Password</label>
+                    <input
+                      type="password"
+                      value={localConfig.emailSenderConfig.password}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, password: e.target.value } }))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      placeholder="SMTP password"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">From email</label>
+                    <input
+                      type="email"
+                      value={localConfig.emailSenderConfig.fromEmail}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, fromEmail: e.target.value } }))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      placeholder="no-reply@example.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">From name</label>
+                    <input
+                      type="text"
+                      value={localConfig.emailSenderConfig.fromName}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, fromName: e.target.value } }))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      placeholder="RAGnarok"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">Reply-To</label>
+                    <input
+                      type="email"
+                      value={localConfig.emailSenderConfig.replyTo}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, replyTo: e.target.value } }))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      placeholder="support@example.com"
+                    />
+                  </div>
+                  <div className="flex items-center gap-6 pt-6">
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={localConfig.emailSenderConfig.secure}
+                        onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, secure: e.target.checked } }))}
+                        className="h-4 w-4 rounded text-slate-700 focus:ring-slate-400"
+                      />
+                      SMTPS / SSL
+                    </label>
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={localConfig.emailSenderConfig.startTls}
+                        onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, startTls: e.target.checked } }))}
+                        className="h-4 w-4 rounded text-slate-700 focus:ring-slate-400"
+                      />
+                      STARTTLS
+                    </label>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">Allowed recipients</label>
+                    <textarea
+                      value={(localConfig.emailSenderConfig.allowedRecipients ?? []).join('\n')}
+                      onChange={(e) => setLocalConfig(prev => ({
+                        ...prev,
+                        emailSenderConfig: {
+                          ...prev.emailSenderConfig,
+                          allowedRecipients: e.target.value.split(/\n|,|;/).map((item) => item.trim()).filter(Boolean),
+                        },
+                      }))}
+                      className="mt-1 min-h-[140px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      placeholder={"user1@example.com\nuser2@example.com"}
+                    />
+                    <p className="mt-1 text-[11px] text-slate-500">Only these recipients can receive email from the app.</p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">Email Sender system prompt</label>
+                    <textarea
+                      value={localConfig.emailSenderConfig.systemPrompt}
+                      onChange={(e) => setLocalConfig(prev => ({ ...prev, emailSenderConfig: { ...prev.emailSenderConfig, systemPrompt: e.target.value } }))}
+                      className="mt-1 min-h-[140px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                    />
+                    <div className="mt-2 rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-600">
+                      {smtpTestStatus === 'success' && <span className="text-emerald-600">{smtpTestMessage}</span>}
+                      {smtpTestStatus === 'error' && <span className="text-rose-600">{smtpTestMessage}</span>}
+                      {smtpTestStatus === 'idle' && 'Run "Test SMTP" to verify the connection before using the agent.'}
+                      {smtpTestStatus === 'testing' && <span className="text-slate-500">Testing SMTP connection…</span>}
+                    </div>
+                  </div>
                 </div>
               </div>
 

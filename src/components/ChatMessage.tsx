@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bot, User, ChevronDown, ChevronRight, Loader2, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3, Gauge } from "lucide-react";
+import { Bot, User, ChevronDown, ChevronRight, Loader2, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3, Gauge, MessageSquare } from "lucide-react";
 import { Message, cn, ChartSpec, ChatAction, preprocessMarkdown } from "../lib/utils";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -105,6 +105,17 @@ const AGENT_INTRO_CARD_CONFIG: Record<string, {
     titleClass: "text-slate-950 dark:text-white",
     bodyClass: "text-slate-700 dark:text-slate-200",
     subtleClass: "text-zinc-700 dark:text-zinc-300",
+  },
+  email_sender: {
+    marker: "<!-- agent-intro:email_sender -->",
+    title: "Email Sender Agent",
+    icon: MessageSquare,
+    containerClass: "border border-sky-200 bg-white/98 shadow-[0_18px_48px_rgba(14,165,233,0.08)] dark:border-sky-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-sky-50 ring-1 ring-sky-200 dark:bg-sky-900/25 dark:ring-sky-800/80",
+    iconClass: "text-sky-600 dark:text-sky-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-sky-700 dark:text-sky-300",
   },
   file_management: {
     marker: "<!-- agent-intro:file_management -->",
