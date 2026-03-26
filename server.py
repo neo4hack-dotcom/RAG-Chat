@@ -1333,6 +1333,43 @@ def _format_mcp_tool_result(result: Any) -> str:
     return output
 
 
+def _parse_mcp_tool_arguments(raw_args: Any) -> dict[str, Any]:
+    """Best-effort normalization for tool-call arguments emitted by the LLM.
+
+    Some MCP tools legitimately take no arguments. Depending on the model and
+    provider, those tool calls may arrive as an empty string, `null`, a fenced
+    JSON snippet, or a partially formatted object. Treat these variants as an
+    empty payload instead of failing the whole MCP turn.
+    """
+    if isinstance(raw_args, dict):
+        return raw_args
+    if raw_args is None:
+        return {}
+    if isinstance(raw_args, str):
+        stripped = raw_args.strip()
+        if not stripped or stripped.lower() in {"null", "none", "undefined"}:
+            return {}
+
+        fenced_match = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
+        candidate = fenced_match.group(1).strip() if fenced_match else stripped
+
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            parsed = extract_json_object(candidate)
+
+        if isinstance(parsed, dict):
+            return parsed
+        if parsed in (None, "", []):
+            return {}
+        return {}
+
+    if isinstance(raw_args, (list, tuple)):
+        return {"items": list(raw_args)}
+
+    return {}
+
+
 def _coerce_tabular_rows(
     rows_candidate: Any,
     headers_hint: Optional[list[str]] = None,
@@ -19678,7 +19715,7 @@ async def _run_single_mcp_chat_loop(
                     raw_args = tc.get("arguments", "{}")
                     tool_id = tool_name
 
-                tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                tool_args = _parse_mcp_tool_arguments(raw_args)
                 try:
                     result = await session.call_tool(tool_name, tool_args or {})
                     tool_output = _format_mcp_tool_result(result)
