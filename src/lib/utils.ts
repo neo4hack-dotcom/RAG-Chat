@@ -499,6 +499,7 @@ export type McpTool = {
   label: string;
   url: string;
   description: string;
+  authToken: string;
   presetQuestions: McpPresetQuestion[];
 };
 
@@ -662,8 +663,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   chunkOverlap: 50,
   knnNeighbors: 50,
   mcpTools: [
-    { id: 'mcp_1', label: 'MCP Tool 1', url: '', description: '', presetQuestions: [] },
-    { id: 'mcp_2', label: 'MCP Tool 2', url: '', description: '', presetQuestions: [] },
+    { id: 'mcp_1', label: 'MCP Tool 1', url: '', description: '', authToken: '', presetQuestions: [] },
+    { id: 'mcp_2', label: 'MCP Tool 2', url: '', description: '', authToken: '', presetQuestions: [] },
   ],
   documentationUrl: '',
   agenticDataVizUrl: '',
@@ -1443,11 +1444,12 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
       systemPrompt: String(incomingEmailSender?.systemPrompt ?? DEFAULT_CONFIG.emailSenderConfig.systemPrompt),
     },
     mcpTools: Array.isArray(config?.mcpTools)
-      ? config!.mcpTools.map((tool) => ({
+        ? config!.mcpTools.map((tool) => ({
           id: tool.id || `mcp_${Date.now()}`,
           label: tool.label || 'New Tool',
           url: tool.url || '',
           description: tool.description || '',
+          authToken: tool.authToken || '',
           presetQuestions: Array.isArray(tool.presetQuestions)
             ? tool.presetQuestions.map((preset, presetIndex) => ({
                 id: preset?.id || `${tool.id || 'mcp'}_preset_${presetIndex + 1}`,

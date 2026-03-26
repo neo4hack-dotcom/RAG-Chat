@@ -2588,6 +2588,7 @@ export function ChatInterface({
                   message: text,
                   history: memoryHistory,
                   mcp_url: activeTool!.url,
+                  auth_token: activeTool!.authToken || undefined,
                   preferred_tool: preferredMcpTool || undefined,
                   llm_base_url: config.baseUrl,
                   llm_model: config.model,

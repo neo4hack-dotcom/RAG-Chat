@@ -65,6 +65,7 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       label: tool.label || 'New Tool',
       url: tool.url || '',
       description: tool.description || '',
+      authToken: tool.authToken || '',
       presetQuestions: Array.isArray(tool.presetQuestions)
         ? tool.presetQuestions.map((preset, presetIndex) => ({
             id: preset.id || `${tool.id || 'mcp'}_preset_${presetIndex + 1}`,
@@ -309,6 +310,7 @@ export function SettingsModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: tool.url,
+          auth_token: tool.authToken || undefined,
           disable_ssl_verification: localConfig.disableSslVerification ?? false,
         }),
       });
@@ -2117,7 +2119,7 @@ export function SettingsModal({
                 </h3>
                 <button
                   onClick={() => {
-                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '', presetQuestions: [] };
+                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '', authToken: '', presetQuestions: [] };
                     setLocalConfig(prev => ({ ...prev, mcpTools: [...(prev.mcpTools ?? []), newTool] }));
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200 rounded-xl hover:bg-teal-100 transition-colors"
@@ -2166,6 +2168,20 @@ export function SettingsModal({
                               }}
                               className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
                               placeholder="http://localhost:3000/sse"
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Bearer token (optional)</label>
+                            <input
+                              type="password"
+                              value={tool.authToken || ''}
+                              onChange={(e) => {
+                                const updated = [...(localConfig.mcpTools ?? [])];
+                                updated[idx] = { ...tool, authToken: e.target.value };
+                                setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                              }}
+                              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                              placeholder="Optional Bearer token sent as Authorization"
                             />
                           </div>
                           <div className="col-span-2">
