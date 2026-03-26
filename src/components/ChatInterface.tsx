@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeEmailSenderAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -41,6 +41,7 @@ const AGENT_INTRO_MARKERS = {
   auto_ml: "<!-- agent-intro:auto_ml -->",
   data_cleaner: "<!-- agent-intro:data_cleaner -->",
   anonymizer: "<!-- agent-intro:anonymizer -->",
+  email_sender: "<!-- agent-intro:email_sender -->",
   custom_agent: "<!-- agent-intro:custom_agent -->",
 } as const;
 
@@ -53,7 +54,7 @@ function getAgentIntroContent(agentRole: AgentRole, config?: AppConfig, selected
 
 This manager works in English and can orchestrate the available specialist agents.
 
-- It routes requests to Clickhouse SQL, Data Analyst, Auto-ML, Data Cleaner, Anonymizer, File management, custom agents, or Oracle SQL when needed.
+- It routes requests to Clickhouse SQL, Data Analyst, Auto-ML, Data Cleaner, Anonymizer, Email Sender, File management, custom agents, or Oracle SQL when needed.
 - It can also route export-ready results to PDF creator when you want a polished document.
 - It keeps the conversation context while delegated agents ask follow-up questions.
 - It answers directly when no specialist tool is required.`;
@@ -116,6 +117,17 @@ This agent works in English and scans ClickHouse data for personally identifiabl
 - It returns a privacy-oriented summary and keeps the suggested masking or hashing SQL patterns in the technical details section.`;
   }
 
+  if (agentRole === 'email_sender') {
+    return `${AGENT_INTRO_MARKERS.email_sender}
+## Email Sender Agent
+
+This agent works in English and sends emails through the configured SMTP server.
+
+- It can send plain-text summaries, attach one or more files, or combine both.
+- It only sends to recipients explicitly allowed in Settings.
+- It can also be called by Agent Manager and MCP Orchestrator when a workflow needs email delivery.`;
+  }
+
   if (agentRole === 'custom_agent') {
     const customAgent = (config?.customAgents ?? []).find((agent) => agent.id === selectedCustomAgentId);
     if (!customAgent) return null;
@@ -176,6 +188,8 @@ function hasAgentIntroMessage(messages: Message[], agentRole: AgentRole): boolea
           ? AGENT_INTRO_MARKERS.data_cleaner
         : agentRole === 'anonymizer'
           ? AGENT_INTRO_MARKERS.anonymizer
+        : agentRole === 'email_sender'
+          ? AGENT_INTRO_MARKERS.email_sender
         : agentRole === 'custom_agent'
           ? AGENT_INTRO_MARKERS.custom_agent
         : agentRole === 'file_management'
@@ -468,6 +482,7 @@ const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
   auto_ml: 'Auto-ML',
   data_cleaner: 'Data Cleaner',
   anonymizer: 'Anonymizer',
+  email_sender: 'Email Sender',
   custom_agent: 'Custom Agent',
   file_management: 'File management',
   pdf_creator: 'PDF creator',
@@ -481,6 +496,7 @@ const AGENT_ROLE_SHORT_LABELS: Record<AgentRole, string> = {
   auto_ml: 'AUTO-ML',
   data_cleaner: 'CLEAN',
   anonymizer: 'PII',
+  email_sender: 'MAIL',
   custom_agent: 'CUSTOM',
   file_management: 'FILES',
   pdf_creator: 'PDF',
@@ -494,6 +510,7 @@ const AGENT_MENTION_TARGETS: MentionTargetDefinition[] = [
   { id: 'auto_ml', label: 'Auto-ML', shortLabel: 'AUTO-ML', aliases: ['automl', 'ml'], role: 'auto_ml', icon: BrainCircuit, tone: 'from-rose-500 to-orange-500' },
   { id: 'data_cleaner', label: 'Data Cleaner', shortLabel: 'CLEAN', aliases: ['cleaner', 'datacleaner', 'nettoyeur'], role: 'data_cleaner', icon: Check, tone: 'from-indigo-500 to-sky-500' },
   { id: 'anonymizer', label: 'Anonymizer', shortLabel: 'PII', aliases: ['anonymizer', 'anonymiser', 'anonymiseur', 'gdpr', 'rgpd'], role: 'anonymizer', icon: Gauge, tone: 'from-zinc-700 to-slate-900' },
+  { id: 'email_sender', label: 'Email Sender', shortLabel: 'MAIL', aliases: ['email', 'mail', 'smtp'], role: 'email_sender', icon: MessageSquare, tone: 'from-sky-500 to-blue-600' },
   { id: 'oracle', label: 'Oracle SQL', shortLabel: 'ORACLE', aliases: ['oracle', 'oraclesql'], role: 'oracle_analyst', icon: Database, tone: 'from-orange-500 to-amber-500' },
   { id: 'files', label: 'File management', shortLabel: 'FILES', aliases: ['file', 'files', 'filemanager'], role: 'file_management', icon: FolderOpen, tone: 'from-emerald-500 to-teal-500' },
   { id: 'pdf', label: 'PDF creator', shortLabel: 'PDF', aliases: ['pdf', 'pdfcreator'], role: 'pdf_creator', icon: File, tone: 'from-slate-600 to-slate-800' },
@@ -816,6 +833,7 @@ export function ChatInterface({
   const autoMlAgentState = normalizeAutoMlAgentState((currentConversation?.agentState as any)?.autoMl);
   const dataCleanerAgentState = normalizeDataCleanerAgentState((currentConversation?.agentState as any)?.dataCleaner);
   const anonymizerAgentState = normalizeAnonymizerAgentState((currentConversation?.agentState as any)?.anonymizer);
+  const emailSenderAgentState = normalizeEmailSenderAgentState((currentConversation?.agentState as any)?.emailSender);
   const customAgentState = normalizeCustomAgentRuntimeState((currentConversation?.agentState as any)?.customAgent);
   const planningAgentState = normalizePlanningAgentState((currentConversation?.agentState as any)?.planning, browserTimeZone);
   const fileManagerAgentState = normalizeFileManagerAgentState((currentConversation?.agentState as any)?.fileManager);
@@ -899,7 +917,7 @@ export function ChatInterface({
   const [isToolsIslandOpen, setIsToolsIslandOpen] = useState(false);
   const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
   const [isMcpMenuExpanded, setIsMcpMenuExpanded] = useState(workflow === 'MCP');
-  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
+  const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'email_sender' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
   const [isAutoMlGuideOpen, setIsAutoMlGuideOpen] = useState(false);
   const [isDataCleanerGuideOpen, setIsDataCleanerGuideOpen] = useState(false);
@@ -1625,7 +1643,7 @@ export function ChatInterface({
   }, [anonymizerAgentState, isAnonymizerGuideOpen]);
 
   useEffect(() => {
-    if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst')) {
+    if (workflow === 'AGENT' && isAgentMenuExpanded && (agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'email_sender' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst')) {
       setIsOtherAgentsOpen(true);
     }
   }, [workflow, agentRole, isAgentMenuExpanded]);
@@ -1724,7 +1742,7 @@ export function ChatInterface({
   useEffect(() => {
     if (workflow !== 'AGENT' || !currentConversation || isLoading) return;
     if (!isCurrentAgentRoleVisible) return;
-    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'auto_ml' && agentRole !== 'data_cleaner' && agentRole !== 'anonymizer' && agentRole !== 'custom_agent' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst') return;
+    if (agentRole !== 'manager' && agentRole !== 'clickhouse_query' && agentRole !== 'data_analyst' && agentRole !== 'auto_ml' && agentRole !== 'data_cleaner' && agentRole !== 'anonymizer' && agentRole !== 'email_sender' && agentRole !== 'custom_agent' && agentRole !== 'file_management' && agentRole !== 'pdf_creator' && agentRole !== 'oracle_analyst') return;
     if (hasMeaningfulConversationMessages(currentConversation.messages)) return;
     if (hasAgentIntroMessage(currentConversation.messages, agentRole)) return;
 
@@ -2255,6 +2273,7 @@ export function ChatInterface({
       let nextAutoMlAgentState = autoMlAgentState;
       let nextDataCleanerAgentState = dataCleanerAgentState;
       let nextAnonymizerAgentState = anonymizerAgentState;
+      let nextEmailSenderAgentState = emailSenderAgentState;
       let nextCustomAgentState = customAgentState;
       let nextPlanningAgentState = planningAgentState;
       let nextFileManagerAgentState = fileManagerAgentState;
@@ -2328,6 +2347,25 @@ export function ChatInterface({
         masking_scripts: anonymizerAgentState.maskingScripts,
         final_answer: anonymizerAgentState.finalAnswer,
         last_error: anonymizerAgentState.lastError,
+      };
+      const serializedEmailSenderState = {
+        stage: emailSenderAgentState.stage,
+        pending_request: emailSenderAgentState.pendingRequest,
+        pending_email: emailSenderAgentState.pendingEmail ? {
+          to: emailSenderAgentState.pendingEmail.to,
+          cc: emailSenderAgentState.pendingEmail.cc,
+          bcc: emailSenderAgentState.pendingEmail.bcc,
+          subject: emailSenderAgentState.pendingEmail.subject,
+          body: emailSenderAgentState.pendingEmail.body,
+          attachment_paths: emailSenderAgentState.pendingEmail.attachmentPaths,
+        } : null,
+        clarification_prompt: emailSenderAgentState.clarificationPrompt,
+        clarification_options: emailSenderAgentState.clarificationOptions,
+        last_recipients: emailSenderAgentState.lastRecipients,
+        last_subject: emailSenderAgentState.lastSubject,
+        last_attachment_paths: emailSenderAgentState.lastAttachmentPaths,
+        final_answer: emailSenderAgentState.finalAnswer,
+        last_error: emailSenderAgentState.lastError,
       };
       const serializedCustomAgentState = {
         selected_agent_id: customAgentState.selectedAgentId,
@@ -2526,6 +2564,7 @@ export function ChatInterface({
             auto_ml_state: serializedAutoMlState,
             data_cleaner_state: serializedDataCleanerState,
             anonymizer_state: serializedAnonymizerState,
+            email_sender_state: serializedEmailSenderState,
             custom_agent_state: serializedCustomAgentState,
             custom_agents: (config.customAgents ?? []).map((agent) => ({
               id: agent.id,
@@ -2577,6 +2616,19 @@ export function ChatInterface({
               max_iterations: config.fileManagerConfig.maxIterations,
               system_prompt: formattedFileManagerSystemPrompt,
             },
+            email_sender_config: {
+              host: config.emailSenderConfig.host,
+              port: config.emailSenderConfig.port,
+              secure: config.emailSenderConfig.secure,
+              start_tls: config.emailSenderConfig.startTls,
+              username: config.emailSenderConfig.username,
+              password: config.emailSenderConfig.password,
+              from_email: config.emailSenderConfig.fromEmail,
+              from_name: config.emailSenderConfig.fromName,
+              reply_to: config.emailSenderConfig.replyTo,
+              allowed_recipients: config.emailSenderConfig.allowedRecipients,
+              system_prompt: config.emailSenderConfig.systemPrompt,
+            },
             llm_base_url: config.baseUrl,
             llm_model: config.model,
             llm_api_key: config.apiKey || undefined,
@@ -2599,6 +2651,7 @@ export function ChatInterface({
         nextAutoMlAgentState = normalizeAutoMlAgentState((data.agent_state as any)?.autoMl);
         nextDataCleanerAgentState = normalizeDataCleanerAgentState((data.agent_state as any)?.dataCleaner);
         nextAnonymizerAgentState = normalizeAnonymizerAgentState((data.agent_state as any)?.anonymizer);
+        nextEmailSenderAgentState = normalizeEmailSenderAgentState((data.agent_state as any)?.emailSender);
         nextCustomAgentState = normalizeCustomAgentRuntimeState((data.agent_state as any)?.customAgent);
         nextFileManagerAgentState = normalizeFileManagerAgentState((data.agent_state as any)?.fileManager);
         nextPdfCreatorAgentState = normalizePdfCreatorAgentState((data.agent_state as any)?.pdfCreator);
@@ -2629,6 +2682,7 @@ export function ChatInterface({
               autoMl: nextAutoMlAgentState,
               dataCleaner: nextDataCleanerAgentState,
               anonymizer: nextAnonymizerAgentState,
+              emailSender: nextEmailSenderAgentState,
               customAgent: nextCustomAgentState,
               fileManager: nextFileManagerAgentState,
               pdfCreator: nextPdfCreatorAgentState,
@@ -2961,6 +3015,78 @@ export function ChatInterface({
             },
             messages: [...updated[idx].messages, assistantAnonymizerMsg],
             memory: buildConversationMemory([...updated[idx].messages, assistantAnonymizerMsg]),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        });
+        setIsLoading(false);
+        return;
+      } else if (resolvedWorkflow === 'AGENT' && resolvedAgentRole === 'email_sender') {
+        const response = await fetch('/api/chat/email-sender-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: text,
+            history: memoryHistory,
+            agent_state: serializedEmailSenderState,
+            email_sender_config: {
+              host: config.emailSenderConfig.host,
+              port: config.emailSenderConfig.port,
+              secure: config.emailSenderConfig.secure,
+              start_tls: config.emailSenderConfig.startTls,
+              username: config.emailSenderConfig.username,
+              password: config.emailSenderConfig.password,
+              from_email: config.emailSenderConfig.fromEmail,
+              from_name: config.emailSenderConfig.fromName,
+              reply_to: config.emailSenderConfig.replyTo,
+              allowed_recipients: config.emailSenderConfig.allowedRecipients,
+              system_prompt: config.emailSenderConfig.systemPrompt,
+            },
+            file_manager_config: {
+              base_path: config.fileManagerConfig.basePath,
+              max_iterations: config.fileManagerConfig.maxIterations,
+              system_prompt: formattedFileManagerSystemPrompt,
+            },
+            llm_base_url: config.baseUrl,
+            llm_model: config.model,
+            llm_api_key: config.apiKey || undefined,
+            llm_provider: config.provider,
+            disable_ssl_verification: disableSslVerification,
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `Email Sender Agent error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        reply = data.answer;
+        nextEmailSenderAgentState = normalizeEmailSenderAgentState(data.agent_state);
+        setIsConnected(true);
+
+        const assistantEmailMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: reply,
+          timestamp: Date.now(),
+          steps: data.steps,
+          actions: data.actions,
+        };
+
+        onConversationsChange(prev => {
+          const idx = prev.findIndex(c => c.id === activeConvId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              emailSender: nextEmailSenderAgentState,
+            },
+            messages: [...updated[idx].messages, assistantEmailMsg],
+            memory: buildConversationMemory([...updated[idx].messages, assistantEmailMsg]),
             updatedAt: Date.now(),
           };
           return updated;
@@ -3399,6 +3525,8 @@ export function ChatInterface({
         ? "Ask to audit duplicates, missing values, or inconsistent formats..."
       : workflow === 'AGENT' && agentRole === 'anonymizer'
         ? "Ask to scan a table for PII and suggest masking or hashing..."
+      : workflow === 'AGENT' && agentRole === 'email_sender'
+        ? "Ask to send a text summary, attach a file, or prepare an email..."
       : workflow === 'AGENT' && agentRole === 'custom_agent'
         ? `Ask ${selectedCustomAgent?.title || 'the custom agent'} to help from its uploaded Python specification...`
       : workflow === 'AGENT' && agentRole === 'file_management'
@@ -3452,6 +3580,8 @@ export function ChatInterface({
           ? 'Data Cleaner'
           : agentRole === 'anonymizer'
             ? 'Anonymizer'
+          : agentRole === 'email_sender'
+            ? 'Email Sender'
           : agentRole === 'custom_agent'
             ? (selectedCustomAgent?.title || 'Custom Agent')
           : agentRole === 'file_management'
@@ -3522,6 +3652,15 @@ export function ChatInterface({
                   iconWrapClass: 'bg-zinc-100 text-zinc-700 ring-1 ring-zinc-200 dark:bg-zinc-800/70 dark:text-zinc-200 dark:ring-zinc-700/70',
                   eyebrowClass: 'text-zinc-700 dark:text-zinc-300',
                   buttonClass: 'border-zinc-400/60 bg-zinc-800 text-white shadow-[0_18px_40px_rgba(63,63,70,0.28)] hover:bg-zinc-700 dark:border-zinc-300/20 dark:bg-zinc-800 dark:hover:bg-zinc-700',
+                }
+            : agentRole === 'email_sender'
+              ? {
+                  eyebrow: 'Agent',
+                  label: 'Email Sender',
+                  icon: MessageSquare,
+                  iconWrapClass: 'bg-sky-50 text-sky-600 ring-1 ring-sky-200 dark:bg-sky-900/25 dark:text-sky-300 dark:ring-sky-800/70',
+                  eyebrowClass: 'text-sky-700 dark:text-sky-300',
+                  buttonClass: 'border-sky-400/60 bg-sky-500 text-white shadow-[0_18px_40px_rgba(14,165,233,0.28)] hover:bg-sky-400 dark:border-sky-300/20 dark:bg-sky-500 dark:hover:bg-sky-400',
                 }
             : agentRole === 'custom_agent'
               ? {
@@ -3660,6 +3799,8 @@ export function ChatInterface({
               ? Check
             : delegateRole === 'anonymizer'
               ? Gauge
+            : delegateRole === 'email_sender'
+              ? MessageSquare
             : delegateRole === 'custom_agent'
               ? Bot
               : delegateRole === 'oracle_analyst'
@@ -4997,6 +5138,14 @@ export function ChatInterface({
                             className={`${toolsSecondaryButtonBase} ${agentRole === 'anonymizer' ? 'bg-zinc-800 text-white shadow-md shadow-zinc-800/20' : 'bg-white/85 text-gray-700 border border-zinc-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-zinc-700 dark:hover:bg-white/10'}`}
                           >
                             <Gauge className="h-3.5 w-3.5" /> Anonymizer
+                          </button>
+                        )}
+                        {isBuiltInAgentVisible('email_sender') && (
+                          <button
+                            onClick={() => handleAgentRoleSelection('email_sender')}
+                            className={`${toolsSecondaryButtonBase} ${agentRole === 'email_sender' ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20' : 'bg-white/85 text-gray-700 border border-sky-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-sky-800/70 dark:hover:bg-white/10'}`}
+                          >
+                            <MessageSquare className="h-3.5 w-3.5" /> Email Sender
                           </button>
                         )}
                         {isBuiltInAgentVisible('file_management') && (

@@ -26,6 +26,8 @@ import csv
 import shutil
 import math
 import unicodedata
+import mimetypes
+import smtplib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from pathlib import Path
@@ -33,6 +35,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from opensearchpy import OpenSearch
 from urllib.parse import urlparse
 from typing_extensions import Literal, TypedDict
+from email.message import EmailMessage
+from email.utils import formataddr, getaddresses
+import ssl
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
@@ -246,6 +251,7 @@ DEFAULT_APP_CONFIG = {
         "auto_ml": True,
         "data_cleaner": True,
         "anonymizer": True,
+        "email_sender": True,
     },
     "disableSslVerification": False,
     "elasticsearchUrl": "http://localhost:9200",
@@ -315,6 +321,24 @@ DEFAULT_APP_CONFIG = {
             "tasteful emphasis. When the user explicitly asks for tabular output, include a Markdown table whenever the result is tabular."
         ),
     },
+    "emailSenderConfig": {
+        "host": "",
+        "port": 587,
+        "secure": False,
+        "startTls": True,
+        "username": "",
+        "password": "",
+        "fromEmail": "",
+        "fromName": "RAGnarok",
+        "replyTo": "",
+        "allowedRecipients": [],
+        "systemPrompt": (
+            "You are the Email Sender agent. Reply in English. Help the user prepare and send an email "
+            "with text and optional file attachments. Ask only for the missing delivery details, never "
+            "send to recipients outside the configured allowlist, and present final user-facing answers "
+            "in polished Markdown with concise structure and tasteful emphasis."
+        ),
+    },
 }
 
 DEFAULT_PREFERENCES = {
@@ -327,7 +351,7 @@ DEFAULT_PREFERENCES = {
     "page": "landing",
 }
 
-AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_analyst", "auto_ml", "data_cleaner", "anonymizer", "custom_agent"}
+AGENT_ROLES = {"manager", "clickhouse_query", "file_management", "pdf_creator", "oracle_analyst", "data_analyst", "auto_ml", "data_cleaner", "anonymizer", "email_sender", "custom_agent"}
 PLANNER_AGENT_ROLES = {"manager", "clickhouse_query", "file_management"}
 MCP_ORCHESTRATOR_ID = "__mcp_orchestrator__"
 PLANNER_TRIGGER_KINDS = {
@@ -674,6 +698,17 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
             state["config"]["fileManagerConfig"] = {
                 **DEFAULT_APP_CONFIG["fileManagerConfig"],
                 **incoming_file_manager,
+            }
+        incoming_email_sender = incoming_config.get("emailSenderConfig")
+        if isinstance(incoming_email_sender, dict):
+            state["config"]["emailSenderConfig"] = {
+                **DEFAULT_APP_CONFIG["emailSenderConfig"],
+                **incoming_email_sender,
+                "allowedRecipients": [
+                    str(item).strip()
+                    for item in (incoming_email_sender.get("allowedRecipients") or [])
+                    if str(item).strip()
+                ] if isinstance(incoming_email_sender.get("allowedRecipients"), list) else list(DEFAULT_APP_CONFIG["emailSenderConfig"]["allowedRecipients"]),
             }
         incoming_portal_apps = incoming_config.get("portalApps")
         if isinstance(incoming_portal_apps, list):
@@ -1106,6 +1141,93 @@ def _format_mcp_tool_result(result: Any) -> str:
     if getattr(result, "isError", False):
         return f"[Tool error] {output or 'The MCP server returned an error.'}"
     return output
+
+
+def _coerce_tabular_rows(
+    rows_candidate: Any,
+    headers_hint: Optional[list[str]] = None,
+) -> Optional[dict[str, Any]]:
+    headers_hint = [str(item).strip() for item in (headers_hint or []) if str(item).strip()]
+    if not isinstance(rows_candidate, list):
+        return None
+
+    if not rows_candidate:
+        if headers_hint:
+            return {"headers": headers_hint, "rows": [], "row_count": 0}
+        return None
+
+    if all(isinstance(row, dict) for row in rows_candidate):
+        headers = list(headers_hint)
+        for row in rows_candidate:
+            for key in row.keys():
+                key_text = str(key).strip()
+                if key_text and key_text not in headers:
+                    headers.append(key_text)
+        if not headers:
+            return None
+        limited_rows = [[row.get(header) for header in headers] for row in rows_candidate[:10_000]]
+        return {"headers": headers, "rows": limited_rows, "row_count": len(rows_candidate)}
+
+    if all(isinstance(row, (list, tuple)) for row in rows_candidate):
+        row_width = max((len(row) for row in rows_candidate), default=0)
+        headers = headers_hint or [f"column_{index + 1}" for index in range(row_width)]
+        limited_rows = [list(row) for row in rows_candidate[:10_000]]
+        return {"headers": headers, "rows": limited_rows, "row_count": len(rows_candidate)}
+
+    return None
+
+
+def _extract_mcp_tabular_payload(result: Any) -> Optional[dict[str, Any]]:
+    candidates: list[Any] = []
+    structured = getattr(result, "structuredContent", None)
+    if structured is not None:
+        candidates.append(structured)
+
+    for block in (getattr(result, "content", None) or []):
+        text_value = getattr(block, "text", None)
+        if not text_value and isinstance(block, dict):
+            text_value = block.get("text")
+        if not isinstance(text_value, str):
+            continue
+        stripped = text_value.strip()
+        if not stripped.startswith("{") and not stripped.startswith("["):
+            continue
+        try:
+            candidates.append(json.loads(stripped))
+        except Exception:
+            continue
+
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            headers_hint = [
+                str(item).strip()
+                for item in (candidate.get("headers") or candidate.get("columns") or [])
+                if str(item).strip()
+            ]
+            for key in ["rows", "data", "items", "results", "records"]:
+                payload = _coerce_tabular_rows(candidate.get(key), headers_hint)
+                if payload:
+                    return payload
+        else:
+            payload = _coerce_tabular_rows(candidate)
+            if payload:
+                return payload
+    return None
+
+
+def _normalize_mcp_export_format(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "xls":
+        return "xlsx"
+    if normalized in {"csv", "tsv", "xlsx"}:
+        return normalized
+    return "csv"
+
+
+def _default_mcp_export_path(export_format: str) -> str:
+    suffix = _normalize_mcp_export_format(export_format)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"exports/mcp-orchestrator-{timestamp}.{suffix}"
 
 def quote_clickhouse_literal(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
@@ -5526,6 +5648,300 @@ def _normalize_file_manager_config(payload: Optional[dict]) -> dict[str, Any]:
     }
 
 
+def _default_email_sender_state() -> dict[str, Any]:
+    return {
+        "stage": "idle",
+        "pending_request": "",
+        "pending_email": None,
+        "clarification_prompt": "",
+        "clarification_options": [],
+        "last_recipients": [],
+        "last_subject": "",
+        "last_attachment_paths": [],
+        "final_answer": "",
+        "last_error": "",
+    }
+
+
+def _normalize_email_sender_state(payload: Optional[dict]) -> dict[str, Any]:
+    state = _default_email_sender_state()
+    if not isinstance(payload, dict):
+        return state
+
+    stage = str(payload.get("stage") or "").strip()
+    if stage in {"awaiting_details", "ready"}:
+        state["stage"] = stage
+    state["pending_request"] = str(payload.get("pending_request") or payload.get("pendingRequest") or "").strip()
+    pending_email = payload.get("pending_email") or payload.get("pendingEmail")
+    if isinstance(pending_email, dict):
+        state["pending_email"] = {
+            "to": [str(item).strip() for item in (pending_email.get("to") or []) if str(item).strip()],
+            "cc": [str(item).strip() for item in (pending_email.get("cc") or []) if str(item).strip()],
+            "bcc": [str(item).strip() for item in (pending_email.get("bcc") or []) if str(item).strip()],
+            "subject": str(pending_email.get("subject") or "").strip(),
+            "body": str(pending_email.get("body") or "").strip(),
+            "attachment_paths": [
+                str(item).strip()
+                for item in (pending_email.get("attachment_paths") or pending_email.get("attachmentPaths") or [])
+                if str(item).strip()
+            ],
+        }
+    state["clarification_prompt"] = str(payload.get("clarification_prompt") or payload.get("clarificationPrompt") or "").strip()
+    state["clarification_options"] = [
+        str(item).strip() for item in (payload.get("clarification_options") or payload.get("clarificationOptions") or []) if str(item).strip()
+    ]
+    state["last_recipients"] = [
+        str(item).strip() for item in (payload.get("last_recipients") or payload.get("lastRecipients") or []) if str(item).strip()
+    ]
+    state["last_subject"] = str(payload.get("last_subject") or payload.get("lastSubject") or "").strip()
+    state["last_attachment_paths"] = [
+        str(item).strip() for item in (payload.get("last_attachment_paths") or payload.get("lastAttachmentPaths") or []) if str(item).strip()
+    ]
+    state["final_answer"] = str(payload.get("final_answer") or payload.get("finalAnswer") or "").strip()
+    state["last_error"] = str(payload.get("last_error") or payload.get("lastError") or "").strip()
+    return state
+
+
+def _normalize_email_sender_config(payload: Optional[dict]) -> dict[str, Any]:
+    defaults = DEFAULT_APP_CONFIG["emailSenderConfig"]
+    if not isinstance(payload, dict):
+        return dict(defaults)
+    return {
+        "host": str(payload.get("host") or defaults["host"]).strip(),
+        "port": max(1, min(65535, int(payload.get("port") or defaults["port"]))),
+        "secure": bool(payload.get("secure", defaults["secure"])),
+        "startTls": bool(payload.get("startTls") if "startTls" in payload else payload.get("start_tls", defaults["startTls"])),
+        "username": str(payload.get("username") or defaults["username"]).strip(),
+        "password": str(payload.get("password") or defaults["password"]),
+        "fromEmail": str(payload.get("fromEmail") or payload.get("from_email") or defaults["fromEmail"]).strip(),
+        "fromName": str(payload.get("fromName") or payload.get("from_name") or defaults["fromName"]).strip(),
+        "replyTo": str(payload.get("replyTo") or payload.get("reply_to") or defaults["replyTo"]).strip(),
+        "allowedRecipients": [
+            str(item).strip()
+            for item in (payload.get("allowedRecipients") or payload.get("allowed_recipients") or defaults["allowedRecipients"])
+            if str(item).strip()
+        ],
+        "systemPrompt": str(payload.get("systemPrompt") or payload.get("system_prompt") or defaults["systemPrompt"]).strip() or defaults["systemPrompt"],
+    }
+
+
+def _email_sender_state_needs_followup(state: dict[str, Any]) -> bool:
+    return str(state.get("stage") or "").strip() == "awaiting_details" and bool(state.get("pending_email"))
+
+
+def _normalize_email_list(raw_values: Any) -> list[str]:
+    if isinstance(raw_values, list):
+        candidates = raw_values
+    else:
+        candidates = re.split(r"[,;\n]+", str(raw_values or ""))
+    normalized: list[str] = []
+    for value in candidates:
+        email = str(value or "").strip()
+        if email:
+            normalized.append(email)
+    return normalized
+
+
+EMAIL_REGEX = re.compile(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+
+
+def _extract_email_addresses_from_text(text: str) -> list[str]:
+    return [match.group(0).strip() for match in EMAIL_REGEX.finditer(str(text or ""))]
+
+
+def _validate_allowed_recipients(recipients: list[str], allowed_recipients: list[str]) -> None:
+    allowed = {item.strip().lower() for item in allowed_recipients if item.strip()}
+    if not allowed:
+        raise ValueError("No allowed recipient is configured. Add at least one recipient in Settings before sending email.")
+    unauthorized = [item for item in recipients if item.strip().lower() not in allowed]
+    if unauthorized:
+        raise ValueError(
+            "These recipients are not allowed by the SMTP configuration: "
+            + ", ".join(sorted(set(unauthorized)))
+        )
+
+
+def _resolve_email_attachment_paths(paths: list[str], file_manager_base_path: str = "") -> list[Path]:
+    resolved_paths: list[Path] = []
+    for item in paths:
+        candidate = str(item or "").strip()
+        if not candidate:
+            continue
+        target = _resolve_agent_path(candidate, file_manager_base_path)
+        if not target.exists() or not target.is_file():
+            raise ValueError(f"Attachment `{candidate}` does not exist or is not a file.")
+        resolved_paths.append(target)
+    return resolved_paths
+
+
+def _compose_email_message(payload: dict[str, Any], config: dict[str, Any], attachment_paths: list[Path]) -> EmailMessage:
+    message = EmailMessage()
+    from_email = str(config.get("fromEmail") or "").strip()
+    from_name = str(config.get("fromName") or "").strip()
+    if not from_email:
+        raise ValueError("SMTP sender address is missing. Configure `From email` in Settings.")
+    message["From"] = formataddr((from_name, from_email)) if from_name else from_email
+    message["To"] = ", ".join(payload.get("to") or [])
+    if payload.get("cc"):
+        message["Cc"] = ", ".join(payload.get("cc") or [])
+    if payload.get("bcc"):
+        message["Bcc"] = ", ".join(payload.get("bcc") or [])
+    if config.get("replyTo"):
+        message["Reply-To"] = str(config.get("replyTo"))
+    message["Subject"] = str(payload.get("subject") or "RAGnarok update").strip()
+    body = str(payload.get("body") or "").strip() or "Please find the requested content attached."
+    message.set_content(body)
+
+    for attachment in attachment_paths:
+        mime_type, _ = mimetypes.guess_type(str(attachment))
+        maintype, subtype = (mime_type.split("/", 1) if mime_type and "/" in mime_type else ("application", "octet-stream"))
+        with attachment.open("rb") as handle:
+            message.add_attachment(handle.read(), maintype=maintype, subtype=subtype, filename=attachment.name)
+    return message
+
+
+def _send_email_via_smtp(payload: dict[str, Any], config: dict[str, Any], file_manager_base_path: str = "") -> dict[str, Any]:
+    recipients = _normalize_email_list((payload.get("to") or []) + (payload.get("cc") or []) + (payload.get("bcc") or []))
+    if not recipients:
+        raise ValueError("At least one recipient is required.")
+    _validate_allowed_recipients(recipients, list(config.get("allowedRecipients") or []))
+    attachment_paths = _resolve_email_attachment_paths(list(payload.get("attachment_paths") or []), file_manager_base_path)
+    message = _compose_email_message(payload, config, attachment_paths)
+
+    host = str(config.get("host") or "").strip()
+    port = int(config.get("port") or 0)
+    if not host or not port:
+        raise ValueError("SMTP host and port must be configured before sending email.")
+
+    username = str(config.get("username") or "").strip()
+    password = str(config.get("password") or "")
+    secure = bool(config.get("secure"))
+    start_tls = bool(config.get("startTls"))
+    timeout = 20
+
+    if secure:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(host, port, timeout=timeout, context=context) as server:
+            server.ehlo()
+            if username:
+                server.login(username, password)
+            server.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=timeout) as server:
+            server.ehlo()
+            if start_tls:
+                context = ssl.create_default_context()
+                server.starttls(context=context)
+                server.ehlo()
+            if username:
+                server.login(username, password)
+            server.send_message(message)
+
+    return {
+        "recipients": recipients,
+        "subject": str(payload.get("subject") or "").strip(),
+        "attachment_paths": [str(path) for path in attachment_paths],
+    }
+
+
+def _try_extract_email_payload(user_message: str) -> Optional[dict[str, Any]]:
+    text = str(user_message or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = extract_json_object(text)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("__email_send__"):
+        return None
+    return {
+        "to": _normalize_email_list(parsed.get("to") or []),
+        "cc": _normalize_email_list(parsed.get("cc") or []),
+        "bcc": _normalize_email_list(parsed.get("bcc") or []),
+        "subject": str(parsed.get("subject") or "").strip(),
+        "body": str(parsed.get("body") or "").strip(),
+        "attachment_paths": _normalize_email_list(parsed.get("attachment_paths") or parsed.get("attachmentPaths") or []),
+    }
+
+
+async def plan_email_sender_step(
+    user_message: str,
+    history: list[dict[str, Any]],
+    pending_email: Optional[dict[str, Any]],
+    system_prompt: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str] = None,
+    disable_ssl_verification: bool = False,
+) -> dict[str, Any]:
+    trimmed_history = _normalized_history_messages(history, current_message=user_message, max_steps=CHAT_MEMORY_MAX_STEPS)
+    prompt = f"""
+You are an Email Sender agent planner.
+Reply in English.
+
+Return JSON only:
+{{
+  "action": "send|ask|final",
+  "reasoning": "short explanation",
+  "email": {{
+    "to": ["recipient@example.com"],
+    "cc": [],
+    "bcc": [],
+    "subject": "subject",
+    "body": "plain text email body",
+    "attachment_paths": ["reports/output.csv"]
+  }},
+  "question": "question to ask when action=ask",
+  "clarification_options": ["Option A", "Option B"],
+  "final_answer": "final answer when action=final"
+}}
+
+Rules:
+- Use `send` only when the email has enough information to be sent now.
+- Ask only for missing delivery details.
+- Keep attachment paths explicit.
+- If the message is only informational and does not ask to send an email, use `final`.
+
+System prompt:
+{_with_table_output_guidance(system_prompt)}
+
+Pending email draft:
+{json.dumps(pending_email or {}, ensure_ascii=False, indent=2)}
+
+Recent conversation:
+{json.dumps(trimmed_history, ensure_ascii=False, indent=2)}
+
+Current user request:
+{user_message}
+""".strip()
+    raw = await llm_chat(
+        [{"role": "user", "content": prompt}],
+        llm_base_url,
+        llm_model,
+        llm_provider,
+        llm_api_key,
+        response_format="json",
+        disable_ssl_verification=disable_ssl_verification,
+    )
+    parsed = extract_json_object(raw)
+    email = parsed.get("email") if isinstance(parsed.get("email"), dict) else {}
+    return {
+        "action": str(parsed.get("action") or "").strip().lower(),
+        "reasoning": str(parsed.get("reasoning") or "").strip(),
+        "email": {
+            "to": _normalize_email_list(email.get("to") or []),
+            "cc": _normalize_email_list(email.get("cc") or []),
+            "bcc": _normalize_email_list(email.get("bcc") or []),
+            "subject": str(email.get("subject") or "").strip(),
+            "body": str(email.get("body") or "").strip(),
+            "attachment_paths": _normalize_email_list(email.get("attachment_paths") or email.get("attachmentPaths") or []),
+        },
+        "question": str(parsed.get("question") or "").strip(),
+        "clarification_options": [str(item).strip() for item in (parsed.get("clarification_options") or parsed.get("clarificationOptions") or []) if str(item).strip()],
+        "final_answer": str(parsed.get("final_answer") or parsed.get("finalAnswer") or "").strip(),
+    }
+
 def _file_manager_confirmation_answer(state: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     pending = state.get("pending_confirmation") or {}
     preview = str(pending.get("preview") or "").strip()
@@ -5596,6 +6012,7 @@ MANAGER_SPECIALIST_LABELS = {
     "auto_ml": "Auto-ML",
     "data_cleaner": "Data Cleaner",
     "anonymizer": "Anonymizer",
+    "email_sender": "Email Sender",
     "custom_agent": "Custom Agent",
     "file_management": "File management",
     "pdf_creator": "PDF creator",
@@ -5659,6 +6076,10 @@ def _normalize_manager_delegate_role(value: Any, allow_manager: bool = False) ->
         "anonymizer agent": "anonymizer",
         "gdpr": "anonymizer",
         "rgpd": "anonymizer",
+        "email sender": "email_sender",
+        "email_sender": "email_sender",
+        "mail sender": "email_sender",
+        "smtp": "email_sender",
         "custom agent": "custom_agent",
         "custom_agent": "custom_agent",
         "file management": "file_management",
@@ -5774,6 +6195,7 @@ def _manager_specialist_state_summary(
     auto_ml_state: dict[str, Any],
     data_cleaner_state: dict[str, Any],
     anonymizer_state: dict[str, Any],
+    email_sender_state: dict[str, Any],
     custom_agents: list[dict[str, Any]],
     custom_agent_state: dict[str, Any],
     file_manager_state: dict[str, Any],
@@ -5816,6 +6238,13 @@ def _manager_specialist_state_summary(
         "pii_findings": len(anonymizer_state.get("pii_findings") or []),
         "script_count": len(anonymizer_state.get("masking_scripts") or []),
     }
+    email_sender_summary = {
+        "stage": email_sender_state.get("stage") or "idle",
+        "pending_email": bool(email_sender_state.get("pending_email")),
+        "last_recipients": email_sender_state.get("last_recipients") or [],
+        "last_subject": email_sender_state.get("last_subject") or "",
+        "attachment_count": len(email_sender_state.get("last_attachment_paths") or []),
+    }
     custom_agent_summary = {
         "selected_agent_id": custom_agent_state.get("selected_agent_id"),
         "enabled_agents": [
@@ -5857,6 +6286,7 @@ def _manager_specialist_state_summary(
             "auto_ml": auto_ml_summary,
             "data_cleaner": data_cleaner_summary,
             "anonymizer": anonymizer_summary,
+            "email_sender": email_sender_summary,
             "custom_agent": custom_agent_summary,
             "file_management": file_summary,
             "pdf_creator": pdf_summary,
@@ -5903,6 +6333,19 @@ MANAGER_PDF_KEYWORDS = [
     "créer un pdf",
     "generer un pdf",
     "générer un pdf",
+]
+MANAGER_EMAIL_KEYWORDS = [
+    "email",
+    "mail",
+    "send email",
+    "send by email",
+    "send the result by email",
+    "send mail",
+    "smtp",
+    "courriel",
+    "envoyer par email",
+    "envoyer un email",
+    "envoyer un mail",
 ]
 
 
@@ -6122,6 +6565,35 @@ def _build_pdf_export_payload_from_clickhouse(
     }
 
 
+def _manager_email_requested(user_message: str) -> bool:
+    normalized = normalize_intent_text(user_message)
+    return any(token in normalized for token in MANAGER_EMAIL_KEYWORDS) or bool(_extract_email_addresses_from_text(user_message))
+
+
+def _build_email_payload_from_clickhouse(user_message: str, clickhouse_answer: str) -> dict[str, Any]:
+    recipients = _extract_email_addresses_from_text(user_message)
+    cleaned_answer = str(clickhouse_answer or "").strip()
+    return {
+        "__email_send__": True,
+        "to": recipients,
+        "subject": "RAGnarok analysis result",
+        "body": cleaned_answer,
+        "attachment_paths": [],
+    }
+
+
+def _build_email_payload_from_result(user_message: str, result_markdown: str, *, subject: str = "RAGnarok result") -> dict[str, Any]:
+    recipients = _extract_email_addresses_from_text(user_message)
+    cleaned_answer = str(result_markdown or "").strip()
+    return {
+        "__email_send__": True,
+        "to": recipients,
+        "subject": str(subject or "RAGnarok result").strip() or "RAGnarok result",
+        "body": cleaned_answer,
+        "attachment_paths": [],
+    }
+
+
 def _manager_compose_chained_answer(
     primary_answer: str,
     secondary_answer: str,
@@ -6149,6 +6621,7 @@ def _heuristic_manager_delegate(
     auto_ml_state: dict[str, Any],
     data_cleaner_state: dict[str, Any],
     anonymizer_state: dict[str, Any],
+    email_sender_state: dict[str, Any],
     custom_agents: list[dict[str, Any]],
     custom_agent_state: dict[str, Any],
     file_manager_state: dict[str, Any],
@@ -6171,6 +6644,8 @@ def _heuristic_manager_delegate(
         return "data_cleaner", "Continuing the active Data Cleaner table-selection flow."
     if active_delegate == "anonymizer" and _anonymizer_state_needs_followup(anonymizer_state):
         return "anonymizer", "Continuing the active Anonymizer table-selection flow."
+    if active_delegate == "email_sender" and _email_sender_state_needs_followup(email_sender_state):
+        return "email_sender", "Continuing the active Email Sender draft."
     if active_delegate == "pdf_creator" and _pdf_creator_state_needs_followup(pdf_creator_state):
         return "pdf_creator", "Continuing the active PDF-creation flow."
     if active_delegate == "oracle_analyst" and _oracle_state_needs_followup(oracle_state):
@@ -6192,6 +6667,8 @@ def _heuristic_manager_delegate(
         return "data_cleaner", "The user is continuing a Data Cleaner clarification step."
     if _anonymizer_state_needs_followup(anonymizer_state):
         return "anonymizer", "The user is continuing an Anonymizer clarification step."
+    if _email_sender_state_needs_followup(email_sender_state):
+        return "email_sender", "The user is continuing an Email Sender clarification step."
     if _pdf_creator_state_needs_followup(pdf_creator_state):
         return "pdf_creator", "The user is continuing a PDF export clarification or confirmation."
     if _oracle_state_needs_followup(oracle_state):
@@ -6442,6 +6919,10 @@ def _heuristic_manager_delegate(
         "anonymizer", "anonymiser", "anonymize", "anonymise", "pii", "personally identifiable", "personal data",
         "gdpr", "rgpd", "mask data", "hash data", "masking", "tokenize", "pseudonymize", "pseudonymise",
     ]
+    email_tokens = [
+        "email", "mail", "smtp", "send email", "send mail", "message by email", "envoyer un email", "envoyer un mail",
+        "courriel", "recipient", "destinataire", "attachment", "attached file", "jointe", "pièce jointe",
+    ]
     file_action_tokens = [
         "create",
         "make",
@@ -6518,6 +6999,7 @@ def _heuristic_manager_delegate(
     auto_ml_hit = any(token in normalized for token in auto_ml_tokens)
     data_cleaner_hit = any(token in normalized for token in data_cleaner_tokens)
     anonymizer_hit = any(token in normalized for token in anonymizer_tokens)
+    email_hit = any(token in normalized for token in email_tokens) or bool(_extract_email_addresses_from_text(user_message))
     custom_agent_match = next((
         agent for agent in custom_agents
         if any(
@@ -6539,6 +7021,8 @@ def _heuristic_manager_delegate(
         return "auto_ml", "The request is explicitly about benchmarking machine-learning models on ClickHouse data."
     if anonymizer_hit and not oracle_hit:
         return "anonymizer", "The request is explicitly about PII detection, masking, or GDPR-style anonymization on ClickHouse data."
+    if email_hit and not sql_execution_hit and not file_hit:
+        return "email_sender", "The request is explicitly about sending an email."
     if data_cleaner_hit and not oracle_hit:
         return "data_cleaner", "The request is explicitly about duplicates, missing values, or inconsistent formats on ClickHouse data."
     if custom_agent_match:
@@ -6569,6 +7053,7 @@ async def analyze_manager_routing(
     auto_ml_state: dict[str, Any],
     data_cleaner_state: dict[str, Any],
     anonymizer_state: dict[str, Any],
+    email_sender_state: dict[str, Any],
     custom_agents: list[dict[str, Any]],
     custom_agent_state: dict[str, Any],
     file_manager_state: dict[str, Any],
@@ -6588,6 +7073,7 @@ async def analyze_manager_routing(
         auto_ml_state,
         data_cleaner_state,
         anonymizer_state,
+        email_sender_state,
         custom_agents,
         custom_agent_state,
         file_manager_state,
@@ -6628,6 +7114,7 @@ Available delegates:
 - auto_ml: use this to benchmark several machine-learning models on ClickHouse data and compare their performance.
 - data_cleaner: use this to audit ClickHouse data quality, detect duplicates and missing values, flag inconsistent formats, and propose correction scripts.
 - anonymizer: use this to scan ClickHouse datasets for PII exposure and recommend masking, hashing, or tokenization patterns.
+- email_sender: use this to send an email with text and optional file attachments through the configured SMTP server.
 - custom_agent: use this when one of the enabled custom agents is the best fit for the request.
 - file_management: use this for filesystem actions, directories, files, CSV/Excel/Word/Parquet handling, create/edit/move/delete operations.
 - pdf_creator: use this to create a clean, professional PDF export from an analysis, a report, or the latest relevant result in the chat.
@@ -6636,7 +7123,7 @@ Available delegates:
 If more than one specialist could be relevant, choose the one that should act first.
 Return JSON only with this exact shape:
 {{
-  "delegate": "manager" | "clickhouse_query" | "data_analyst" | "auto_ml" | "data_cleaner" | "anonymizer" | "custom_agent" | "file_management" | "pdf_creator" | "oracle_analyst",
+  "delegate": "manager" | "clickhouse_query" | "data_analyst" | "auto_ml" | "data_cleaner" | "anonymizer" | "email_sender" | "custom_agent" | "file_management" | "pdf_creator" | "oracle_analyst",
   "reasoning": "short English explanation",
   "handoff_message": "short English specialist instruction preserving the user's intent",
   "custom_agent_id": "required when delegate is custom_agent"
@@ -6651,11 +7138,13 @@ Rules:
 - Use `auto_ml` when the user wants to benchmark, compare, or score machine-learning models on ClickHouse data.
 - Use `data_cleaner` when the request is about duplicates, missing values, inconsistent formats, or cleanup scripts.
 - Use `anonymizer` when the request is about PII, masking, hashing, anonymization, or GDPR-style privacy safeguards.
+- Use `email_sender` when the request is about sending an email or delivering results by email, unless another specialist must act first.
 - Use `custom_agent` only when an enabled custom agent is clearly a better fit than the built-in specialists.
 - Never delegate Oracle work to `data_analyst`.
 - Never delegate Oracle work to `auto_ml`.
 - Never delegate Oracle work to `data_cleaner`.
 - Never delegate Oracle work to `anonymizer`.
+- Never delegate Oracle work to `email_sender` when the email depends on Oracle data that has not been collected yet.
 - If the user asks to create, write, save, edit, move, rename, or delete a file or folder, delegate to `file_management`.
 - If the user asks for a PDF export, a report PDF, or a professional PDF document, delegate to `pdf_creator` unless a ClickHouse query must happen first.
 - Keep `handoff_message` concise and actionable.
@@ -6665,7 +7154,7 @@ Current manager state:
 {json.dumps(manager_state, ensure_ascii=False, indent=2)}
 
 Current specialist state summary:
-{_manager_specialist_state_summary(clickhouse_state, data_analyst_state, auto_ml_state, data_cleaner_state, anonymizer_state, custom_agents, custom_agent_state, file_manager_state, pdf_creator_state, oracle_state, manager_state)}
+{_manager_specialist_state_summary(clickhouse_state, data_analyst_state, auto_ml_state, data_cleaner_state, anonymizer_state, email_sender_state, custom_agents, custom_agent_state, file_manager_state, pdf_creator_state, oracle_state, manager_state)}
 
 Functional knowledge context from RAG:
 {functional_context or "No additional functional context loaded."}
@@ -11626,6 +12115,20 @@ class FileManagerAgentConfigModel(BaseModel):
     system_prompt: str = DEFAULT_APP_CONFIG["fileManagerConfig"]["systemPrompt"]
 
 
+class EmailSenderAgentConfigModel(BaseModel):
+    host: str = ""
+    port: int = 587
+    secure: bool = False
+    start_tls: bool = Field(default=True, validation_alias=AliasChoices("start_tls", "startTls"), serialization_alias="startTls")
+    username: str = ""
+    password: str = ""
+    from_email: str = Field(default="", validation_alias=AliasChoices("from_email", "fromEmail"), serialization_alias="fromEmail")
+    from_name: str = Field(default="RAGnarok", validation_alias=AliasChoices("from_name", "fromName"), serialization_alias="fromName")
+    reply_to: str = Field(default="", validation_alias=AliasChoices("reply_to", "replyTo"), serialization_alias="replyTo")
+    allowed_recipients: list[str] = Field(default_factory=list, validation_alias=AliasChoices("allowed_recipients", "allowedRecipients"), serialization_alias="allowedRecipients")
+    system_prompt: str = DEFAULT_APP_CONFIG["emailSenderConfig"]["systemPrompt"]
+
+
 class FileManagerAgentStateModel(BaseModel):
     pending_confirmation: Optional[dict] = None
     last_tool_result: str = ""
@@ -11646,6 +12149,36 @@ class FileManagerAgentRequest(BaseModel):
 
 class FileManagerPathTestRequest(BaseModel):
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
+
+
+class EmailSenderAgentStateModel(BaseModel):
+    stage: str = "idle"
+    pending_request: str = ""
+    pending_email: Optional[dict] = None
+    clarification_prompt: str = ""
+    clarification_options: list[str] = Field(default_factory=list)
+    last_recipients: list[str] = Field(default_factory=list)
+    last_subject: str = ""
+    last_attachment_paths: list[str] = Field(default_factory=list)
+    final_answer: str = ""
+    last_error: str = ""
+
+
+class EmailSenderAgentRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+    llm_base_url: str = "http://localhost:11434"
+    llm_model: str = "llama3"
+    llm_api_key: Optional[str] = None
+    llm_provider: str = "ollama"
+    disable_ssl_verification: bool = False
+    agent_state: EmailSenderAgentStateModel = Field(default_factory=EmailSenderAgentStateModel)
+    email_sender_config: EmailSenderAgentConfigModel = Field(default_factory=EmailSenderAgentConfigModel)
+    file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
+
+
+class EmailSenderTestRequest(BaseModel):
+    email_sender_config: EmailSenderAgentConfigModel = Field(default_factory=EmailSenderAgentConfigModel)
 
 
 class PdfCreatorAgentStateModel(BaseModel):
@@ -11958,11 +12491,13 @@ class ManagerAgentRequest(BaseModel):
     auto_ml_state: AutoMlAgentStateModel = Field(default_factory=AutoMlAgentStateModel)
     data_cleaner_state: DataCleanerAgentStateModel = Field(default_factory=DataCleanerAgentStateModel)
     anonymizer_state: AnonymizerAgentStateModel = Field(default_factory=AnonymizerAgentStateModel)
+    email_sender_state: EmailSenderAgentStateModel = Field(default_factory=EmailSenderAgentStateModel)
     custom_agent_state: CustomAgentStateModel = Field(default_factory=CustomAgentStateModel)
     custom_agents: list[CustomAgentConfigModel] = Field(default_factory=list)
     oracle_connections: list[OracleConnectionConfig] = Field(default_factory=list)
     oracle_analyst_config: OracleAnalystConfigModel = Field(default_factory=OracleAnalystConfigModel)
     file_manager_config: FileManagerAgentConfigModel = Field(default_factory=FileManagerAgentConfigModel)
+    email_sender_config: EmailSenderAgentConfigModel = Field(default_factory=EmailSenderAgentConfigModel)
 
 
 class PlanningAgentStateModel(BaseModel):
@@ -15944,12 +16479,14 @@ async def chat_manager_agent(req: ManagerAgentRequest):
     auto_ml_state = _normalize_auto_ml_state(req.auto_ml_state.model_dump())
     data_cleaner_state = _normalize_data_cleaner_state(req.data_cleaner_state.model_dump())
     anonymizer_state = _normalize_anonymizer_state(req.anonymizer_state.model_dump())
+    email_sender_state = _normalize_email_sender_state(req.email_sender_state.model_dump())
     custom_agent_state = _normalize_custom_agent_state(req.custom_agent_state.model_dump())
     custom_agents = _enabled_custom_agents([agent.model_dump() for agent in req.custom_agents])
     file_manager_state = _normalize_file_manager_state(req.file_manager_state.model_dump())
     pdf_creator_state = _normalize_pdf_creator_state(req.pdf_creator_state.model_dump())
     oracle_analyst_state = _normalize_oracle_analyst_state(req.oracle_analyst_state.model_dump())
     file_manager_config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+    email_sender_config = _normalize_email_sender_config(req.email_sender_config.model_dump())
     oracle_analyst_config = _normalize_oracle_analyst_config(req.oracle_analyst_config.model_dump())
     oracle_connections = req.oracle_connections or [OracleConnectionConfig(**DEFAULT_APP_CONFIG["oracleConnections"][0])]
     pending_pipeline = manager_state.get("pending_pipeline")
@@ -15962,6 +16499,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "autoMl": auto_ml_state,
             "dataCleaner": data_cleaner_state,
             "anonymizer": anonymizer_state,
+            "emailSender": email_sender_state,
             "customAgent": custom_agent_state,
             "fileManager": file_manager_state,
             "pdfCreator": pdf_creator_state,
@@ -15974,7 +16512,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             "answer": (
                 "## Agent Manager\n"
                 "Describe the outcome you want, and I will either answer directly or route the task "
-                "to Clickhouse SQL, Data Analyst, Auto-ML, Data Cleaner, Anonymizer, a custom specialist, File management, PDF creator, or Oracle SQL when a specialist is needed."
+                "to Clickhouse SQL, Data Analyst, Auto-ML, Data Cleaner, Anonymizer, Email Sender, a custom specialist, File management, PDF creator, or Oracle SQL when a specialist is needed."
             ),
             "agent_state": _manager_agent_state_payload(),
             "steps": [
@@ -16059,6 +16597,38 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                 llm_api_key=req.llm_api_key,
                 llm_provider=req.llm_provider,
                 agent_state=AnonymizerAgentStateModel(**anonymizer_state),
+            )
+        )
+
+    async def _delegate_email_sender(message: str) -> dict[str, Any]:
+        return await chat_email_sender_agent(
+            EmailSenderAgentRequest(
+                message=message,
+                history=req.history,
+                llm_base_url=req.llm_base_url,
+                llm_model=req.llm_model,
+                llm_api_key=req.llm_api_key,
+                llm_provider=req.llm_provider,
+                disable_ssl_verification=req.disable_ssl_verification,
+                agent_state=EmailSenderAgentStateModel(**email_sender_state),
+                email_sender_config=EmailSenderAgentConfigModel(
+                    host=email_sender_config["host"],
+                    port=email_sender_config["port"],
+                    secure=email_sender_config["secure"],
+                    start_tls=email_sender_config["startTls"],
+                    username=email_sender_config["username"],
+                    password=email_sender_config["password"],
+                    from_email=email_sender_config["fromEmail"],
+                    from_name=email_sender_config["fromName"],
+                    reply_to=email_sender_config["replyTo"],
+                    allowed_recipients=email_sender_config["allowedRecipients"],
+                    system_prompt=email_sender_config["systemPrompt"],
+                ),
+                file_manager_config=FileManagerAgentConfigModel(
+                    base_path=file_manager_config["basePath"],
+                    max_iterations=file_manager_config["maxIterations"],
+                    system_prompt=file_manager_config["systemPrompt"],
+                ),
             )
         )
 
@@ -16187,6 +16757,7 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             auto_ml_state,
             data_cleaner_state,
             anonymizer_state,
+            email_sender_state,
             custom_agents,
             custom_agent_state,
             file_manager_state,
@@ -16320,6 +16891,12 @@ async def chat_manager_agent(req: ManagerAgentRequest):
             anonymizer_state = _normalize_anonymizer_state(delegated.get("agent_state"))
             manager_state["active_delegate"] = (
                 "anonymizer" if _anonymizer_state_needs_followup(anonymizer_state) else None
+            )
+        elif delegate == "email_sender":
+            delegated = await _delegate_email_sender(routing["handoff_message"])
+            email_sender_state = _normalize_email_sender_state(delegated.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "email_sender" if _email_sender_state_needs_followup(email_sender_state) else None
             )
         elif delegate == "custom_agent":
             if not custom_agents:
@@ -16525,6 +17102,116 @@ async def chat_manager_agent(req: ManagerAgentRequest):
                     "steps": manager_steps + specialist_steps,
                 }
 
+    if delegate == "clickhouse_query" and not manager_state.get("active_delegate") and _manager_email_requested(user_message):
+        try:
+            chained = await _delegate_email_sender(
+                json.dumps(
+                    _build_email_payload_from_clickhouse(user_message, delegated.get("answer") or ""),
+                    ensure_ascii=False,
+                )
+            )
+            email_sender_state = _normalize_email_sender_state(chained.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "email_sender" if _email_sender_state_needs_followup(email_sender_state) else None
+            )
+            chained_steps = _prefix_agent_steps(chained.get("steps") or [], "email_sender")
+            manager_steps.append(
+                {
+                    "id": "manager-chain-email-send",
+                    "title": "Continued to Email Sender",
+                    "status": "running" if manager_state.get("active_delegate") else "success",
+                    "details": "The manager continued the same request by delivering the ClickHouse result through Email Sender.",
+                }
+            )
+            return {
+                "answer": _manager_compose_chained_answer(
+                    delegated.get("answer") or "",
+                    chained.get("answer") or "",
+                    "Email Delivery",
+                ),
+                "actions": chained.get("actions") or delegated.get("actions"),
+                "chart": delegated.get("chart") or chained.get("chart"),
+                "agent_state": _manager_agent_state_payload(),
+                "steps": manager_steps + specialist_steps + chained_steps,
+            }
+        except HTTPException as exc:
+            manager_steps.append(
+                {
+                    "id": "manager-chain-email-failed",
+                    "title": "Email delivery failed",
+                    "status": "error",
+                    "details": str(exc.detail),
+                }
+            )
+            return {
+                "answer": _manager_compose_chained_answer(
+                    delegated.get("answer") or "",
+                    f"## Email Delivery\nI could not complete the email step.\n\n```text\n{exc.detail}\n```",
+                    "Email Delivery",
+                ),
+                "actions": delegated.get("actions"),
+                "chart": delegated.get("chart"),
+                "agent_state": _manager_agent_state_payload(),
+                "steps": manager_steps + specialist_steps,
+            }
+
+    if delegate in {"data_analyst", "auto_ml", "data_cleaner", "anonymizer", "oracle_analyst", "custom_agent"} and not manager_state.get("active_delegate") and _manager_email_requested(user_message):
+        try:
+            chained = await _delegate_email_sender(
+                json.dumps(
+                    _build_email_payload_from_result(
+                        user_message,
+                        delegated.get("answer") or "",
+                        subject=f"RAGnarok {_manager_specialist_label(delegate)} result",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            email_sender_state = _normalize_email_sender_state(chained.get("agent_state"))
+            manager_state["active_delegate"] = (
+                "email_sender" if _email_sender_state_needs_followup(email_sender_state) else None
+            )
+            chained_steps = _prefix_agent_steps(chained.get("steps") or [], "email_sender")
+            manager_steps.append(
+                {
+                    "id": "manager-chain-email-send-generic",
+                    "title": "Continued to Email Sender",
+                    "status": "running" if manager_state.get("active_delegate") else "success",
+                    "details": f"The manager continued the same request by delivering the {_manager_specialist_label(delegate)} result through Email Sender.",
+                }
+            )
+            return {
+                "answer": _manager_compose_chained_answer(
+                    delegated.get("answer") or "",
+                    chained.get("answer") or "",
+                    "Email Delivery",
+                ),
+                "actions": chained.get("actions") or delegated.get("actions"),
+                "chart": delegated.get("chart") or chained.get("chart"),
+                "agent_state": _manager_agent_state_payload(),
+                "steps": manager_steps + specialist_steps + chained_steps,
+            }
+        except HTTPException as exc:
+            manager_steps.append(
+                {
+                    "id": "manager-chain-email-failed-generic",
+                    "title": "Email delivery failed",
+                    "status": "error",
+                    "details": str(exc.detail),
+                }
+            )
+            return {
+                "answer": _manager_compose_chained_answer(
+                    delegated.get("answer") or "",
+                    f"## Email Delivery\nI could not complete the email step.\n\n```text\n{exc.detail}\n```",
+                    "Email Delivery",
+                ),
+                "actions": delegated.get("actions"),
+                "chart": delegated.get("chart"),
+                "agent_state": _manager_agent_state_payload(),
+                "steps": manager_steps + specialist_steps,
+            }
+
     return {
         "answer": delegated.get("answer") or "## Answer\nThe delegated agent completed its turn.",
         "actions": delegated.get("actions"),
@@ -16649,6 +17336,262 @@ async def test_file_manager_path(req: FileManagerPathTestRequest):
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/email-sender/test-smtp")
+async def test_email_sender_smtp(req: EmailSenderTestRequest):
+    try:
+        config = _normalize_email_sender_config(req.email_sender_config.model_dump())
+        host = str(config.get("host") or "").strip()
+        port = int(config.get("port") or 0)
+        if not host or not port:
+            raise ValueError("SMTP host and port are required.")
+        username = str(config.get("username") or "").strip()
+        password = str(config.get("password") or "")
+        secure = bool(config.get("secure"))
+        start_tls = bool(config.get("startTls"))
+        timeout = 15
+
+        if secure:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, timeout=timeout, context=context) as server:
+                server.ehlo()
+                if username:
+                    server.login(username, password)
+        else:
+            with smtplib.SMTP(host, port, timeout=timeout) as server:
+                server.ehlo()
+                if start_tls:
+                    context = ssl.create_default_context()
+                    server.starttls(context=context)
+                    server.ehlo()
+                if username:
+                    server.login(username, password)
+
+        return {
+            "status": "ok",
+            "host": host,
+            "port": port,
+            "secure": secure,
+            "startTls": start_tls,
+            "allowedRecipients": list(config.get("allowedRecipients") or []),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/chat/email-sender-agent")
+async def chat_email_sender_agent(req: EmailSenderAgentRequest):
+    _emit_log("info", "email_sender", "Received request", {"query": req.message})
+    user_message = (req.message or "").strip()
+    state = _normalize_email_sender_state(req.agent_state.model_dump())
+    config = _normalize_email_sender_config(req.email_sender_config.model_dump())
+    file_manager_config = _normalize_file_manager_config(req.file_manager_config.model_dump())
+    structured_payload = _try_extract_email_payload(user_message)
+
+    if not user_message:
+        return {
+            "answer": (
+                "## Email Sender Agent\n"
+                "Ask me to send a text update, attach one or more files, or prepare the final delivery email.\n\n"
+                f"Allowed recipients configured: **{len(config['allowedRecipients'])}**"
+            ),
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "email-ready",
+                    "title": "Ready for email delivery",
+                    "status": "success",
+                    "details": "The agent is ready to prepare and send email through the configured SMTP server.",
+                }
+            ],
+        }
+
+    email_draft = dict(state.get("pending_email") or {})
+    if structured_payload:
+        for key in ["to", "cc", "bcc", "attachment_paths"]:
+            if structured_payload.get(key):
+                email_draft[key] = list(structured_payload.get(key) or [])
+        for key in ["subject", "body"]:
+            if structured_payload.get(key):
+                email_draft[key] = str(structured_payload.get(key) or "").strip()
+    elif _email_sender_state_needs_followup(state):
+        planned = await plan_email_sender_step(
+            user_message,
+            req.history,
+            email_draft,
+            config["systemPrompt"],
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+            disable_ssl_verification=req.disable_ssl_verification,
+        )
+        if isinstance(planned.get("email"), dict):
+            draft_update = dict(planned.get("email") or {})
+            for key in ["to", "cc", "bcc", "attachment_paths"]:
+                if draft_update.get(key):
+                    email_draft[key] = list(draft_update.get(key) or [])
+            for key in ["subject", "body"]:
+                if draft_update.get(key):
+                    email_draft[key] = str(draft_update.get(key) or "").strip()
+        if planned.get("action") == "final":
+            state["stage"] = "ready"
+            state["final_answer"] = str(planned.get("final_answer") or "").strip()
+            state["clarification_prompt"] = ""
+            state["clarification_options"] = []
+            state["last_error"] = ""
+            return {
+                "answer": state["final_answer"] or "## Email Sender\nNo email was sent.",
+                "agent_state": state,
+                "steps": [],
+            }
+    else:
+        planned = await plan_email_sender_step(
+            user_message,
+            req.history,
+            None,
+            config["systemPrompt"],
+            req.llm_base_url,
+            req.llm_model,
+            req.llm_provider,
+            req.llm_api_key,
+            disable_ssl_verification=req.disable_ssl_verification,
+        )
+        if planned.get("action") == "final":
+            state["stage"] = "ready"
+            state["final_answer"] = str(planned.get("final_answer") or "").strip()
+            state["clarification_prompt"] = ""
+            state["clarification_options"] = []
+            state["last_error"] = ""
+            return {
+                "answer": state["final_answer"] or "## Email Sender\nNo email was sent.",
+                "agent_state": state,
+                "steps": [],
+            }
+        if isinstance(planned.get("email"), dict):
+            email_draft = dict(planned.get("email") or {})
+
+    if not email_draft.get("to"):
+        extracted_recipients = _extract_email_addresses_from_text(user_message)
+        if extracted_recipients:
+            email_draft["to"] = extracted_recipients
+
+    if not str(email_draft.get("subject") or "").strip():
+        email_draft["subject"] = "RAGnarok update"
+
+    missing_parts = []
+    if not email_draft.get("to"):
+        missing_parts.append("recipient email address")
+    if not str(email_draft.get("body") or "").strip() and not list(email_draft.get("attachment_paths") or []):
+        missing_parts.append("message body or at least one attachment")
+
+    if missing_parts:
+        state["stage"] = "awaiting_details"
+        state["pending_request"] = user_message
+        state["pending_email"] = {
+            "to": _normalize_email_list(email_draft.get("to") or []),
+            "cc": _normalize_email_list(email_draft.get("cc") or []),
+            "bcc": _normalize_email_list(email_draft.get("bcc") or []),
+            "subject": str(email_draft.get("subject") or "").strip(),
+            "body": str(email_draft.get("body") or "").strip(),
+            "attachment_paths": _normalize_email_list(email_draft.get("attachment_paths") or []),
+        }
+        state["clarification_prompt"] = (
+            "## Email Details Needed\n"
+            "I can send the email, but I still need: **"
+            + ", ".join(missing_parts)
+            + "**.\n\n"
+            "You can reply with the missing recipient, subject, body text, or file path(s)."
+        )
+        state["clarification_options"] = []
+        state["last_error"] = ""
+        return {
+            "answer": state["clarification_prompt"],
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "email-await-details",
+                    "title": "Waiting for email details",
+                    "status": "running",
+                    "details": "The SMTP configuration is ready, but some delivery details are still missing.",
+                }
+            ],
+        }
+
+    normalized_payload = {
+        "to": _normalize_email_list(email_draft.get("to") or []),
+        "cc": _normalize_email_list(email_draft.get("cc") or []),
+        "bcc": _normalize_email_list(email_draft.get("bcc") or []),
+        "subject": str(email_draft.get("subject") or "").strip(),
+        "body": str(email_draft.get("body") or "").strip(),
+        "attachment_paths": _normalize_email_list(email_draft.get("attachment_paths") or []),
+    }
+
+    try:
+        send_result = _send_email_via_smtp(normalized_payload, config, file_manager_config["basePath"])
+    except Exception as exc:
+        _emit_log("error", "email_sender", f"Email delivery failed: {exc}", {"error": str(exc)})
+        state["stage"] = "awaiting_details"
+        state["pending_request"] = user_message
+        state["pending_email"] = normalized_payload
+        state["clarification_prompt"] = (
+            "## Email Delivery Failed\n"
+            "I could not send the email with the current draft.\n\n"
+            f"```text\n{exc}\n```"
+        )
+        state["clarification_options"] = []
+        state["last_error"] = str(exc)
+        return {
+            "answer": state["clarification_prompt"],
+            "agent_state": state,
+            "steps": [
+                {
+                    "id": "email-send-failed",
+                    "title": "Email delivery failed",
+                    "status": "error",
+                    "details": str(exc),
+                }
+            ],
+        }
+
+    _emit_log(
+        "success",
+        "email_sender",
+        "Sent email successfully",
+        {
+            "recipient_count": len(send_result["recipients"]),
+            "subject": send_result["subject"],
+            "attachments": len(send_result["attachment_paths"]),
+        },
+    )
+    state = _default_email_sender_state()
+    state["stage"] = "ready"
+    state["last_recipients"] = send_result["recipients"]
+    state["last_subject"] = send_result["subject"]
+    state["last_attachment_paths"] = send_result["attachment_paths"]
+    state["final_answer"] = (
+        "## Email Sent\n"
+        f"Sent the email to **{', '.join(send_result['recipients'])}**.\n\n"
+        f"**Subject:** {send_result['subject'] or 'No subject'}"
+        + (
+            f"\n\n**Attachments:**\n" + "\n".join(f"- `{path}`" for path in send_result["attachment_paths"])
+            if send_result["attachment_paths"]
+            else ""
+        )
+    )
+    return {
+        "answer": state["final_answer"],
+        "agent_state": state,
+        "steps": [
+            {
+                "id": "email-sent",
+                "title": "Delivered email",
+                "status": "success",
+                "details": f"Recipients: {', '.join(send_result['recipients'])}",
+            }
+        ],
+    }
 
 
 def build_choice_markdown(title: str, prompt: str, options: list[str]) -> str:
@@ -18153,6 +19096,12 @@ async def _run_mcp_orchestrator_chat(
     disable_ssl_verification: bool,
 ) -> dict[str, Any]:
     _emit_log("info", "mcp_orchestrator", "Received orchestration request", {"query": message, "connector_count": len(mcp_tools)})
+    persisted_state = await read_db_state()
+    app_config = (persisted_state or {}).get("config") or DEFAULT_APP_CONFIG
+    file_manager_config = _normalize_file_manager_config(app_config.get("fileManagerConfig"))
+    file_manager_state = _default_file_manager_state()
+    email_sender_config = _normalize_email_sender_config(app_config.get("emailSenderConfig"))
+    email_sender_state = _default_email_sender_state()
     catalog = await _discover_mcp_catalog(
         mcp_tools,
         disable_ssl_verification=disable_ssl_verification,
@@ -18164,10 +19113,16 @@ async def _run_mcp_orchestrator_chat(
 
     conversation_memory = _conversation_memory_markdown(history, current_message=message)
     step_cap = 10
+    export_requested = _extract_manager_export_format(message) is not None or any(
+        token in normalize_intent_text(message) for token in MANAGER_EXPORT_KEYWORDS
+    )
+    email_requested = _manager_email_requested(message)
     planning_prompt = f"""
 You are an MCP orchestration planner.
 Write in English.
 Before acting, use the discovered MCP tool inventory below to create the best initial plan.
+You may also hand the final structured dataset to the File Management agent when the user explicitly asks for a file export.
+You may also hand the final result to the Email Sender agent when the user explicitly asks for email delivery.
 Return JSON only with:
 {{
   "goal": "short goal",
@@ -18181,6 +19136,8 @@ Rules:
 - Use between 1 and 10 execution steps.
 - The midpoint review must happen roughly halfway through the plan.
 - Prefer the MCP whose tool is the most specific to the requested job.
+- File export is {"enabled" if export_requested else "disabled"} for this request.
+- Email delivery is {"enabled" if email_requested else "disabled"} for this request.
 
 System prompt:
 {system_prompt or "None"}
@@ -18279,10 +19236,14 @@ Execution log so far:
 You are an MCP orchestrator.
 Return JSON only with:
 {{
-  "action": "run_tool|finish",
+  "action": "run_tool|export_file|send_email|finish",
   "mcp_id": "connector id when action=run_tool",
   "tool": "tool name when action=run_tool",
   "arguments": {{}},
+  "export_format": "csv|tsv|xlsx when action=export_file",
+  "export_path": "optional path when action=export_file",
+  "source_step": 1,
+  "email_subject": "optional subject when action=send_email",
   "reasoning": "why this step is useful",
   "final_answer": "required only when action=finish"
 }}
@@ -18292,6 +19253,9 @@ Rules:
 - If enough evidence is available, choose finish.
 - Otherwise choose one tool call that advances the plan.
 - Keep tool arguments minimal and valid.
+- Use `export_file` only if the user explicitly asked for a file export and a previous successful MCP step returned structured rows.
+- `source_step` should reference the MCP step whose structured rows you want to export. If omitted, use the latest exportable step.
+- Use `send_email` only if the user explicitly asked for email delivery and a previous successful step produced the content or file to send.
 
 User request:
 {message}
@@ -18348,6 +19312,248 @@ Execution log:
                 },
             }
 
+        if action == "export_file":
+            if not export_requested:
+                steps.append(
+                    {
+                        "id": f"mcp-orch-export-disabled-{step_index}",
+                        "title": "Rejected file export step",
+                        "status": "error",
+                        "details": "The orchestrator only exports files when the user explicitly asks for it.",
+                    }
+                )
+                continue
+
+            requested_source_step = decision.get("source_step")
+            export_source = None
+            if isinstance(requested_source_step, (int, float)):
+                requested_step_number = int(requested_source_step)
+                export_source = next(
+                    (
+                        entry for entry in execution_log
+                        if entry.get("status") == "success"
+                        and isinstance(entry.get("export_payload"), dict)
+                        and int(entry.get("step") or 0) == requested_step_number
+                    ),
+                    None,
+                )
+            if export_source is None:
+                export_source = next(
+                    (
+                        entry for entry in reversed(execution_log)
+                        if entry.get("status") == "success" and isinstance(entry.get("export_payload"), dict)
+                    ),
+                    None,
+                )
+
+            if not export_source:
+                _emit_log("warning", "mcp_orchestrator", "No exportable MCP result was available", {"step": step_index})
+                steps.append(
+                    {
+                        "id": f"mcp-orch-export-missing-{step_index}",
+                        "title": "No exportable dataset available",
+                        "status": "error",
+                        "details": "The orchestrator could not find a prior MCP result with structured rows to export.",
+                    }
+                )
+                continue
+
+            export_payload = dict(export_source.get("export_payload") or {})
+            export_format = _normalize_mcp_export_format(
+                str(decision.get("export_format") or _extract_manager_export_format(message) or "csv")
+            )
+            export_path = str(decision.get("export_path") or _extract_manager_export_path(message, export_format) or "").strip()
+            if not export_path:
+                export_path = _default_mcp_export_path(export_format)
+
+            export_message = json.dumps(
+                {
+                    "__file_export__": True,
+                    "format": export_format,
+                    "path": export_path,
+                    "sheet_name": "Results",
+                    "headers": export_payload.get("headers") or [],
+                    "rows": export_payload.get("rows") or [],
+                    "source_request": message,
+                },
+                ensure_ascii=False,
+            )
+
+            file_response = await chat_file_manager_agent(
+                FileManagerAgentRequest(
+                    message=export_message,
+                    history=[],
+                    llm_base_url=llm_base_url,
+                    llm_model=llm_model,
+                    llm_api_key=llm_api_key,
+                    llm_provider=llm_provider,
+                    disable_ssl_verification=disable_ssl_verification,
+                    agent_state=FileManagerAgentStateModel(**file_manager_state),
+                    file_manager_config=FileManagerAgentConfigModel(
+                        base_path=file_manager_config["basePath"],
+                        max_iterations=file_manager_config["maxIterations"],
+                        system_prompt=file_manager_config["systemPrompt"],
+                    ),
+                )
+            )
+            file_manager_state = _normalize_file_manager_state(file_response.get("agent_state"))
+            file_steps = [
+                {
+                    "id": f"mcp-orch-file-{step_index}-{index + 1}",
+                    "title": f"File Management · {str(item.get('title') or 'step').strip()}",
+                    "status": item.get("status") if item.get("status") in {"success", "running", "error"} else "success",
+                    "details": str(item.get("details") or "").strip(),
+                }
+                for index, item in enumerate(file_response.get("steps") or [])
+                if isinstance(item, dict)
+            ]
+            steps.extend(file_steps)
+            execution_log.append(
+                {
+                    "step": step_index,
+                    "mcp_id": "file_management",
+                    "mcp_label": "File Management",
+                    "tool": f"export_{export_format}",
+                    "arguments": {"path": export_path, "source_step": export_source.get("step")},
+                    "result": file_response.get("answer") or "",
+                    "status": "success" if not file_manager_state.get("pending_confirmation") else "running",
+                }
+            )
+            _emit_log(
+                "success" if not file_manager_state.get("pending_confirmation") else "warning",
+                "mcp_orchestrator",
+                f"Delegated export to File Management ({export_format})",
+                {"step": step_index, "path": export_path, "source_step": export_source.get("step")},
+            )
+            if file_manager_state.get("pending_confirmation"):
+                return {
+                    "answer": str(file_response.get("answer") or ""),
+                    "tool_calls": execution_log,
+                    "steps": steps,
+                    "plan": {
+                        "goal": str(plan.get("goal") or ""),
+                        "initial_plan": initial_plan,
+                        "step_budget": step_budget,
+                        "mid_review_step": mid_review_step,
+                    },
+                }
+            continue
+
+        if action == "send_email":
+            if not email_requested:
+                steps.append(
+                    {
+                        "id": f"mcp-orch-email-disabled-{step_index}",
+                        "title": "Rejected email step",
+                        "status": "error",
+                        "details": "The orchestrator only sends email when the user explicitly asks for it.",
+                    }
+                )
+                continue
+
+            requested_source_step = decision.get("source_step")
+            email_source = None
+            if isinstance(requested_source_step, (int, float)):
+                requested_step_number = int(requested_source_step)
+                email_source = next((entry for entry in execution_log if int(entry.get("step") or 0) == requested_step_number), None)
+            if email_source is None:
+                email_source = next((entry for entry in reversed(execution_log) if entry.get("status") == "success"), None)
+            if not email_source:
+                steps.append(
+                    {
+                        "id": f"mcp-orch-email-missing-{step_index}",
+                        "title": "No deliverable result available",
+                        "status": "error",
+                        "details": "The orchestrator could not find a prior successful step to deliver by email.",
+                    }
+                )
+                continue
+
+            attachment_paths: list[str] = []
+            if email_source.get("mcp_id") == "file_management":
+                candidate_path = str(((email_source.get("arguments") or {}).get("path")) or "").strip()
+                if candidate_path:
+                    attachment_paths.append(candidate_path)
+
+            recipients = _extract_email_addresses_from_text(message)
+            email_message = json.dumps(
+                {
+                    "__email_send__": True,
+                    "to": recipients,
+                    "subject": str(decision.get("email_subject") or "RAGnarok MCP result").strip() or "RAGnarok MCP result",
+                    "body": str(email_source.get("result") or "").strip() or f"MCP orchestrator result from step {email_source.get('step')}.",
+                    "attachment_paths": attachment_paths,
+                },
+                ensure_ascii=False,
+            )
+
+            email_response = await chat_email_sender_agent(
+                EmailSenderAgentRequest(
+                    message=email_message,
+                    history=[],
+                    llm_base_url=llm_base_url,
+                    llm_model=llm_model,
+                    llm_api_key=llm_api_key,
+                    llm_provider=llm_provider,
+                    disable_ssl_verification=disable_ssl_verification,
+                    agent_state=EmailSenderAgentStateModel(**email_sender_state),
+                    email_sender_config=EmailSenderAgentConfigModel(
+                        host=email_sender_config["host"],
+                        port=email_sender_config["port"],
+                        secure=email_sender_config["secure"],
+                        start_tls=email_sender_config["startTls"],
+                        username=email_sender_config["username"],
+                        password=email_sender_config["password"],
+                        from_email=email_sender_config["fromEmail"],
+                        from_name=email_sender_config["fromName"],
+                        reply_to=email_sender_config["replyTo"],
+                        allowed_recipients=email_sender_config["allowedRecipients"],
+                        system_prompt=email_sender_config["systemPrompt"],
+                    ),
+                    file_manager_config=FileManagerAgentConfigModel(
+                        base_path=file_manager_config["basePath"],
+                        max_iterations=file_manager_config["maxIterations"],
+                        system_prompt=file_manager_config["systemPrompt"],
+                    ),
+                )
+            )
+            email_sender_state = _normalize_email_sender_state(email_response.get("agent_state"))
+            email_steps = [
+                {
+                    "id": f"mcp-orch-email-{step_index}-{index + 1}",
+                    "title": f"Email Sender · {str(item.get('title') or 'step').strip()}",
+                    "status": item.get("status") if item.get("status") in {"success", "running", "error"} else "success",
+                    "details": str(item.get("details") or "").strip(),
+                }
+                for index, item in enumerate(email_response.get("steps") or [])
+                if isinstance(item, dict)
+            ]
+            steps.extend(email_steps)
+            execution_log.append(
+                {
+                    "step": step_index,
+                    "mcp_id": "email_sender",
+                    "mcp_label": "Email Sender",
+                    "tool": "send_email",
+                    "arguments": {"source_step": email_source.get("step"), "attachment_paths": attachment_paths},
+                    "result": email_response.get("answer") or "",
+                    "status": "success" if not _email_sender_state_needs_followup(email_sender_state) else "running",
+                }
+            )
+            if _email_sender_state_needs_followup(email_sender_state):
+                return {
+                    "answer": str(email_response.get("answer") or ""),
+                    "tool_calls": execution_log,
+                    "steps": steps,
+                    "plan": {
+                        "goal": str(plan.get("goal") or ""),
+                        "initial_plan": initial_plan,
+                        "step_budget": step_budget,
+                        "mid_review_step": mid_review_step,
+                    },
+                }
+            continue
+
         mcp_id = str(decision.get("mcp_id") or "").strip()
         tool_name = str(decision.get("tool") or "").strip()
         tool_args = decision.get("arguments") if isinstance(decision.get("arguments"), dict) else {}
@@ -18366,6 +19572,7 @@ Execution log:
             continue
 
         target = next(item for item in catalog if item.get("id") == mcp_id)
+        export_payload = None
         try:
             async with _mcp_client_session(
                 str(target.get("url") or ""),
@@ -18373,6 +19580,7 @@ Execution log:
             ) as session:
                 result = await session.call_tool(tool_name, tool_args or {})
                 tool_output = _format_mcp_tool_result(result)
+                export_payload = _extract_mcp_tabular_payload(result)
                 _emit_log("tool_call", "mcp_orchestrator", f"Executed `{tool_name}` on {target.get('label')}", {"step": step_index, "mcp_id": mcp_id, "tool": tool_name, "args": tool_args})
         except Exception as exc:
             tool_output = f"[Tool error] {exc}"
@@ -18414,6 +19622,7 @@ Execution log:
                 "tool": tool_name,
                 "arguments": tool_args,
                 "result": tool_output,
+                "export_payload": export_payload if export_payload else None,
                 "status": "success",
             }
         )

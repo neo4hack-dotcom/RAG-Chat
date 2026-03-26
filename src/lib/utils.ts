@@ -334,13 +334,35 @@ export type AnonymizerAgentState = {
   lastError: string;
 };
 
+export type EmailSenderPendingEmail = {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  attachmentPaths: string[];
+};
+
+export type EmailSenderAgentState = {
+  stage: 'idle' | 'awaiting_details' | 'ready';
+  pendingRequest: string;
+  pendingEmail: EmailSenderPendingEmail | null;
+  clarificationPrompt: string;
+  clarificationOptions: string[];
+  lastRecipients: string[];
+  lastSubject: string;
+  lastAttachmentPaths: string[];
+  finalAnswer: string;
+  lastError: string;
+};
+
 export type CustomAgentRuntimeState = {
   selectedAgentId: string | null;
   finalAnswer: string;
   lastError: string;
 };
 
-export type ManagerDelegateRole = 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'auto_ml' | 'data_cleaner' | 'anonymizer' | 'custom_agent';
+export type ManagerDelegateRole = 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'auto_ml' | 'data_cleaner' | 'anonymizer' | 'email_sender' | 'custom_agent';
 
 export type ManagerFileExportPipeline = {
   kind: 'clickhouse_to_file';
@@ -408,6 +430,7 @@ export type ConversationAgentState = {
   autoMl?: AutoMlAgentState;
   dataCleaner?: DataCleanerAgentState;
   anonymizer?: AnonymizerAgentState;
+  emailSender?: EmailSenderAgentState;
   customAgent?: CustomAgentRuntimeState;
 };
 
@@ -425,13 +448,13 @@ export type Conversation = {
 
 export type WorkflowMode = 'LLM' | 'RAG' | 'AGENT' | 'MCP' | 'CREWAI';
 
-export type AgentRole = 'manager' | 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'auto_ml' | 'data_cleaner' | 'anonymizer' | 'custom_agent';
+export type AgentRole = 'manager' | 'clickhouse_query' | 'data_analyst' | 'file_management' | 'pdf_creator' | 'oracle_analyst' | 'auto_ml' | 'data_cleaner' | 'anonymizer' | 'email_sender' | 'custom_agent';
 export type BuiltInAgentRole = Exclude<AgentRole, 'custom_agent'>;
 
 export type Page = 'landing' | 'chat' | 'dataviz' | 'agents';
 
-const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer', 'custom_agent'];
-export const BUILT_IN_AGENT_ROLES: BuiltInAgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer'];
+const VALID_AGENT_ROLES: AgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer', 'email_sender', 'custom_agent'];
+export const BUILT_IN_AGENT_ROLES: BuiltInAgentRole[] = ['manager', 'clickhouse_query', 'data_analyst', 'file_management', 'pdf_creator', 'oracle_analyst', 'auto_ml', 'data_cleaner', 'anonymizer', 'email_sender'];
 
 function isValidAgentRole(value: unknown): value is AgentRole {
   return typeof value === 'string' && VALID_AGENT_ROLES.includes(value as AgentRole);
@@ -520,11 +543,26 @@ export type AppConfig = {
   oracleConnections: OracleConnectionConfig[];
   oracleAnalystConfig: OracleAnalystAgentConfig;
   fileManagerConfig: FileManagerAgentConfig;
+  emailSenderConfig: EmailSenderAgentConfig;
 };
 
 export type FileManagerAgentConfig = {
   basePath: string;
   maxIterations: number;
+  systemPrompt: string;
+};
+
+export type EmailSenderAgentConfig = {
+  host: string;
+  port: number;
+  secure: boolean;
+  startTls: boolean;
+  username: string;
+  password: string;
+  fromEmail: string;
+  fromName: string;
+  replyTo: string;
+  allowedRecipients: string[];
   systemPrompt: string;
 };
 
@@ -565,6 +603,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     auto_ml: true,
     data_cleaner: true,
     anonymizer: true,
+    email_sender: true,
   },
   disableSslVerification: false,
   elasticsearchUrl: "http://localhost:9200",
@@ -623,6 +662,20 @@ export const DEFAULT_CONFIG: AppConfig = {
     maxIterations: 10,
     systemPrompt:
       'You are the File Management agent. Reply in English by default. Use filesystem tools instead of guessing, keep answers short and factual, ask for confirmation before destructive or overwrite actions, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis. When the user explicitly asks for tabular output, include a Markdown table whenever the result is naturally tabular.',
+  },
+  emailSenderConfig: {
+    host: '',
+    port: 587,
+    secure: false,
+    startTls: true,
+    username: '',
+    password: '',
+    fromEmail: '',
+    fromName: 'RAGnarok',
+    replyTo: '',
+    allowedRecipients: [],
+    systemPrompt:
+      'You are the Email Sender agent. Reply in English. Help the user prepare and send an email with text and optional file attachments. Ask only for the missing delivery details, never send to recipients outside the configured allowlist, and present final user-facing answers in polished Markdown with concise structure and tasteful emphasis.',
   },
 };
 
@@ -944,7 +997,7 @@ export function normalizeManagerAgentState(
     : null;
   const stage = pendingPipeline?.stage;
   return {
-    activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'data_analyst' || activeDelegate === 'auto_ml' || activeDelegate === 'file_management' || activeDelegate === 'pdf_creator' || activeDelegate === 'oracle_analyst' || activeDelegate === 'data_cleaner' || activeDelegate === 'anonymizer'
+    activeDelegate: activeDelegate === 'clickhouse_query' || activeDelegate === 'data_analyst' || activeDelegate === 'auto_ml' || activeDelegate === 'file_management' || activeDelegate === 'pdf_creator' || activeDelegate === 'oracle_analyst' || activeDelegate === 'data_cleaner' || activeDelegate === 'anonymizer' || activeDelegate === 'email_sender'
       ? activeDelegate
       : null,
     lastRoutingReason: (state as any)?.lastRoutingReason ?? (state as any)?.last_routing_reason ?? '',
@@ -1122,8 +1175,47 @@ export function normalizeAnonymizerAgentState(
   };
 }
 
+export function normalizeEmailSenderAgentState(
+  state?: Partial<EmailSenderAgentState> | null
+): EmailSenderAgentState {
+  const pendingEmail = (state as any)?.pendingEmail ?? (state as any)?.pending_email;
+  return {
+    stage:
+      (state as any)?.stage === 'awaiting_details' || (state as any)?.stage === 'ready'
+        ? (state as any).stage
+        : 'idle',
+    pendingRequest: String((state as any)?.pendingRequest ?? (state as any)?.pending_request ?? ''),
+    pendingEmail: pendingEmail && typeof pendingEmail === 'object'
+      ? {
+          to: Array.isArray((pendingEmail as any)?.to) ? (pendingEmail as any).to.filter(Boolean).map(String) : [],
+          cc: Array.isArray((pendingEmail as any)?.cc) ? (pendingEmail as any).cc.filter(Boolean).map(String) : [],
+          bcc: Array.isArray((pendingEmail as any)?.bcc) ? (pendingEmail as any).bcc.filter(Boolean).map(String) : [],
+          subject: String((pendingEmail as any)?.subject ?? ''),
+          body: String((pendingEmail as any)?.body ?? ''),
+          attachmentPaths: Array.isArray((pendingEmail as any)?.attachmentPaths ?? (pendingEmail as any)?.attachment_paths)
+            ? ((pendingEmail as any)?.attachmentPaths ?? (pendingEmail as any)?.attachment_paths).filter(Boolean).map(String)
+            : [],
+        }
+      : null,
+    clarificationPrompt: String((state as any)?.clarificationPrompt ?? (state as any)?.clarification_prompt ?? ''),
+    clarificationOptions: Array.isArray((state as any)?.clarificationOptions ?? (state as any)?.clarification_options)
+      ? ((state as any)?.clarificationOptions ?? (state as any)?.clarification_options).filter(Boolean).map(String)
+      : [],
+    lastRecipients: Array.isArray((state as any)?.lastRecipients ?? (state as any)?.last_recipients)
+      ? ((state as any)?.lastRecipients ?? (state as any)?.last_recipients).filter(Boolean).map(String)
+      : [],
+    lastSubject: String((state as any)?.lastSubject ?? (state as any)?.last_subject ?? ''),
+    lastAttachmentPaths: Array.isArray((state as any)?.lastAttachmentPaths ?? (state as any)?.last_attachment_paths)
+      ? ((state as any)?.lastAttachmentPaths ?? (state as any)?.last_attachment_paths).filter(Boolean).map(String)
+      : [],
+    finalAnswer: String((state as any)?.finalAnswer ?? (state as any)?.final_answer ?? ''),
+    lastError: String((state as any)?.lastError ?? (state as any)?.last_error ?? ''),
+  };
+}
+
 export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfig {
   const incomingFileManager = config?.fileManagerConfig;
+  const incomingEmailSender = config?.emailSenderConfig;
   const incomingOracleAnalyst = config?.oracleAnalystConfig;
   const incomingOracleConnections = Array.isArray(config?.oracleConnections) ? config!.oracleConnections : [];
   const incomingPortalApps = Array.isArray(config?.portalApps) ? config!.portalApps : [];
@@ -1195,6 +1287,23 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
       maxIterations: Math.min(15, Math.max(1, incomingFileManager?.maxIterations ?? DEFAULT_CONFIG.fileManagerConfig.maxIterations)),
       systemPrompt: incomingFileManager?.systemPrompt ?? DEFAULT_CONFIG.fileManagerConfig.systemPrompt,
     },
+    emailSenderConfig: {
+      ...DEFAULT_CONFIG.emailSenderConfig,
+      ...(incomingEmailSender ?? {}),
+      host: String(incomingEmailSender?.host ?? DEFAULT_CONFIG.emailSenderConfig.host),
+      port: Math.min(65535, Math.max(1, Number(incomingEmailSender?.port ?? DEFAULT_CONFIG.emailSenderConfig.port) || DEFAULT_CONFIG.emailSenderConfig.port)),
+      secure: incomingEmailSender?.secure ?? DEFAULT_CONFIG.emailSenderConfig.secure,
+      startTls: incomingEmailSender?.startTls ?? DEFAULT_CONFIG.emailSenderConfig.startTls,
+      username: String(incomingEmailSender?.username ?? DEFAULT_CONFIG.emailSenderConfig.username),
+      password: String(incomingEmailSender?.password ?? DEFAULT_CONFIG.emailSenderConfig.password),
+      fromEmail: String(incomingEmailSender?.fromEmail ?? DEFAULT_CONFIG.emailSenderConfig.fromEmail),
+      fromName: String(incomingEmailSender?.fromName ?? DEFAULT_CONFIG.emailSenderConfig.fromName),
+      replyTo: String(incomingEmailSender?.replyTo ?? DEFAULT_CONFIG.emailSenderConfig.replyTo),
+      allowedRecipients: Array.isArray(incomingEmailSender?.allowedRecipients)
+        ? incomingEmailSender!.allowedRecipients.filter(Boolean).map(String)
+        : DEFAULT_CONFIG.emailSenderConfig.allowedRecipients,
+      systemPrompt: String(incomingEmailSender?.systemPrompt ?? DEFAULT_CONFIG.emailSenderConfig.systemPrompt),
+    },
     mcpTools: Array.isArray(config?.mcpTools)
       ? config!.mcpTools.map((tool) => ({
           id: tool.id || `mcp_${Date.now()}`,
@@ -1216,7 +1325,7 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
 
 export function normalizeAppPreferences(preferences?: Partial<AppPreferences> | null): AppPreferences {
   const nextAgentRole =
-    preferences?.agentRole === 'clickhouse_query' || preferences?.agentRole === 'data_analyst' || preferences?.agentRole === 'auto_ml' || preferences?.agentRole === 'file_management' || preferences?.agentRole === 'pdf_creator' || preferences?.agentRole === 'oracle_analyst' || preferences?.agentRole === 'data_cleaner' || preferences?.agentRole === 'anonymizer' || preferences?.agentRole === 'custom_agent'
+    preferences?.agentRole === 'clickhouse_query' || preferences?.agentRole === 'data_analyst' || preferences?.agentRole === 'auto_ml' || preferences?.agentRole === 'file_management' || preferences?.agentRole === 'pdf_creator' || preferences?.agentRole === 'oracle_analyst' || preferences?.agentRole === 'data_cleaner' || preferences?.agentRole === 'anonymizer' || preferences?.agentRole === 'email_sender' || preferences?.agentRole === 'custom_agent'
       ? preferences.agentRole
       : 'manager';
   return {
