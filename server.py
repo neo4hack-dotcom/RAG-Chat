@@ -266,8 +266,8 @@ DEFAULT_APP_CONFIG = {
     "chunkOverlap": 50,
     "knnNeighbors": 50,
     "mcpTools": [
-        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "presetQuestions": []},
-        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "presetQuestions": []},
+        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "authToken": "", "presetQuestions": []},
+        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "authToken": "", "presetQuestions": []},
     ],
     "documentationUrl": "",
     "agenticDataVizUrl": "",
@@ -1061,10 +1061,13 @@ def _build_mcp_http_client_factory(
     return factory
 
 
-def _mcp_default_headers() -> dict[str, str]:
-    return {
+def _mcp_default_headers(auth_token: str = "") -> dict[str, str]:
+    headers = {
         "Accept": "application/json, text/event-stream",
     }
+    if str(auth_token or "").strip():
+        headers["Authorization"] = f"Bearer {str(auth_token).strip()}"
+    return headers
 
 
 def _build_mcp_async_client(
@@ -1072,11 +1075,12 @@ def _build_mcp_async_client(
     *,
     disable_ssl_verification: bool = False,
     headers: Optional[dict[str, Any]] = None,
+    auth_token: str = "",
 ) -> httpx.AsyncClient:
     normalized_target = _normalize_local_service_url(target)
     hostname = urlparse(normalized_target).hostname
     kwargs: dict[str, Any] = {
-        "headers": headers or _mcp_default_headers(),
+        "headers": headers or _mcp_default_headers(auth_token),
         "follow_redirects": True,
         "timeout": httpx.Timeout(30.0, read=300.0),
     }
@@ -1155,6 +1159,7 @@ async def _mcp_client_session(
     target: str,
     *,
     disable_ssl_verification: bool = False,
+    auth_token: str = "",
 ):
     # Prefer the official Python MCP SDK end-to-end:
     # - `/sse` endpoints use the SSE transport
@@ -1172,7 +1177,7 @@ async def _mcp_client_session(
         )
         async with sse_client(
             normalized_target,
-            headers=_mcp_default_headers(),
+            headers=_mcp_default_headers(auth_token),
             httpx_client_factory=transport_factory,
         ) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
@@ -1183,7 +1188,8 @@ async def _mcp_client_session(
     async with _build_mcp_async_client(
         normalized_target,
         disable_ssl_verification=disable_ssl_verification,
-        headers=_mcp_default_headers(),
+        headers=_mcp_default_headers(auth_token),
+        auth_token=auth_token,
     ) as http_client:
         async with streamable_http_client(
             url=normalized_target,
@@ -11724,6 +11730,7 @@ async def _run_mcp_tool_planning_target(
         message=request_text,
         history=[],
         mcp_url=tool["url"],
+        auth_token=str(tool.get("authToken") or "").strip(),
         llm_base_url=llm_config["llm_base_url"],
         llm_model=llm_config["llm_model"],
         llm_provider=llm_config["llm_provider"],
@@ -12247,6 +12254,7 @@ async def planning_scheduler_loop(stop_event: asyncio.Event) -> None:
 
 class MCPTestRequest(BaseModel):
     url: str
+    auth_token: Optional[str] = None
     disable_ssl_verification: bool = False
 
 
@@ -12254,6 +12262,7 @@ class MCPChatRequest(BaseModel):
     message: str
     history: list[dict] = []
     mcp_url: str
+    auth_token: Optional[str] = None
     preferred_tool: str = ""
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3"
@@ -12275,6 +12284,7 @@ class MCPToolConfigModel(BaseModel):
     label: str
     url: str
     description: str = ""
+    authToken: str = ""
     presetQuestions: list[MCPPresetQuestionModel] = Field(default_factory=list)
 
 
@@ -19086,6 +19096,7 @@ async def test_mcp_connection(req: MCPTestRequest):
         async with _mcp_client_session(
             req.url,
             disable_ssl_verification=req.disable_ssl_verification,
+            auth_token=str(req.auth_token or "").strip(),
         ) as session:
             tool_definitions = await session.list_tools()
             resource_definitions = await session.list_resources()
@@ -19145,6 +19156,7 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
             "label": str(tool.get("label") or tool.get("id") or "MCP").strip(),
             "url": str(tool.get("url") or "").strip(),
             "description": str(tool.get("description") or "").strip(),
+            "authToken": str(tool.get("authToken") or tool.get("auth_token") or "").strip(),
             "presetQuestions": [
                 question
                 for question in (
@@ -19160,6 +19172,7 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
         "label": str(getattr(tool, "label", "") or getattr(tool, "id", "") or "MCP").strip(),
         "url": str(getattr(tool, "url", "") or "").strip(),
         "description": str(getattr(tool, "description", "") or "").strip(),
+        "authToken": str(getattr(tool, "authToken", "") or getattr(tool, "auth_token", "") or "").strip(),
         "presetQuestions": [
             question
             for question in (
@@ -19288,6 +19301,7 @@ async def _discover_mcp_catalog(
         async with _mcp_client_session(
             tool["url"],
             disable_ssl_verification=disable_ssl_verification,
+            auth_token=str(tool.get("authToken") or "").strip(),
         ) as session:
             tool_result = await session.list_tools()
             resource_result = await session.list_resources()
@@ -19297,6 +19311,7 @@ async def _discover_mcp_catalog(
                     "label": tool["label"] or tool["id"],
                     "url": tool["url"],
                     "description": tool.get("description") or "",
+                    "authToken": tool.get("authToken") or "",
                     "tools": [
                         {
                             "name": item.name,
@@ -19320,6 +19335,7 @@ async def _run_single_mcp_chat_loop(
     message: str,
     history: list[dict],
     mcp_url: str,
+    auth_token: str,
     preferred_tool: str,
     llm_base_url: str,
     llm_model: str,
@@ -19332,6 +19348,7 @@ async def _run_single_mcp_chat_loop(
     async with _mcp_client_session(
         mcp_url,
         disable_ssl_verification=disable_ssl_verification,
+        auth_token=str(auth_token or "").strip(),
     ) as session:
         tool_result = await session.list_tools()
         tool_definitions = list(tool_result.tools or [])
@@ -20167,6 +20184,7 @@ Execution log:
             async with _mcp_client_session(
                 str(target.get("url") or ""),
                 disable_ssl_verification=disable_ssl_verification,
+                auth_token=str(target.get("authToken") or "").strip(),
             ) as session:
                 result = await session.call_tool(tool_name, tool_args or {})
                 tool_output = _format_mcp_tool_result(result)
@@ -20269,6 +20287,7 @@ async def chat_mcp(req: MCPChatRequest):
             message=req.message,
             history=req.history,
             mcp_url=req.mcp_url,
+            auth_token=str(req.auth_token or "").strip(),
             preferred_tool=req.preferred_tool,
             llm_base_url=req.llm_base_url,
             llm_model=req.llm_model,
