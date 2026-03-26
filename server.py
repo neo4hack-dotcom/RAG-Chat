@@ -266,8 +266,8 @@ DEFAULT_APP_CONFIG = {
     "chunkOverlap": 50,
     "knnNeighbors": 50,
     "mcpTools": [
-        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "authToken": "", "presetQuestions": []},
-        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "authToken": "", "presetQuestions": []},
+        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "authToken": "", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
+        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "authToken": "", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
     ],
     "documentationUrl": "",
     "agenticDataVizUrl": "",
@@ -11923,6 +11923,8 @@ async def _run_mcp_tool_planning_target(
         history=[],
         mcp_url=tool["url"],
         auth_token=str(tool.get("authToken") or "").strip(),
+        tool_selection_mode=str(tool.get("toolSelectionMode") or "all"),
+        active_tool_names=list(tool.get("activeToolNames") or []),
         llm_base_url=llm_config["llm_base_url"],
         llm_model=llm_config["llm_model"],
         llm_provider=llm_config["llm_provider"],
@@ -12464,6 +12466,8 @@ class MCPChatRequest(BaseModel):
     history: list[dict] = []
     mcp_url: str
     auth_token: Optional[str] = None
+    tool_selection_mode: str = "all"
+    active_tool_names: list[str] = Field(default_factory=list)
     preferred_tool: str = ""
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3"
@@ -12486,6 +12490,8 @@ class MCPToolConfigModel(BaseModel):
     url: str
     description: str = ""
     authToken: str = ""
+    toolSelectionMode: str = "all"
+    activeToolNames: list[str] = Field(default_factory=list)
     presetQuestions: list[MCPPresetQuestionModel] = Field(default_factory=list)
 
 
@@ -19369,6 +19375,12 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
             "url": str(tool.get("url") or "").strip(),
             "description": str(tool.get("description") or "").strip(),
             "authToken": str(tool.get("authToken") or tool.get("auth_token") or "").strip(),
+            "toolSelectionMode": "custom" if str(tool.get("toolSelectionMode") or tool.get("tool_selection_mode") or "").strip().lower() == "custom" else "all",
+            "activeToolNames": [
+                str(item).strip()
+                for item in (tool.get("activeToolNames") or tool.get("active_tool_names") or [])
+                if str(item).strip()
+            ],
             "presetQuestions": [
                 question
                 for question in (
@@ -19385,6 +19397,12 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
         "url": str(getattr(tool, "url", "") or "").strip(),
         "description": str(getattr(tool, "description", "") or "").strip(),
         "authToken": str(getattr(tool, "authToken", "") or getattr(tool, "auth_token", "") or "").strip(),
+        "toolSelectionMode": "custom" if str(getattr(tool, "toolSelectionMode", "") or getattr(tool, "tool_selection_mode", "") or "").strip().lower() == "custom" else "all",
+        "activeToolNames": [
+            str(item).strip()
+            for item in (getattr(tool, "activeToolNames", None) or getattr(tool, "active_tool_names", None) or [])
+            if str(item).strip()
+        ],
         "presetQuestions": [
             question
             for question in (
@@ -19394,6 +19412,28 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
             if question["label"] or question["prompt"] or question["preferredTool"]
         ],
     }
+
+
+def _filter_mcp_tool_definitions(
+    tool_definitions: list[Any],
+    active_tool_names: Optional[list[str]],
+    *,
+    selection_mode: str = "all",
+) -> list[Any]:
+    if str(selection_mode or "").strip().lower() != "custom":
+        return list(tool_definitions)
+    allowed = {
+        str(item).strip()
+        for item in (active_tool_names or [])
+        if str(item).strip()
+    }
+    if not allowed:
+        return []
+    return [
+        tool
+        for tool in tool_definitions
+        if str(getattr(tool, "name", "") or "").strip() in allowed
+    ]
 
 
 def _truncate_trace_text(value: Any, limit: int = 2200) -> str:
@@ -19517,6 +19557,13 @@ async def _discover_mcp_catalog(
         ) as session:
             tool_result = await session.list_tools()
             resource_result = await session.list_resources()
+            filtered_tools = _filter_mcp_tool_definitions(
+                list(tool_result.tools or []),
+                tool.get("activeToolNames") or [],
+                selection_mode=str(tool.get("toolSelectionMode") or "all"),
+            )
+            if not filtered_tools:
+                continue
             catalog.append(
                 {
                     "id": tool["id"],
@@ -19524,6 +19571,8 @@ async def _discover_mcp_catalog(
                     "url": tool["url"],
                     "description": tool.get("description") or "",
                     "authToken": tool.get("authToken") or "",
+                    "toolSelectionMode": tool.get("toolSelectionMode") or "all",
+                    "activeToolNames": list(tool.get("activeToolNames") or []),
                     "tools": [
                         {
                             "name": item.name,
@@ -19534,7 +19583,7 @@ async def _discover_mcp_catalog(
                                 else {}
                             ),
                         }
-                        for item in (tool_result.tools or [])
+                        for item in filtered_tools
                     ],
                     "resource_count": len(resource_result.resources or []),
                 }
@@ -19548,6 +19597,8 @@ async def _run_single_mcp_chat_loop(
     history: list[dict],
     mcp_url: str,
     auth_token: str,
+    tool_selection_mode: str,
+    active_tool_names: Optional[list[str]],
     preferred_tool: str,
     llm_base_url: str,
     llm_model: str,
@@ -19563,7 +19614,13 @@ async def _run_single_mcp_chat_loop(
         auth_token=str(auth_token or "").strip(),
     ) as session:
         tool_result = await session.list_tools()
-        tool_definitions = list(tool_result.tools or [])
+        tool_definitions = _filter_mcp_tool_definitions(
+            list(tool_result.tools or []),
+            active_tool_names,
+            selection_mode=tool_selection_mode,
+        )
+        if not tool_definitions:
+            raise ValueError("No active MCP tool is available for this connector. Update the MCP tool selection in Settings.")
         preferred_tool_name = str(preferred_tool or "").strip()
         openai_tools = [_mcp_tool_to_openai(tool) for tool in tool_definitions]
         memory_history = _normalized_history_messages(
@@ -20500,6 +20557,8 @@ async def chat_mcp(req: MCPChatRequest):
             history=req.history,
             mcp_url=req.mcp_url,
             auth_token=str(req.auth_token or "").strip(),
+            tool_selection_mode=req.tool_selection_mode,
+            active_tool_names=req.active_tool_names,
             preferred_tool=req.preferred_tool,
             llm_base_url=req.llm_base_url,
             llm_model=req.llm_model,

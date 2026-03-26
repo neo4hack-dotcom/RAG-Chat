@@ -66,6 +66,8 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       url: tool.url || '',
       description: tool.description || '',
       authToken: tool.authToken || '',
+      toolSelectionMode: tool.toolSelectionMode === 'custom' ? 'custom' : 'all',
+      activeToolNames: Array.isArray(tool.activeToolNames) ? tool.activeToolNames.map(String) : [],
       presetQuestions: Array.isArray(tool.presetQuestions)
         ? tool.presetQuestions.map((preset, presetIndex) => ({
             id: preset.id || `${tool.id || 'mcp'}_preset_${presetIndex + 1}`,
@@ -2119,7 +2121,7 @@ export function SettingsModal({
                 </h3>
                 <button
                   onClick={() => {
-                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '', authToken: '', presetQuestions: [] };
+                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '', authToken: '', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] };
                     setLocalConfig(prev => ({ ...prev, mcpTools: [...(prev.mcpTools ?? []), newTool] }));
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200 rounded-xl hover:bg-teal-100 transition-colors"
@@ -2196,6 +2198,105 @@ export function SettingsModal({
                               className="w-full min-h-[84px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all resize-none"
                               placeholder="Explain in English what this MCP can do, what systems it can reach, and when the orchestrator should prefer it."
                             />
+                          </div>
+                          <div className="col-span-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/80 dark:bg-slate-900/30 p-3 space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-xs font-semibold text-gray-800 dark:text-gray-100">Active MCP tools</p>
+                                <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                                  Limit what this connector can expose to the chat. Use all tools by default, or switch to a curated subset.
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => {
+                                    const updated = [...(localConfig.mcpTools ?? [])];
+                                    updated[idx] = { ...tool, toolSelectionMode: 'custom' };
+                                    setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                  }}
+                                  type="button"
+                                  className="px-2.5 py-1.5 text-[11px] font-medium bg-white text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors"
+                                >
+                                  Use custom selection
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    const updated = [...(localConfig.mcpTools ?? [])];
+                                    updated[idx] = { ...tool, toolSelectionMode: 'all', activeToolNames: [] };
+                                    setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                  }}
+                                  type="button"
+                                  className="px-2.5 py-1.5 text-[11px] font-medium bg-white text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors"
+                                >
+                                  Use all tools
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
+                                tool.toolSelectionMode === 'custom'
+                                  ? 'bg-teal-50 text-teal-700 border-teal-200'
+                                  : 'bg-gray-100 text-gray-700 border-gray-200'
+                              }`}>
+                                {tool.toolSelectionMode === 'custom' ? 'Custom subset enabled' : 'All live tools enabled'}
+                              </span>
+                              {tool.toolSelectionMode === 'custom' && (
+                                <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                                  Only checked tools will be visible to the MCP chat planner.
+                                </span>
+                              )}
+                            </div>
+
+                            {(mcpTestStates[tool.id]?.tools ?? []).length === 0 ? (
+                              <div className="rounded-lg border border-dashed border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-slate-900/30 px-3 py-3 text-[11px] text-gray-500 dark:text-gray-400">
+                                Run <span className="font-medium text-gray-700 dark:text-gray-200">Test</span> first to load the live MCP tool list, then choose which ones stay active in chat.
+                              </div>
+                            ) : (
+                              <div className="space-y-2">
+                                <div className="flex flex-wrap gap-2">
+                                  {(mcpTestStates[tool.id]?.tools ?? []).map((liveTool) => {
+                                    const isChecked =
+                                      tool.toolSelectionMode !== 'custom' ||
+                                      (tool.activeToolNames ?? []).includes(liveTool.name);
+                                    return (
+                                      <label
+                                        key={`${tool.id}-active-${liveTool.name}`}
+                                        className="flex items-start gap-2 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/80 cursor-pointer hover:border-teal-300 transition-colors min-w-[16rem]"
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={isChecked}
+                                          disabled={tool.toolSelectionMode !== 'custom'}
+                                          onChange={(e) => {
+                                            const currentSet = new Set(tool.activeToolNames ?? []);
+                                            if (e.target.checked) currentSet.add(liveTool.name);
+                                            else currentSet.delete(liveTool.name);
+                                            const updated = [...(localConfig.mcpTools ?? [])];
+                                            updated[idx] = { ...tool, activeToolNames: Array.from(currentSet) };
+                                            setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                                          }}
+                                          className="mt-0.5 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                                        />
+                                        <span className="min-w-0">
+                                          <span className="block text-[11px] font-semibold text-gray-800 dark:text-gray-100">{liveTool.name}</span>
+                                          {liveTool.description ? (
+                                            <span className="block text-[10px] leading-relaxed text-gray-500 dark:text-gray-400">{liveTool.description}</span>
+                                          ) : (
+                                            <span className="block text-[10px] text-gray-400 dark:text-gray-500">No description from the MCP server.</span>
+                                          )}
+                                        </span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                                <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                                  Active in chat: {tool.toolSelectionMode === 'custom'
+                                    ? `${(tool.activeToolNames ?? []).length} selected`
+                                    : 'all available tools'}.
+                                </p>
+                              </div>
+                            )}
                           </div>
                           <div className="col-span-2 rounded-xl border border-teal-100 dark:border-teal-900/50 bg-teal-50/60 dark:bg-teal-950/20 p-3 space-y-3">
                             <div className="flex items-center justify-between gap-3">

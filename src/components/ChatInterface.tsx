@@ -2593,6 +2593,8 @@ export function ChatInterface({
                   history: memoryHistory,
                   mcp_url: activeTool!.url,
                   auth_token: activeTool!.authToken || undefined,
+                  tool_selection_mode: activeTool!.toolSelectionMode || 'all',
+                  active_tool_names: activeTool!.activeToolNames || [],
                   preferred_tool: preferredMcpTool || undefined,
                   llm_base_url: config.baseUrl,
                   llm_model: config.model,
