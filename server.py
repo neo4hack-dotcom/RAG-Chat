@@ -20361,7 +20361,7 @@ Execution log so far:
 You are an MCP orchestrator.
 Return JSON only with:
 {{
-  "action": "run_tool|export_file|send_email|finish",
+  "action": "run_tool|export_file|send_email|ask|finish",
   "mcp_id": "connector id when action=run_tool",
   "tool": "tool name when action=run_tool",
   "arguments": {{}},
@@ -20369,6 +20369,8 @@ Return JSON only with:
   "export_path": "optional path when action=export_file",
   "source_step": 1,
   "email_subject": "optional subject when action=send_email",
+  "question": "required when action=ask",
+  "clarification_options": ["Option A", "Option B"],
   "reasoning": "why this step is useful",
   "final_answer": "required only when action=finish"
 }}
@@ -20378,6 +20380,8 @@ Rules:
 - If enough evidence is available, choose finish.
 - Otherwise choose one tool call that advances the plan.
 - Keep tool arguments minimal and valid.
+- Use `ask` when the request is ambiguous, risky, or requires a user preference before continuing.
+- If the recent conversation already contains a clarification question and the latest user message resolves it, continue the workflow and do not ask the same clarification again.
 - Use `export_file` only if the user explicitly asked for a file export and a previous successful MCP step returned structured rows.
 - `source_step` should reference the MCP step whose structured rows you want to export. If omitted, use the latest exportable step.
 - Use `send_email` only if the user explicitly asked for email delivery and a previous successful step produced the content or file to send.
@@ -20484,6 +20488,53 @@ Execution log:
                         memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
                         catalog=catalog,
                     ),
+                thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Step"),
+                tool_trace_markdown=_format_mcp_tool_trace_markdown(execution_log),
+            )
+            return {
+                "answer": answer,
+                "tool_calls": execution_log,
+                "steps": steps,
+                "tabular_result": _latest_mcp_execution_tabular_result(execution_log),
+                "plan": {
+                    "goal": str(plan.get("goal") or ""),
+                    "initial_plan": initial_plan,
+                    "step_budget": step_budget,
+                    "mid_review_step": mid_review_step,
+                },
+            }
+
+        if action == "ask":
+            question = str(decision.get("question") or "").strip() or "I need one quick choice before I continue."
+            clarification_options = [
+                str(item).strip()
+                for item in (decision.get("clarification_options") or decision.get("clarificationOptions") or [])
+                if str(item).strip()
+            ]
+            steps.append(
+                {
+                    "id": f"mcp-orch-ask-{step_index}",
+                    "title": "Requested user clarification",
+                    "status": "running",
+                    "details": (
+                        f"{str(decision.get('reasoning') or 'A user choice is required before execution can continue.').strip()}\n\n"
+                        f"{question}"
+                    ).strip(),
+                }
+            )
+            clarification_answer = (
+                build_choice_markdown("Clarification", question, clarification_options)
+                if clarification_options
+                else f"## Clarification\n{question}"
+            )
+            answer = _append_mcp_trace_appendix(
+                clarification_answer,
+                prompt_context=_format_mcp_prompt_context_markdown(
+                    user_message=message,
+                    system_prompt=effective_system_prompt,
+                    memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
+                    catalog=catalog,
+                ),
                 thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Step"),
                 tool_trace_markdown=_format_mcp_tool_trace_markdown(execution_log),
             )

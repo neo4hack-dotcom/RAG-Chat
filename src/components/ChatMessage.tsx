@@ -488,8 +488,52 @@ function parseHtmlDetailsBlock(rawBlock: string): { summary: string; content: st
   return { summary, content: body };
 }
 
+function extractTrailingTechnicalAppendix(content: string): {
+  visibleContent: string;
+  trailingDetail: { summary: string; content: string } | null;
+} {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const htmlDetailsIndex = normalized.search(/\n<details(?:\s|>)/i);
+  if (htmlDetailsIndex >= 0) {
+    const rawBlock = normalized.slice(htmlDetailsIndex + 1).trim();
+    const parsed = parseHtmlDetailsBlock(rawBlock);
+    if (parsed) {
+      return {
+        visibleContent: normalized.slice(0, htmlDetailsIndex).trim(),
+        trailingDetail: parsed,
+      };
+    }
+  }
+
+  const lines = normalized.split("\n");
+  let inCodeFence = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*```/.test(line)) {
+      inCodeFence = !inCodeFence;
+      continue;
+    }
+    if (inCodeFence) continue;
+    const headingMatch = line.match(/^(#{2,4})\s+(.+?)\s*$/);
+    const collapsibleSummary = headingMatch ? getCollapsibleSummary(headingMatch[2]) : null;
+    if (!collapsibleSummary) continue;
+    const detailContent = lines.slice(index + 1).join("\n").trim();
+    if (!detailContent) continue;
+    return {
+      visibleContent: lines.slice(0, index).join("\n").trim(),
+      trailingDetail: {
+        summary: collapsibleSummary,
+        content: detailContent,
+      },
+    };
+  }
+
+  return { visibleContent: normalized, trailingDetail: null };
+}
+
 function splitAssistantContent(content: string): AssistantContentBlock[] {
-  const lines = content.split("\n");
+  const { visibleContent, trailingDetail } = extractTrailingTechnicalAppendix(content);
+  const lines = visibleContent.split("\n");
   const blocks: AssistantContentBlock[] = [];
   const markdownBuffer: string[] = [];
   let inCodeFence = false;
@@ -585,6 +629,14 @@ function splitAssistantContent(content: string): AssistantContentBlock[] {
   }
 
   flushMarkdown();
+  if (trailingDetail) {
+    blocks.push({
+      type: "details",
+      id: nextId(),
+      summary: trailingDetail.summary,
+      content: trailingDetail.content,
+    });
+  }
   return blocks;
 }
 
