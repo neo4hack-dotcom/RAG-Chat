@@ -269,6 +269,15 @@ DEFAULT_APP_CONFIG = {
         {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "authToken": "", "apiKey": "", "apiKeyHeader": "x-api-key", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
         {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "authToken": "", "apiKey": "", "apiKeyHeader": "x-api-key", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
     ],
+    "mcpOrchestratorConfig": {
+        "systemPrompt": (
+            "You are the MCP Orchestrator. Write in English. Build a short, efficient plan "
+            "across the configured MCP connectors, favor the most specific tool for the requested "
+            "outcome, and keep the visible answer direct and business-friendly. Use file export "
+            "or email delivery only when the user explicitly asks for them."
+        ),
+        "useRagContext": False,
+    },
     "documentationUrl": "",
     "agenticDataVizUrl": "",
     "portalApps": [],
@@ -854,6 +863,22 @@ def _normalize_db_state(payload: Optional[dict]) -> dict:
             state["config"]["fileManagerConfig"] = {
                 **DEFAULT_APP_CONFIG["fileManagerConfig"],
                 **incoming_file_manager,
+            }
+        incoming_mcp_orchestrator = incoming_config.get("mcpOrchestratorConfig")
+        if isinstance(incoming_mcp_orchestrator, dict):
+            state["config"]["mcpOrchestratorConfig"] = {
+                **DEFAULT_APP_CONFIG["mcpOrchestratorConfig"],
+                **incoming_mcp_orchestrator,
+                "systemPrompt": str(
+                    incoming_mcp_orchestrator.get("systemPrompt")
+                    or incoming_mcp_orchestrator.get("system_prompt")
+                    or DEFAULT_APP_CONFIG["mcpOrchestratorConfig"]["systemPrompt"]
+                ).strip() or DEFAULT_APP_CONFIG["mcpOrchestratorConfig"]["systemPrompt"],
+                "useRagContext": bool(
+                    incoming_mcp_orchestrator.get("useRagContext")
+                    if "useRagContext" in incoming_mcp_orchestrator
+                    else incoming_mcp_orchestrator.get("use_rag_context", DEFAULT_APP_CONFIG["mcpOrchestratorConfig"]["useRagContext"])
+                ),
             }
         incoming_email_sender = incoming_config.get("emailSenderConfig")
         if isinstance(incoming_email_sender, dict):
@@ -6066,6 +6091,22 @@ def _normalize_email_sender_config(payload: Optional[dict]) -> dict[str, Any]:
             if str(item).strip()
         ],
         "systemPrompt": str(payload.get("systemPrompt") or payload.get("system_prompt") or defaults["systemPrompt"]).strip() or defaults["systemPrompt"],
+    }
+
+
+def _normalize_mcp_orchestrator_config(payload: Optional[dict]) -> dict[str, Any]:
+    defaults = DEFAULT_APP_CONFIG["mcpOrchestratorConfig"]
+    if not isinstance(payload, dict):
+        return dict(defaults)
+    return {
+        "systemPrompt": str(
+            payload.get("systemPrompt") or payload.get("system_prompt") or defaults["systemPrompt"]
+        ).strip() or defaults["systemPrompt"],
+        "useRagContext": bool(
+            payload.get("useRagContext")
+            if "useRagContext" in payload
+            else payload.get("use_rag_context", defaults["useRagContext"])
+        ),
     }
 
 
@@ -20129,10 +20170,12 @@ async def _run_mcp_orchestrator_chat(
     _emit_log("info", "mcp_orchestrator", "Received orchestration request", {"query": message, "connector_count": len(mcp_tools)})
     persisted_state = await read_db_state()
     app_config = (persisted_state or {}).get("config") or DEFAULT_APP_CONFIG
+    mcp_orchestrator_config = _normalize_mcp_orchestrator_config(app_config.get("mcpOrchestratorConfig"))
     file_manager_config = _normalize_file_manager_config(app_config.get("fileManagerConfig"))
     file_manager_state = _default_file_manager_state()
     email_sender_config = _normalize_email_sender_config(app_config.get("emailSenderConfig"))
     email_sender_state = _default_email_sender_state()
+    effective_system_prompt = str(system_prompt or "").strip() or str(mcp_orchestrator_config["systemPrompt"])
     catalog = await _discover_mcp_catalog(
         mcp_tools,
         disable_ssl_verification=disable_ssl_verification,
@@ -20143,6 +20186,21 @@ async def _run_mcp_orchestrator_chat(
     _emit_log("decision", "mcp_orchestrator", "Built MCP connector catalog", {"connector_count": len(catalog), "tool_count": sum(len(item.get('tools') or []) for item in catalog)})
 
     conversation_memory = _conversation_memory_markdown(history, current_message=message)
+    rag_context = {
+        "enabled": bool(mcp_orchestrator_config.get("useRagContext")),
+        "used": False,
+        "summary": "",
+        "context": "",
+        "results": [],
+    }
+    if rag_context["enabled"]:
+        rag_context = await _data_analyst_search_knowledge(message)
+        _emit_log(
+            "decision",
+            "mcp_orchestrator",
+            "Loaded optional RAG context before MCP planning",
+            {"used": bool(rag_context.get("results")), "summary": str(rag_context.get("summary") or "")},
+        )
     step_cap = 10
     export_requested = _extract_manager_export_format(message) is not None or any(
         token in normalize_intent_text(message) for token in MANAGER_EXPORT_KEYWORDS
@@ -20171,7 +20229,10 @@ Rules:
 - Email delivery is {"enabled" if email_requested else "disabled"} for this request.
 
 System prompt:
-{system_prompt or "None"}
+{effective_system_prompt or "None"}
+
+RAG functional context:
+{str(rag_context.get("context") or rag_context.get("summary") or "No additional RAG context loaded.")}
 
 Recent conversation:
 {conversation_memory}
@@ -20231,6 +20292,16 @@ Discovered MCP catalog:
             ).strip(),
         },
     ]
+    if rag_context["enabled"]:
+        steps.insert(
+            1,
+            {
+                "id": "mcp-orch-rag-context",
+                "title": "Loaded RAG context",
+                "status": "success" if rag_context.get("results") else "running",
+                "details": str(rag_context.get("summary") or "No additional functional context was found in the configured RAG."),
+            },
+        )
     execution_log: list[dict[str, Any]] = []
     reviewed = False
 
@@ -20318,6 +20389,9 @@ User request:
 Current plan:
 {json.dumps(initial_plan, ensure_ascii=False, indent=2)}
 
+RAG functional context:
+{str(rag_context.get("context") or rag_context.get("summary") or "No additional RAG context loaded.")}
+
 Execution log so far:
 {json.dumps(execution_log, ensure_ascii=False, indent=2, default=str)}
 
@@ -20403,13 +20477,13 @@ Execution log:
             )
             _emit_log("success", "mcp_orchestrator", "Finished orchestration", {"step_count": len(execution_log)})
             answer = _append_mcp_trace_appendix(
-                polished_final_answer,
-                prompt_context=_format_mcp_prompt_context_markdown(
-                    user_message=message,
-                    system_prompt=system_prompt,
-                    memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
-                    catalog=catalog,
-                ),
+                    polished_final_answer,
+                    prompt_context=_format_mcp_prompt_context_markdown(
+                        user_message=message,
+                        system_prompt=effective_system_prompt,
+                        memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
+                        catalog=catalog,
+                    ),
                 thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Step"),
                 tool_trace_markdown=_format_mcp_tool_trace_markdown(execution_log),
             )
@@ -20554,7 +20628,7 @@ Execution log:
                     polished_file_answer,
                     prompt_context=_format_mcp_prompt_context_markdown(
                         user_message=message,
-                        system_prompt=system_prompt,
+                        system_prompt=effective_system_prompt,
                         memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
                         catalog=catalog,
                     ),
@@ -20691,7 +20765,7 @@ Execution log:
                     polished_email_answer,
                     prompt_context=_format_mcp_prompt_context_markdown(
                         user_message=message,
-                        system_prompt=system_prompt,
+                        system_prompt=effective_system_prompt,
                         memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
                         catalog=catalog,
                     ),
@@ -20824,7 +20898,7 @@ Execution log:
         polished_budget_answer,
         prompt_context=_format_mcp_prompt_context_markdown(
             user_message=message,
-            system_prompt=system_prompt,
+            system_prompt=effective_system_prompt,
             memory_history=_normalized_history_messages(history, current_message=message, max_steps=CHAT_MEMORY_MAX_STEPS),
             catalog=catalog,
         ),

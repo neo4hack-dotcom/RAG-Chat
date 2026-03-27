@@ -527,6 +527,11 @@ export type McpTool = {
   presetQuestions: McpPresetQuestion[];
 };
 
+export type McpOrchestratorConfig = {
+  systemPrompt: string;
+  useRagContext: boolean;
+};
+
 export const MCP_ORCHESTRATOR_ID = '__mcp_orchestrator__';
 
 export type PortalApp = {
@@ -573,6 +578,7 @@ export type AppConfig = {
   chunkOverlap: number;
   knnNeighbors: number;
   mcpTools: McpTool[];
+  mcpOrchestratorConfig: McpOrchestratorConfig;
   documentationUrl: string;
   agenticDataVizUrl: string;
   portalApps: PortalApp[];
@@ -690,6 +696,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     { id: 'mcp_1', label: 'MCP Tool 1', url: '', description: '', authToken: '', apiKey: '', apiKeyHeader: 'x-api-key', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] },
     { id: 'mcp_2', label: 'MCP Tool 2', url: '', description: '', authToken: '', apiKey: '', apiKeyHeader: 'x-api-key', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] },
   ],
+  mcpOrchestratorConfig: {
+    systemPrompt:
+      'You are the MCP Orchestrator. Write in English. Build a short, efficient plan across the configured MCP connectors, favor the most specific tool for the requested outcome, and keep the visible answer direct and business-friendly. Use file export or email delivery only when the user explicitly asks for them.',
+    useRagContext: false,
+  },
   documentationUrl: '',
   agenticDataVizUrl: '',
   portalApps: [],
@@ -1537,6 +1548,15 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
             : [],
         }))
       : DEFAULT_CONFIG.mcpTools.map((tool) => ({ ...tool })),
+    mcpOrchestratorConfig: {
+      systemPrompt: String(
+        (config as any)?.mcpOrchestratorConfig?.systemPrompt ??
+        DEFAULT_CONFIG.mcpOrchestratorConfig.systemPrompt
+      ),
+      useRagContext:
+        (config as any)?.mcpOrchestratorConfig?.useRagContext ??
+        DEFAULT_CONFIG.mcpOrchestratorConfig.useRagContext,
+    },
   };
 }
 

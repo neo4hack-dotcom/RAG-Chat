@@ -1108,7 +1108,9 @@ export function ChatInterface({
   const [isAgentMenuExpanded, setIsAgentMenuExpanded] = useState(workflow === 'AGENT');
   const [isMcpMenuExpanded, setIsMcpMenuExpanded] = useState(workflow === 'MCP');
   const [isOtherAgentsOpen, setIsOtherAgentsOpen] = useState(agentRole === 'clickhouse_query' || agentRole === 'data_analyst' || agentRole === 'auto_ml' || agentRole === 'data_cleaner' || agentRole === 'anonymizer' || agentRole === 'email_sender' || agentRole === 'custom_agent' || agentRole === 'file_management' || agentRole === 'pdf_creator' || agentRole === 'oracle_analyst');
-  const [mcpOrchestratorPromptDraft, setMcpOrchestratorPromptDraft] = useState(config.systemPrompt || "");
+  const [mcpOrchestratorPromptDraft, setMcpOrchestratorPromptDraft] = useState(
+    config.mcpOrchestratorConfig?.systemPrompt || config.systemPrompt || ""
+  );
   const [isMcpOrchestratorPromptDirty, setIsMcpOrchestratorPromptDirty] = useState(false);
   const [isFileManagerConfigOpen, setIsFileManagerConfigOpen] = useState(false);
   const [isAutoMlGuideOpen, setIsAutoMlGuideOpen] = useState(false);
@@ -1426,9 +1428,9 @@ export function ChatInterface({
 
   useEffect(() => {
     if (!isMcpOrchestratorPromptDirty) {
-      setMcpOrchestratorPromptDraft(config.systemPrompt || "");
+      setMcpOrchestratorPromptDraft(config.mcpOrchestratorConfig?.systemPrompt || config.systemPrompt || "");
     }
-  }, [config.systemPrompt, isMcpOrchestratorPromptDirty]);
+  }, [config.mcpOrchestratorConfig?.systemPrompt, config.systemPrompt, isMcpOrchestratorPromptDirty]);
 
   useEffect(() => {
     if (editingPlanningPlanId) return;
@@ -2912,7 +2914,7 @@ export function ChatInterface({
         const activeTool = (config.mcpTools ?? []).find((t: McpTool) => t.id === effectiveMcpToolId);
         const preferredMcpTool = String(options.preferredMcpTool || '').trim();
         const effectiveMcpOrchestratorPrompt = withBeautifulResponsePrompt(
-          (mcpOrchestratorPromptDraft || config.systemPrompt || "").trim()
+          (mcpOrchestratorPromptDraft || config.mcpOrchestratorConfig?.systemPrompt || config.systemPrompt || "").trim()
         );
         if (isOrchestratorMode && (config.mcpTools ?? []).length === 0) {
           throw new Error("No MCP connector is configured. Add at least one MCP tool in Settings before using the MCP orchestrator.");
@@ -5438,7 +5440,7 @@ export function ChatInterface({
                         <button
                           type="button"
                           onClick={() => {
-                            setMcpOrchestratorPromptDraft(config.systemPrompt || "");
+                            setMcpOrchestratorPromptDraft(config.mcpOrchestratorConfig?.systemPrompt || config.systemPrompt || "");
                             setIsMcpOrchestratorPromptDirty(false);
                           }}
                           className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-3 py-1.5 text-[11px] font-medium text-teal-700 transition-colors hover:bg-teal-100 dark:bg-teal-950/30 dark:text-teal-200 dark:hover:bg-teal-950/45"
@@ -5459,7 +5461,7 @@ export function ChatInterface({
                       />
                       <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-gray-500 dark:text-gray-400">
                         <span>
-                          Current source: {isMcpOrchestratorPromptDirty ? 'custom draft' : 'global system prompt'}
+                          Current source: {isMcpOrchestratorPromptDirty ? 'custom draft' : 'settings default'}
                         </span>
                         <span>
                           {mcpOrchestratorPromptDraft.trim().length} chars

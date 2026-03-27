@@ -79,6 +79,12 @@ function buildLocalConfig(config: AppConfig): AppConfig {
           }))
         : [],
     })),
+    mcpOrchestratorConfig: {
+      systemPrompt:
+        config.mcpOrchestratorConfig?.systemPrompt ||
+        'You are the MCP Orchestrator. Write in English. Build a short, efficient plan across the configured MCP connectors, favor the most specific tool for the requested outcome, and keep the visible answer direct and business-friendly. Use file export or email delivery only when the user explicitly asks for them.',
+      useRagContext: config.mcpOrchestratorConfig?.useRagContext ?? false,
+    },
     documentationUrl: config.documentationUrl ?? '',
     agenticDataVizUrl: config.agenticDataVizUrl ?? '',
     portalApps: Array.isArray(config.portalApps)
@@ -2119,6 +2125,66 @@ export function SettingsModal({
             </div>
           ) : activeTab === 'mcp' ? (
             <div className="space-y-5">
+              <div className="rounded-2xl border border-teal-200/80 bg-teal-50/65 px-4 py-4 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-2xl bg-white text-teal-600 shadow-sm">
+                    <Network className="h-4.5 w-4.5" />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-teal-950">MCP Orchestrator</h3>
+                      <p className="mt-1 text-xs leading-relaxed text-teal-900/80">
+                        Define the default system prompt used by the orchestrator and decide whether it should preload extra business context from the app RAG before planning across MCP connectors.
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-teal-200/80 bg-white/85 p-3">
+                      <label className="mb-1 block text-xs font-medium text-gray-600">Default orchestrator prompt</label>
+                      <textarea
+                        value={localConfig.mcpOrchestratorConfig.systemPrompt}
+                        onChange={(e) =>
+                          setLocalConfig({
+                            ...localConfig,
+                            mcpOrchestratorConfig: {
+                              ...localConfig.mcpOrchestratorConfig,
+                              systemPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[130px] w-full rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm text-gray-900 outline-none transition-all focus:ring-2 focus:ring-teal-500/40"
+                        placeholder="Write the global MCP Orchestrator prompt here..."
+                      />
+                      <p className="mt-2 text-[11px] text-gray-500">
+                        This becomes the default prompt in chat. Users can still fine-tune it live before sending a request.
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-teal-200/80 bg-white/85 px-3 py-3">
+                      <label className="flex items-start gap-3 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={localConfig.mcpOrchestratorConfig.useRagContext}
+                          onChange={(e) =>
+                            setLocalConfig({
+                              ...localConfig,
+                              mcpOrchestratorConfig: {
+                                ...localConfig.mcpOrchestratorConfig,
+                                useRagContext: e.target.checked,
+                              },
+                            })
+                          }
+                          className="mt-0.5 h-4 w-4 rounded text-teal-600 focus:ring-teal-500"
+                        />
+                        <span>
+                          <span className="block text-sm font-medium text-teal-950">Use app RAG context before planning</span>
+                          <span className="mt-1 block text-xs text-teal-900/80">
+                            When enabled, the orchestrator queries the configured OpenSearch knowledge base first, then injects the relevant functional context into its plan and step decisions before it starts calling MCP tools.
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
                   <Network className="w-4 h-4 text-teal-500" /> MCP Tools
