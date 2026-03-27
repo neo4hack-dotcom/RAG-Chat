@@ -35,6 +35,7 @@ export type ChatAction = {
     | 'confirm_file_action'
     | 'cancel_file_action'
     | 'export_data_quality_pdf'
+    | 'generate_mcp_chart'
     | 'run_mcp_preset';
   variant?: 'primary' | 'secondary';
   payload?: Record<string, unknown>;
@@ -444,9 +445,22 @@ export type ClickHouseAgentState = {
   selectedChartType: ChartType | null;
 };
 
+export type McpAgentState = {
+  stage: 'idle' | 'awaiting_chart_x' | 'awaiting_chart_y' | 'awaiting_chart_type' | 'ready';
+  lastResultMeta: ClickHouseResultColumn[];
+  lastResultRows: Record<string, unknown>[];
+  chartXOptions: string[];
+  chartYOptions: string[];
+  chartTypeOptions: string[];
+  selectedChartX: string | null;
+  selectedChartY: string | null;
+  selectedChartType: ChartType | null;
+};
+
 export type ConversationAgentState = {
   manager?: ManagerAgentState;
   clickhouse?: ClickHouseAgentState;
+  mcp?: McpAgentState;
   dataAnalyst?: DataAnalystAgentState;
   planning?: PlanningAgentState;
   fileManager?: FileManagerAgentState;
@@ -506,6 +520,8 @@ export type McpTool = {
   url: string;
   description: string;
   authToken: string;
+  apiKey: string;
+  apiKeyHeader: string;
   toolSelectionMode: 'all' | 'custom';
   activeToolNames: string[];
   presetQuestions: McpPresetQuestion[];
@@ -671,8 +687,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   chunkOverlap: 50,
   knnNeighbors: 50,
   mcpTools: [
-    { id: 'mcp_1', label: 'MCP Tool 1', url: '', description: '', authToken: '', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] },
-    { id: 'mcp_2', label: 'MCP Tool 2', url: '', description: '', authToken: '', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] },
+    { id: 'mcp_1', label: 'MCP Tool 1', url: '', description: '', authToken: '', apiKey: '', apiKeyHeader: 'x-api-key', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] },
+    { id: 'mcp_2', label: 'MCP Tool 2', url: '', description: '', authToken: '', apiKey: '', apiKeyHeader: 'x-api-key', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] },
   ],
   documentationUrl: '',
   agenticDataVizUrl: '',
@@ -906,6 +922,46 @@ export function normalizePlanningAgentState(
     missingFields: Array.isArray(missingFields) ? missingFields.filter(Boolean) : [],
     lastQuestion: lastQuestion || '',
     readyToReview: Boolean(readyToReview),
+  };
+}
+
+export function normalizeMcpAgentState(
+  state?: Partial<McpAgentState> | null
+): McpAgentState {
+  const lastResultMeta = (state as any)?.lastResultMeta ?? (state as any)?.last_result_meta;
+  const lastResultRows = (state as any)?.lastResultRows ?? (state as any)?.last_result_rows;
+  return {
+    stage:
+      (state as any)?.stage === 'awaiting_chart_x' ||
+      (state as any)?.stage === 'awaiting_chart_y' ||
+      (state as any)?.stage === 'awaiting_chart_type' ||
+      (state as any)?.stage === 'ready'
+        ? (state as any).stage
+        : 'idle',
+    lastResultMeta: Array.isArray(lastResultMeta)
+      ? lastResultMeta
+          .filter(Boolean)
+          .map((column: any) => ({
+            name: String(column?.name ?? ''),
+            type: String(column?.type ?? ''),
+          }))
+          .filter((column: { name: string }) => Boolean(column.name))
+      : [],
+    lastResultRows: Array.isArray(lastResultRows)
+      ? lastResultRows.filter((row: unknown) => Boolean(row)) as Record<string, unknown>[]
+      : [],
+    chartXOptions: Array.isArray((state as any)?.chartXOptions ?? (state as any)?.chart_x_options)
+      ? ((state as any)?.chartXOptions ?? (state as any)?.chart_x_options).filter(Boolean).map(String)
+      : [],
+    chartYOptions: Array.isArray((state as any)?.chartYOptions ?? (state as any)?.chart_y_options)
+      ? ((state as any)?.chartYOptions ?? (state as any)?.chart_y_options).filter(Boolean).map(String)
+      : [],
+    chartTypeOptions: Array.isArray((state as any)?.chartTypeOptions ?? (state as any)?.chart_type_options)
+      ? ((state as any)?.chartTypeOptions ?? (state as any)?.chart_type_options).filter(Boolean).map(String)
+      : [],
+    selectedChartX: ((state as any)?.selectedChartX ?? (state as any)?.selected_chart_x ?? null) || null,
+    selectedChartY: ((state as any)?.selectedChartY ?? (state as any)?.selected_chart_y ?? null) || null,
+    selectedChartType: (((state as any)?.selectedChartType ?? (state as any)?.selected_chart_type ?? null) || null) as ChartType | null,
   };
 }
 
@@ -1465,6 +1521,8 @@ export function normalizeAppConfig(config?: Partial<AppConfig> | null): AppConfi
           url: tool.url || '',
           description: tool.description || '',
           authToken: tool.authToken || '',
+          apiKey: tool.apiKey || '',
+          apiKeyHeader: tool.apiKeyHeader || 'x-api-key',
           toolSelectionMode: tool.toolSelectionMode === 'custom' ? 'custom' : 'all',
           activeToolNames: Array.isArray(tool.activeToolNames)
             ? tool.activeToolNames.filter(Boolean).map(String)

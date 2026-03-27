@@ -66,6 +66,8 @@ function buildLocalConfig(config: AppConfig): AppConfig {
       url: tool.url || '',
       description: tool.description || '',
       authToken: tool.authToken || '',
+      apiKey: tool.apiKey || '',
+      apiKeyHeader: tool.apiKeyHeader || 'x-api-key',
       toolSelectionMode: tool.toolSelectionMode === 'custom' ? 'custom' : 'all',
       activeToolNames: Array.isArray(tool.activeToolNames) ? tool.activeToolNames.map(String) : [],
       presetQuestions: Array.isArray(tool.presetQuestions)
@@ -313,6 +315,8 @@ export function SettingsModal({
         body: JSON.stringify({
           url: tool.url,
           auth_token: tool.authToken || undefined,
+          api_key: tool.apiKey || undefined,
+          api_key_header: tool.apiKeyHeader || undefined,
           disable_ssl_verification: localConfig.disableSslVerification ?? false,
         }),
       });
@@ -2121,7 +2125,7 @@ export function SettingsModal({
                 </h3>
                 <button
                   onClick={() => {
-                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '', authToken: '', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] };
+                    const newTool: McpTool = { id: `mcp_${Date.now()}`, label: 'New Tool', url: '', description: '', authToken: '', apiKey: '', apiKeyHeader: 'x-api-key', toolSelectionMode: 'all', activeToolNames: [], presetQuestions: [] };
                     setLocalConfig(prev => ({ ...prev, mcpTools: [...(prev.mcpTools ?? []), newTool] }));
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-teal-50 text-teal-700 border border-teal-200 rounded-xl hover:bg-teal-100 transition-colors"
@@ -2185,6 +2189,37 @@ export function SettingsModal({
                               className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
                               placeholder="Optional Bearer token sent as Authorization"
                             />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">API key (optional)</label>
+                            <input
+                              type="password"
+                              value={tool.apiKey || ''}
+                              onChange={(e) => {
+                                const updated = [...(localConfig.mcpTools ?? [])];
+                                updated[idx] = { ...tool, apiKey: e.target.value };
+                                setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                              }}
+                              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                              placeholder="Optional API key value"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">API key header (optional)</label>
+                            <input
+                              type="text"
+                              value={tool.apiKeyHeader || 'x-api-key'}
+                              onChange={(e) => {
+                                const updated = [...(localConfig.mcpTools ?? [])];
+                                updated[idx] = { ...tool, apiKeyHeader: e.target.value };
+                                setLocalConfig(prev => ({ ...prev, mcpTools: updated }));
+                              }}
+                              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500/50 transition-all"
+                              placeholder="x-api-key, JIRA_Token, X-API-Key..."
+                            />
+                            <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
+                              Leave empty to default to <code>x-api-key</code>. Use a custom header such as <code>JIRA_Token</code> when the MCP server requires it.
+                            </p>
                           </div>
                           <div className="col-span-2">
                             <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Description</label>

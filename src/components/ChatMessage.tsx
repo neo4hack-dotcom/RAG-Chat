@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bot, User, ChevronDown, ChevronRight, Loader2, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3, Gauge, MessageSquare } from "lucide-react";
+import { Bot, User, ChevronDown, ChevronRight, Loader2, File, Database, Copy, Check, Star, Cpu, FolderOpen, BarChart3, Gauge, MessageSquare, Network } from "lucide-react";
 import { Message, cn, ChartSpec, ChatAction, preprocessMarkdown } from "../lib/utils";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -116,6 +116,17 @@ const AGENT_INTRO_CARD_CONFIG: Record<string, {
     titleClass: "text-slate-950 dark:text-white",
     bodyClass: "text-slate-700 dark:text-slate-200",
     subtleClass: "text-sky-700 dark:text-sky-300",
+  },
+  mcp_orchestrator: {
+    marker: "<!-- agent-intro:mcp-orchestrator -->",
+    title: "MCP Orchestrator",
+    icon: Network,
+    containerClass: "border border-teal-200 bg-white/98 shadow-[0_18px_48px_rgba(20,184,166,0.08)] dark:border-teal-800/70 dark:bg-slate-950/92",
+    iconWrapClass: "bg-teal-50 ring-1 ring-teal-200 dark:bg-teal-900/25 dark:ring-teal-800/80",
+    iconClass: "text-teal-600 dark:text-teal-300",
+    titleClass: "text-slate-950 dark:text-white",
+    bodyClass: "text-slate-700 dark:text-slate-200",
+    subtleClass: "text-teal-700 dark:text-teal-300",
   },
   file_management: {
     marker: "<!-- agent-intro:file_management -->",
