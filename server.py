@@ -266,8 +266,8 @@ DEFAULT_APP_CONFIG = {
     "chunkOverlap": 50,
     "knnNeighbors": 50,
     "mcpTools": [
-        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "authToken": "", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
-        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "authToken": "", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
+        {"id": "mcp_1", "label": "MCP Tool 1", "url": "", "description": "", "authToken": "", "apiKey": "", "apiKeyHeader": "x-api-key", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
+        {"id": "mcp_2", "label": "MCP Tool 2", "url": "", "description": "", "authToken": "", "apiKey": "", "apiKeyHeader": "x-api-key", "toolSelectionMode": "all", "activeToolNames": [], "presetQuestions": []},
     ],
     "documentationUrl": "",
     "agenticDataVizUrl": "",
@@ -1149,12 +1149,20 @@ def _build_mcp_http_client_factory(
     return factory
 
 
-def _mcp_default_headers(auth_token: str = "") -> dict[str, str]:
+def _mcp_default_headers(
+    auth_token: str = "",
+    api_key: str = "",
+    api_key_header: str = "",
+) -> dict[str, str]:
     headers = {
         "Accept": "application/json, text/event-stream",
     }
     if str(auth_token or "").strip():
         headers["Authorization"] = f"Bearer {str(auth_token).strip()}"
+    normalized_api_key = str(api_key or "").strip()
+    if normalized_api_key:
+        normalized_header = str(api_key_header or "").strip() or "x-api-key"
+        headers[normalized_header] = normalized_api_key
     return headers
 
 
@@ -1164,11 +1172,13 @@ def _build_mcp_async_client(
     disable_ssl_verification: bool = False,
     headers: Optional[dict[str, Any]] = None,
     auth_token: str = "",
+    api_key: str = "",
+    api_key_header: str = "",
 ) -> httpx.AsyncClient:
     normalized_target = _normalize_local_service_url(target)
     hostname = urlparse(normalized_target).hostname
     kwargs: dict[str, Any] = {
-        "headers": headers or _mcp_default_headers(auth_token),
+        "headers": headers or _mcp_default_headers(auth_token, api_key, api_key_header),
         "follow_redirects": True,
         "timeout": httpx.Timeout(30.0, read=300.0),
     }
@@ -1248,6 +1258,8 @@ async def _mcp_client_session(
     *,
     disable_ssl_verification: bool = False,
     auth_token: str = "",
+    api_key: str = "",
+    api_key_header: str = "",
 ):
     # Prefer the official Python MCP SDK end-to-end:
     # - `/sse` endpoints use the SSE transport
@@ -1265,7 +1277,7 @@ async def _mcp_client_session(
         )
         async with sse_client(
             normalized_target,
-            headers=_mcp_default_headers(auth_token),
+            headers=_mcp_default_headers(auth_token, api_key, api_key_header),
             httpx_client_factory=transport_factory,
         ) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
@@ -1276,8 +1288,10 @@ async def _mcp_client_session(
     async with _build_mcp_async_client(
         normalized_target,
         disable_ssl_verification=disable_ssl_verification,
-        headers=_mcp_default_headers(auth_token),
+        headers=_mcp_default_headers(auth_token, api_key, api_key_header),
         auth_token=auth_token,
+        api_key=api_key,
+        api_key_header=api_key_header,
     ) as http_client:
         async with streamable_http_client(
             url=normalized_target,
@@ -1440,6 +1454,101 @@ def _extract_mcp_tabular_payload(result: Any) -> Optional[dict[str, Any]]:
             if payload:
                 return payload
     return None
+
+
+def _infer_mcp_value_type(value: Any) -> str:
+    if value is None:
+        return "Unknown"
+    if isinstance(value, bool):
+        return "UInt8"
+    if isinstance(value, int):
+        return "Int64"
+    if isinstance(value, float):
+        return "Float64"
+    text = str(value).strip()
+    if not text:
+        return "String"
+    if re.fullmatch(r"[-+]?\d+", text):
+        return "Int64"
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text):
+        return "Float64"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?", text):
+        return "DateTime"
+    return "String"
+
+
+def _mcp_tabular_payload_meta(payload: Optional[dict[str, Any]]) -> list[dict[str, str]]:
+    if not isinstance(payload, dict):
+        return []
+    headers = [str(item).strip() for item in (payload.get("headers") or []) if str(item).strip()]
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    meta: list[dict[str, str]] = []
+    for index, header in enumerate(headers):
+        inferred_type = "String"
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or index >= len(row):
+                continue
+            candidate = row[index]
+            if candidate is None:
+                continue
+            inferred_type = _infer_mcp_value_type(candidate)
+            if inferred_type != "Unknown":
+                break
+        meta.append({"name": header, "type": inferred_type})
+    return meta
+
+
+def _mcp_tabular_payload_rows(payload: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    headers = [str(item).strip() for item in (payload.get("headers") or []) if str(item).strip()]
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows[:10_000]:
+        if not isinstance(row, (list, tuple)):
+            continue
+        normalized_rows.append({
+            header: row[index] if index < len(row) else None
+            for index, header in enumerate(headers)
+        })
+    return normalized_rows
+
+
+def _latest_mcp_execution_tabular_result(execution_log: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    latest_payload = next(
+        (
+            entry.get("export_payload")
+            for entry in reversed(execution_log)
+            if isinstance(entry.get("export_payload"), dict)
+        ),
+        None,
+    )
+    if not isinstance(latest_payload, dict):
+        return None
+    return {
+        "meta": _mcp_tabular_payload_meta(latest_payload),
+        "rows": _mcp_tabular_payload_rows(latest_payload),
+    }
+
+
+def _latest_exportable_mcp_step(execution_log: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    return next(
+        (
+            entry
+            for entry in reversed(execution_log)
+            if entry.get("status") == "success" and isinstance(entry.get("export_payload"), dict)
+        ),
+        None,
+    )
+
+
+def _mcp_export_already_completed(execution_log: list[dict[str, Any]]) -> bool:
+    return any(
+        entry.get("mcp_id") == "file_management"
+        and str(entry.get("tool") or "").startswith("export_")
+        and entry.get("status") == "success"
+        for entry in execution_log
+    )
 
 
 def _normalize_mcp_export_format(value: str) -> str:
@@ -11923,6 +12032,8 @@ async def _run_mcp_tool_planning_target(
         history=[],
         mcp_url=tool["url"],
         auth_token=str(tool.get("authToken") or "").strip(),
+        api_key=str(tool.get("apiKey") or "").strip(),
+        api_key_header=str(tool.get("apiKeyHeader") or "").strip(),
         tool_selection_mode=str(tool.get("toolSelectionMode") or "all"),
         active_tool_names=list(tool.get("activeToolNames") or []),
         llm_base_url=llm_config["llm_base_url"],
@@ -12458,6 +12569,8 @@ async def planning_scheduler_loop(stop_event: asyncio.Event) -> None:
 class MCPTestRequest(BaseModel):
     url: str
     auth_token: Optional[str] = None
+    api_key: Optional[str] = None
+    api_key_header: Optional[str] = None
     disable_ssl_verification: bool = False
 
 
@@ -12466,6 +12579,8 @@ class MCPChatRequest(BaseModel):
     history: list[dict] = []
     mcp_url: str
     auth_token: Optional[str] = None
+    api_key: Optional[str] = None
+    api_key_header: Optional[str] = None
     tool_selection_mode: str = "all"
     active_tool_names: list[str] = Field(default_factory=list)
     preferred_tool: str = ""
@@ -12490,6 +12605,8 @@ class MCPToolConfigModel(BaseModel):
     url: str
     description: str = ""
     authToken: str = ""
+    apiKey: str = ""
+    apiKeyHeader: str = "x-api-key"
     toolSelectionMode: str = "all"
     activeToolNames: list[str] = Field(default_factory=list)
     presetQuestions: list[MCPPresetQuestionModel] = Field(default_factory=list)
@@ -19315,6 +19432,8 @@ async def test_mcp_connection(req: MCPTestRequest):
             req.url,
             disable_ssl_verification=req.disable_ssl_verification,
             auth_token=str(req.auth_token or "").strip(),
+            api_key=str(req.api_key or "").strip(),
+            api_key_header=str(req.api_key_header or "").strip(),
         ) as session:
             tool_definitions = await session.list_tools()
             resource_definitions = await session.list_resources()
@@ -19375,6 +19494,8 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
             "url": str(tool.get("url") or "").strip(),
             "description": str(tool.get("description") or "").strip(),
             "authToken": str(tool.get("authToken") or tool.get("auth_token") or "").strip(),
+            "apiKey": str(tool.get("apiKey") or tool.get("api_key") or "").strip(),
+            "apiKeyHeader": str(tool.get("apiKeyHeader") or tool.get("api_key_header") or "x-api-key").strip() or "x-api-key",
             "toolSelectionMode": "custom" if str(tool.get("toolSelectionMode") or tool.get("tool_selection_mode") or "").strip().lower() == "custom" else "all",
             "activeToolNames": [
                 str(item).strip()
@@ -19397,6 +19518,8 @@ def _normalize_mcp_tool_config_entry(tool: Any) -> dict[str, Any]:
         "url": str(getattr(tool, "url", "") or "").strip(),
         "description": str(getattr(tool, "description", "") or "").strip(),
         "authToken": str(getattr(tool, "authToken", "") or getattr(tool, "auth_token", "") or "").strip(),
+        "apiKey": str(getattr(tool, "apiKey", "") or getattr(tool, "api_key", "") or "").strip(),
+        "apiKeyHeader": str(getattr(tool, "apiKeyHeader", "") or getattr(tool, "api_key_header", "") or "x-api-key").strip() or "x-api-key",
         "toolSelectionMode": "custom" if str(getattr(tool, "toolSelectionMode", "") or getattr(tool, "tool_selection_mode", "") or "").strip().lower() == "custom" else "all",
         "activeToolNames": [
             str(item).strip()
@@ -19540,6 +19663,67 @@ def _append_mcp_trace_appendix(
     return f"{str(answer or '').strip()}\n\n{appendix}".strip()
 
 
+async def _polish_mcp_visible_answer(
+    *,
+    user_message: str,
+    answer_draft: str,
+    llm_base_url: str,
+    llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
+    disable_ssl_verification: bool,
+    execution_log: Optional[list[dict[str, Any]]] = None,
+) -> str:
+    draft = str(answer_draft or "").strip()
+    if not draft:
+        return ""
+
+    execution_preview = ""
+    if execution_log:
+        lines: list[str] = []
+        for index, item in enumerate(execution_log[:8], start=1):
+            connector = str(item.get("mcp_label") or item.get("mcp_id") or "MCP").strip()
+            tool_name = str(item.get("tool") or "tool").strip()
+            result_preview = _truncate_trace_text(item.get("result") or "", 320)
+            lines.append(f"{index}. {connector} / {tool_name}: {result_preview}")
+        execution_preview = "\n".join(lines).strip()
+
+    prompt = f"""
+Rewrite the draft answer into a clear final response for the user.
+Write in English.
+
+Requirements:
+- Keep only the part that directly answers the user's request.
+- Use plain, direct language with minimal jargon.
+- Prefer a short paragraph first, then a few bullet points only if they genuinely help.
+- Do not mention MCP, tool names, prompts, arguments, traces, JSON, schemas, or intermediate reasoning unless the user explicitly asked for them.
+- Do not include any technical appendix here.
+- If the result is uncertain or partial, state that briefly and concretely.
+- If the user explicitly asked for tabular output, keep or improve the Markdown table.
+
+User request:
+{user_message}
+
+Draft answer:
+{draft}
+
+Execution evidence:
+{execution_preview or "No extra execution evidence provided."}
+""".strip()
+    try:
+        polished = await llm_chat(
+            [{"role": "user", "content": prompt}],
+            llm_base_url,
+            llm_model,
+            llm_provider,
+            llm_api_key,
+            disable_ssl_verification=disable_ssl_verification,
+        )
+        return str(polished or "").strip() or draft
+    except Exception:
+        return draft
+
+
 async def _discover_mcp_catalog(
     mcp_tools: list[Any],
     *,
@@ -19554,6 +19738,8 @@ async def _discover_mcp_catalog(
             tool["url"],
             disable_ssl_verification=disable_ssl_verification,
             auth_token=str(tool.get("authToken") or "").strip(),
+            api_key=str(tool.get("apiKey") or "").strip(),
+            api_key_header=str(tool.get("apiKeyHeader") or "").strip(),
         ) as session:
             tool_result = await session.list_tools()
             resource_result = await session.list_resources()
@@ -19571,6 +19757,8 @@ async def _discover_mcp_catalog(
                     "url": tool["url"],
                     "description": tool.get("description") or "",
                     "authToken": tool.get("authToken") or "",
+                    "apiKey": tool.get("apiKey") or "",
+                    "apiKeyHeader": tool.get("apiKeyHeader") or "x-api-key",
                     "toolSelectionMode": tool.get("toolSelectionMode") or "all",
                     "activeToolNames": list(tool.get("activeToolNames") or []),
                     "tools": [
@@ -19597,6 +19785,8 @@ async def _run_single_mcp_chat_loop(
     history: list[dict],
     mcp_url: str,
     auth_token: str,
+    api_key: str,
+    api_key_header: str,
     tool_selection_mode: str,
     active_tool_names: Optional[list[str]],
     preferred_tool: str,
@@ -19612,6 +19802,8 @@ async def _run_single_mcp_chat_loop(
         mcp_url,
         disable_ssl_verification=disable_ssl_verification,
         auth_token=str(auth_token or "").strip(),
+        api_key=str(api_key or "").strip(),
+        api_key_header=str(api_key_header or "").strip(),
     ) as session:
         tool_result = await session.list_tools()
         tool_definitions = _filter_mcp_tool_definitions(
@@ -19661,6 +19853,7 @@ async def _run_single_mcp_chat_loop(
 
         tool_calls_log: list[dict] = []
         thinking_trace: list[dict[str, Any]] = []
+        last_tabular_payload: Optional[dict[str, Any]] = None
         step_log: list[dict[str, Any]] = [
             {
                 "id": "mcp-tool-discovery",
@@ -19738,8 +19931,18 @@ async def _run_single_mcp_chat_loop(
 
             if not raw_tool_calls:
                 _emit_log("success", "mcp", "Completed MCP conversation without further tool calls", {"target": mcp_url})
+                polished_answer = await _polish_mcp_visible_answer(
+                    user_message=message,
+                    answer_draft=str(content or "").strip(),
+                    llm_base_url=llm_base_url,
+                    llm_model=llm_model,
+                    llm_provider=llm_provider,
+                    llm_api_key=llm_api_key,
+                    disable_ssl_verification=disable_ssl_verification,
+                    execution_log=tool_calls_log,
+                )
                 answer = _append_mcp_trace_appendix(
-                    str(content or "").strip(),
+                    polished_answer,
                     prompt_context=_format_mcp_prompt_context_markdown(
                         user_message=message,
                         system_prompt=system_prompt,
@@ -19753,6 +19956,10 @@ async def _run_single_mcp_chat_loop(
                     "answer": answer,
                     "tool_calls": tool_calls_log,
                     "steps": step_log,
+                    "tabular_result": {
+                        "meta": _mcp_tabular_payload_meta(last_tabular_payload),
+                        "rows": _mcp_tabular_payload_rows(last_tabular_payload),
+                    } if last_tabular_payload else None,
                 }
 
             messages.append({
@@ -19776,6 +19983,9 @@ async def _run_single_mcp_chat_loop(
                 try:
                     result = await session.call_tool(tool_name, tool_args or {})
                     tool_output = _format_mcp_tool_result(result)
+                    tabular_payload = _extract_mcp_tabular_payload(result)
+                    if tabular_payload:
+                        last_tabular_payload = tabular_payload
                     _emit_log("tool_call", "mcp", f"Executed MCP tool `{tool_name}`", {"target": mcp_url, "tool": tool_name, "args": tool_args})
                     step_log.append(
                         {
@@ -19822,8 +20032,18 @@ async def _run_single_mcp_chat_loop(
             disable_ssl_verification=disable_ssl_verification,
         )
         _emit_log("success", "mcp", "Reached MCP safety-net summary", {"target": mcp_url, "tool_call_count": len(tool_calls_log)})
+        polished_final = await _polish_mcp_visible_answer(
+            user_message=message,
+            answer_draft=str(final or "").strip(),
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            disable_ssl_verification=disable_ssl_verification,
+            execution_log=tool_calls_log,
+        )
         answer = _append_mcp_trace_appendix(
-            str(final or "").strip(),
+            polished_final,
             prompt_context=_format_mcp_prompt_context_markdown(
                 user_message=message,
                 system_prompt=system_prompt,
@@ -19833,7 +20053,15 @@ async def _run_single_mcp_chat_loop(
             thinking_markdown=_format_mcp_thinking_markdown(thinking_trace, title_prefix="Turn"),
             tool_trace_markdown=_format_mcp_tool_trace_markdown(tool_calls_log),
         )
-        return {"answer": answer, "tool_calls": tool_calls_log, "steps": step_log}
+        return {
+            "answer": answer,
+            "tool_calls": tool_calls_log,
+            "steps": step_log,
+            "tabular_result": {
+                "meta": _mcp_tabular_payload_meta(last_tabular_payload),
+                "rows": _mcp_tabular_payload_rows(last_tabular_payload),
+            } if last_tabular_payload else None,
+        }
 
 
 def _mcp_orchestrator_catalog_json(catalog: list[dict[str, Any]]) -> str:
@@ -20082,6 +20310,7 @@ Rules:
 - Use `export_file` only if the user explicitly asked for a file export and a previous successful MCP step returned structured rows.
 - `source_step` should reference the MCP step whose structured rows you want to export. If omitted, use the latest exportable step.
 - Use `send_email` only if the user explicitly asked for email delivery and a previous successful step produced the content or file to send.
+- If the user explicitly asked for Excel, CSV, TSV, or a spreadsheet file, do not choose `finish` until an `export_file` step has succeeded, unless no structured rows were found at all.
 
 User request:
 {message}
@@ -20106,6 +20335,24 @@ Available MCP catalog:
         action = str(decision.get("action") or "").strip().lower()
         decision_tool_name = str(decision.get("tool") or "").strip()
         decision_mcp_id = str(decision.get("mcp_id") or "").strip()
+        latest_exportable_step = _latest_exportable_mcp_step(execution_log)
+        export_already_completed = _mcp_export_already_completed(execution_log)
+        if (
+            action == "finish"
+            and export_requested
+            and latest_exportable_step
+            and not export_already_completed
+        ):
+            action = "export_file"
+            decision["action"] = "export_file"
+            if not decision.get("source_step"):
+                decision["source_step"] = latest_exportable_step.get("step")
+            if not decision.get("export_format"):
+                decision["export_format"] = _extract_manager_export_format(message) or "csv"
+            if not decision.get("reasoning"):
+                decision["reasoning"] = (
+                    "The user explicitly asked for a file export, so the dataset must be handed to File Management before finishing."
+                )
         thinking_trace.append(
             {
                 "label": f"Decision step {step_index}",
@@ -20126,7 +20373,9 @@ Available MCP catalog:
             if not final_answer:
                 summary_prompt = f"""
 Write a concise final answer in English for the user.
-Focus on what was achieved and the most useful result.
+Keep the wording simple and direct.
+Do not mention MCP, tool names, prompts, traces, intermediate planning, or technical execution details unless the user explicitly asked for them.
+Answer the user's business question first. Use short bullets only if they add clarity.
 
 User request:
 {message}
@@ -20142,9 +20391,19 @@ Execution log:
                     llm_api_key,
                     disable_ssl_verification=disable_ssl_verification,
                 )
+            polished_final_answer = await _polish_mcp_visible_answer(
+                user_message=message,
+                answer_draft=final_answer,
+                llm_base_url=llm_base_url,
+                llm_model=llm_model,
+                llm_provider=llm_provider,
+                llm_api_key=llm_api_key,
+                disable_ssl_verification=disable_ssl_verification,
+                execution_log=execution_log,
+            )
             _emit_log("success", "mcp_orchestrator", "Finished orchestration", {"step_count": len(execution_log)})
             answer = _append_mcp_trace_appendix(
-                final_answer,
+                polished_final_answer,
                 prompt_context=_format_mcp_prompt_context_markdown(
                     user_message=message,
                     system_prompt=system_prompt,
@@ -20158,6 +20417,7 @@ Execution log:
                 "answer": answer,
                 "tool_calls": execution_log,
                 "steps": steps,
+                "tabular_result": _latest_mcp_execution_tabular_result(execution_log),
                 "plan": {
                     "goal": str(plan.get("goal") or ""),
                     "initial_plan": initial_plan,
@@ -20280,8 +20540,18 @@ Execution log:
                 {"step": step_index, "path": export_path, "source_step": export_source.get("step")},
             )
             if file_manager_state.get("pending_confirmation"):
+                polished_file_answer = await _polish_mcp_visible_answer(
+                    user_message=message,
+                    answer_draft=str(file_response.get("answer") or ""),
+                    llm_base_url=llm_base_url,
+                    llm_model=llm_model,
+                    llm_provider=llm_provider,
+                    llm_api_key=llm_api_key,
+                    disable_ssl_verification=disable_ssl_verification,
+                    execution_log=execution_log,
+                )
                 answer = _append_mcp_trace_appendix(
-                    str(file_response.get("answer") or ""),
+                    polished_file_answer,
                     prompt_context=_format_mcp_prompt_context_markdown(
                         user_message=message,
                         system_prompt=system_prompt,
@@ -20295,6 +20565,7 @@ Execution log:
                     "answer": answer,
                     "tool_calls": execution_log,
                     "steps": steps,
+                    "tabular_result": _latest_mcp_execution_tabular_result(execution_log),
                     "plan": {
                         "goal": str(plan.get("goal") or ""),
                         "initial_plan": initial_plan,
@@ -20406,8 +20677,18 @@ Execution log:
                 }
             )
             if _email_sender_state_needs_followup(email_sender_state):
+                polished_email_answer = await _polish_mcp_visible_answer(
+                    user_message=message,
+                    answer_draft=str(email_response.get("answer") or ""),
+                    llm_base_url=llm_base_url,
+                    llm_model=llm_model,
+                    llm_provider=llm_provider,
+                    llm_api_key=llm_api_key,
+                    disable_ssl_verification=disable_ssl_verification,
+                    execution_log=execution_log,
+                )
                 answer = _append_mcp_trace_appendix(
-                    str(email_response.get("answer") or ""),
+                    polished_email_answer,
                     prompt_context=_format_mcp_prompt_context_markdown(
                         user_message=message,
                         system_prompt=system_prompt,
@@ -20421,6 +20702,7 @@ Execution log:
                     "answer": answer,
                     "tool_calls": execution_log,
                     "steps": steps,
+                    "tabular_result": _latest_mcp_execution_tabular_result(execution_log),
                     "plan": {
                         "goal": str(plan.get("goal") or ""),
                         "initial_plan": initial_plan,
@@ -20454,6 +20736,8 @@ Execution log:
                 str(target.get("url") or ""),
                 disable_ssl_verification=disable_ssl_verification,
                 auth_token=str(target.get("authToken") or "").strip(),
+                api_key=str(target.get("apiKey") or "").strip(),
+                api_key_header=str(target.get("apiKeyHeader") or "").strip(),
             ) as session:
                 result = await session.call_tool(tool_name, tool_args or {})
                 tool_output = _format_mcp_tool_result(result)
@@ -20507,7 +20791,9 @@ Execution log:
     final_prompt = f"""
 Write a concise final answer in English for the user.
 The orchestrator used its full step budget.
-Summarize the best result available.
+Summarize the best result available in clear, plain language.
+Do not mention MCP, tool names, prompts, traces, or intermediate technical steps unless the user explicitly asked for them.
+Answer the user question first and keep the wording business-friendly.
 
 User request:
 {message}
@@ -20523,9 +20809,19 @@ Execution log:
         llm_api_key,
         disable_ssl_verification=disable_ssl_verification,
     )
+    polished_budget_answer = await _polish_mcp_visible_answer(
+        user_message=message,
+        answer_draft=str(final_answer or "").strip(),
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
+        disable_ssl_verification=disable_ssl_verification,
+        execution_log=execution_log,
+    )
     _emit_log("success", "mcp_orchestrator", "Finished orchestration at step budget", {"step_count": len(execution_log)})
     answer = _append_mcp_trace_appendix(
-        str(final_answer or "").strip(),
+        polished_budget_answer,
         prompt_context=_format_mcp_prompt_context_markdown(
             user_message=message,
             system_prompt=system_prompt,
@@ -20539,6 +20835,7 @@ Execution log:
         "answer": answer,
         "tool_calls": execution_log,
         "steps": steps,
+        "tabular_result": _latest_mcp_execution_tabular_result(execution_log),
         "plan": {
             "goal": str(plan.get("goal") or ""),
             "initial_plan": initial_plan,
@@ -20557,6 +20854,8 @@ async def chat_mcp(req: MCPChatRequest):
             history=req.history,
             mcp_url=req.mcp_url,
             auth_token=str(req.auth_token or "").strip(),
+            api_key=str(req.api_key or "").strip(),
+            api_key_header=str(req.api_key_header or "").strip(),
             tool_selection_mode=req.tool_selection_mode,
             active_tool_names=req.active_tool_names,
             preferred_tool=req.preferred_tool,

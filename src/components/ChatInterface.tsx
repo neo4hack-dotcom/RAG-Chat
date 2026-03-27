@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { Send, Settings, Hammer, Loader2, Bot, Plus, MessageSquare, Trash2, Database, Network, Cpu, PanelLeftClose, PanelLeftOpen, Star, Paperclip, X, File, Moon, Sun, Home, CalendarDays, ChevronDown, ChevronRight, FolderOpen, BarChart3, Minus, RotateCcw, ZoomIn, Copy, Check, Terminal, BrainCircuit, FilePenLine, Gauge, Activity, Workflow } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeEmailSenderAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig, isAutomationConversation } from "../lib/utils";
+import { Message, AppConfig, Conversation, Attachment, McpTool, WorkflowMode, AgentRole, BuiltInAgentRole, ChatAction, CrewPlan, CrewPlanDraft, PlanningBackendState, FileManagerAgentConfig, AgentStep, MCP_ORCHESTRATOR_ID, BUILT_IN_AGENT_ROLES, buildConversationMemory, createEmptyCrewPlanDraft, normalizeCrewPlanDraft, normalizePlanningAgentState, normalizePlanningBackendState, normalizeFileManagerAgentState, normalizePdfCreatorAgentState, normalizeOracleAnalystAgentState, normalizeDataAnalystAgentState, normalizeManagerAgentState, normalizeAutoMlAgentState, normalizeDataCleanerAgentState, normalizeAnonymizerAgentState, normalizeEmailSenderAgentState, normalizeCustomAgentRuntimeState, normalizeAppConfig, normalizeMcpAgentState, isAutomationConversation, ChartType, ClickHouseResultColumn } from "../lib/utils";
 import { ChatMessage } from "./ChatMessage";
 import { PlanningModal } from "./PlanningModal";
 import { PlanningMonitorModal } from "./PlanningMonitorModal";
@@ -385,6 +385,178 @@ function buildMcpStarterMessage(tool: McpTool): Message | null {
         preferredTool: String(preset.preferredTool || '').trim(),
       },
     })),
+  };
+}
+
+function buildMcpOrchestratorStarterMessage(): Message {
+  return {
+    id: `mcp-orchestrator-starter-${Date.now()}`,
+    role: "assistant",
+    content: [
+      "<!-- agent-intro:mcp-orchestrator -->",
+      "## MCP Orchestrator",
+      "",
+      "This mode can coordinate **multiple MCP connectors** across several steps.",
+      "",
+      "- It first inspects the available MCP tools before planning.",
+      "- It can chain work across different MCPs in sequence.",
+      "- It can optionally hand structured results to **File Management** or **Email Sender** when the request calls for it.",
+      "- Technical traces stay hidden under the response by default.",
+      "",
+      "Describe the outcome you want, and the orchestrator will build the execution path.",
+    ].join("\n"),
+    timestamp: Date.now(),
+  };
+}
+
+type McpTabularResult = {
+  meta: ClickHouseResultColumn[];
+  rows: Record<string, unknown>[];
+};
+
+const MCP_CHART_CREATE_OPTION = "Create a chart";
+
+function isNumericMetaType(type: string): boolean {
+  return /int|float|double|decimal|numeric|real/i.test(String(type || ""));
+}
+
+function isTemporalMetaType(type: string): boolean {
+  return /date|time/i.test(String(type || ""));
+}
+
+function inferMcpValueType(value: unknown): string {
+  if (typeof value === 'number') return Number.isInteger(value) ? 'Int64' : 'Float64';
+  if (typeof value === 'boolean') return 'UInt8';
+  const text = String(value ?? '').trim();
+  if (!text) return 'String';
+  if (/^[-+]?\d+$/.test(text)) return 'Int64';
+  if (/^[-+]?\d+(?:\.\d+)?$/.test(text)) return 'Float64';
+  if (/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$/.test(text)) return 'DateTime';
+  return 'String';
+}
+
+function normalizeMcpTabularResult(raw: any): McpTabularResult | null {
+  const rows = Array.isArray(raw?.rows) ? raw.rows.filter(Boolean) as Record<string, unknown>[] : [];
+  if (rows.length === 0) return null;
+  const meta = Array.isArray(raw?.meta)
+    ? raw.meta
+        .filter(Boolean)
+        .map((column: any) => ({
+          name: String(column?.name ?? '').trim(),
+          type: String(column?.type ?? '').trim(),
+        }))
+        .filter((column: ClickHouseResultColumn) => Boolean(column.name))
+    : [];
+  if (meta.length > 0) {
+    return { meta, rows };
+  }
+  const headers = Object.keys(rows[0] ?? {});
+  return {
+    meta: headers.map((name) => ({
+      name,
+      type: inferMcpValueType(rows.find((row) => row?.[name] != null)?.[name]),
+    })),
+    rows,
+  };
+}
+
+function isMcpChartFollowupRequest(text: string): boolean {
+  const normalized = String(text || '').toLowerCase();
+  return [
+    'chart',
+    'graph',
+    'plot',
+    'visual',
+    'visualize',
+    'visualise',
+    'graphe',
+    'graphique',
+    'visualiser',
+    'courbe',
+    'histogram',
+  ].some((token) => normalized.includes(token));
+}
+
+function buildChoiceMarkdownLocal(title: string, prompt: string, options: string[]): string {
+  return [
+    `## ${title}`,
+    prompt,
+    '',
+    ...options.map((option) => `- [ ] ${option}`),
+  ].join('\n');
+}
+
+function inferMcpChartOptions(meta: ClickHouseResultColumn[], rows: Record<string, unknown>[]) {
+  const numericColumns = meta.filter((col) => isNumericMetaType(col.type)).map((col) => col.name);
+  const temporalColumns = meta.filter((col) => isTemporalMetaType(col.type)).map((col) => col.name);
+  const textColumns = meta
+    .map((col) => col.name)
+    .filter((name) => !numericColumns.includes(name) && !temporalColumns.includes(name));
+
+  let xOptions = [...temporalColumns, ...textColumns];
+  if (!xOptions.length && numericColumns.length >= 2) {
+    xOptions = numericColumns.slice(0, -1);
+  }
+  const yOptions = [...numericColumns];
+  if (!xOptions.length || !yOptions.length) {
+    return { canChart: false, xOptions: [], yOptions: [], typeOptions: [], recommended: false };
+  }
+
+  const uniqueCounts = Object.fromEntries(
+    xOptions.map((name) => [name, new Set(rows.map((row) => String(row?.[name] ?? '')).filter(Boolean)).size])
+  ) as Record<string, number>;
+
+  const filteredXOptions = xOptions.filter((name) => (uniqueCounts[name] ?? 0) <= Math.min(40, rows.length));
+  const finalXOptions = filteredXOptions.length ? filteredXOptions : xOptions;
+  const usesTemporalX = finalXOptions.some((name) => temporalColumns.includes(name));
+  const usesNumericX = finalXOptions.every((name) => numericColumns.includes(name));
+
+  let typeOptions = ['Bar chart', 'Line chart', 'Area chart'];
+  if (usesNumericX && numericColumns.length >= 2) {
+    typeOptions = ['Scatter plot', 'Line chart', 'Bar chart'];
+  } else if (usesTemporalX) {
+    typeOptions = ['Line chart', 'Area chart', 'Bar chart'];
+  }
+
+  return {
+    canChart: true,
+    recommended: rows.length >= 3,
+    xOptions: finalXOptions,
+    yOptions,
+    typeOptions,
+  };
+}
+
+function localNormalizeChartValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildLocalChart(
+  rows: Record<string, unknown>[],
+  xField: string,
+  yField: string,
+  chartType: ChartType,
+) {
+  const points = rows
+    .map((row) => {
+      const x = row?.[xField];
+      const y = localNormalizeChartValue(row?.[yField]);
+      if (x == null || y == null) return null;
+      return { x: String(x), y };
+    })
+    .filter(Boolean) as { x: string; y: number }[];
+
+  if (points.length < 2) return null;
+  return {
+    type: chartType,
+    title: `${yField} by ${xField}`,
+    xField,
+    yField,
+    points: points.slice(0, 30),
   };
 }
 
@@ -834,6 +1006,7 @@ export function ChatInterface({
   const currentConversation = conversations.find(c => c.id === currentId);
   const managerAgentState = normalizeManagerAgentState((currentConversation?.agentState as any)?.manager);
   const clickhouseAgentState = currentConversation?.agentState?.clickhouse;
+  const mcpAgentState = normalizeMcpAgentState((currentConversation?.agentState as any)?.mcp);
   const dataAnalystAgentState = normalizeDataAnalystAgentState((currentConversation?.agentState as any)?.dataAnalyst);
   const autoMlAgentState = normalizeAutoMlAgentState((currentConversation?.agentState as any)?.autoMl);
   const dataCleanerAgentState = normalizeDataCleanerAgentState((currentConversation?.agentState as any)?.dataCleaner);
@@ -1119,6 +1292,17 @@ export function ChatInterface({
     onMcpToolIdChange(nextToolId);
 
     if (nextToolId === MCP_ORCHESTRATOR_ID) {
+      const starterMessage = buildMcpOrchestratorStarterMessage();
+      const nextConversationId = `mcp-orchestrator-${Date.now()}`;
+      const nextConversation: Conversation = {
+        id: nextConversationId,
+        title: 'MCP Orchestrator',
+        messages: [starterMessage],
+        memory: buildConversationMemory([starterMessage]),
+        updatedAt: Date.now(),
+      };
+      onConversationsChange((prev) => [nextConversation, ...prev]);
+      onCurrentIdChange(nextConversationId);
       return;
     }
 
@@ -2140,6 +2324,158 @@ export function ChatInterface({
     }
   };
 
+  const appendAssistantMessageToConversation = (conversationId: string, message: Message, nextMcpState?: ReturnType<typeof normalizeMcpAgentState>) => {
+    onConversationsChange(prev => {
+      const idx = prev.findIndex(c => c.id === conversationId);
+      if (idx === -1) return prev;
+      const updated = [...prev];
+      const nextMessages = [...updated[idx].messages, message];
+      updated[idx] = {
+        ...updated[idx],
+        agentState: nextMcpState
+          ? {
+              ...(updated[idx].agentState ?? {}),
+              mcp: nextMcpState,
+            }
+          : updated[idx].agentState,
+        messages: nextMessages,
+        memory: buildConversationMemory(nextMessages),
+        updatedAt: Date.now(),
+      };
+      return updated;
+    });
+  };
+
+  const maybeHandleMcpChartFlow = (conversationId: string, userText: string): boolean => {
+    if (workflow !== 'MCP' || !conversationId) return false;
+    const hasRows = (mcpAgentState.lastResultRows ?? []).length > 0;
+    const chartStage = mcpAgentState.stage;
+    const shouldHandle =
+      hasRows &&
+      (
+        chartStage === 'awaiting_chart_x' ||
+        chartStage === 'awaiting_chart_y' ||
+        chartStage === 'awaiting_chart_type' ||
+        isMcpChartFollowupRequest(userText)
+      );
+    if (!shouldHandle) return false;
+
+    const nextState = normalizeMcpAgentState(mcpAgentState);
+    const chartContext = inferMcpChartOptions(nextState.lastResultMeta, nextState.lastResultRows);
+    if (!chartContext.canChart) {
+      const assistantMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: "I can’t build a useful chart from the latest MCP result because I don’t have a good categorical or time field plus a numeric metric.",
+        timestamp: Date.now(),
+      };
+      nextState.stage = 'ready';
+      appendAssistantMessageToConversation(conversationId, assistantMsg, nextState);
+      return true;
+    }
+
+    const resolveChoice = (text: string, options: string[]) => {
+      const normalized = text.trim().toLowerCase();
+      return options.find((option) => option.trim().toLowerCase() === normalized) || null;
+    };
+    const chartTypeByLabel: Record<string, ChartType> = {
+      'bar chart': 'bar',
+      'line chart': 'line',
+      'area chart': 'area',
+      'scatter plot': 'scatter',
+    };
+
+    if (chartStage === 'ready') {
+      nextState.chartXOptions = chartContext.xOptions;
+      nextState.chartYOptions = chartContext.yOptions;
+      nextState.chartTypeOptions = chartContext.typeOptions;
+      nextState.selectedChartX = null;
+      nextState.selectedChartY = null;
+      nextState.selectedChartType = null;
+      nextState.stage = 'awaiting_chart_x';
+    }
+
+    if (nextState.stage === 'awaiting_chart_x') {
+      const xChoice = resolveChoice(userText, nextState.chartXOptions);
+      if (!xChoice) {
+        const assistantMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: buildChoiceMarkdownLocal('Chart X Axis', 'Choose the field to use on the X axis.', nextState.chartXOptions),
+          timestamp: Date.now(),
+        };
+        appendAssistantMessageToConversation(conversationId, assistantMsg, nextState);
+        return true;
+      }
+      nextState.selectedChartX = xChoice;
+      nextState.stage = 'awaiting_chart_y';
+    }
+
+    if (nextState.stage === 'awaiting_chart_y') {
+      const yOptions = nextState.chartYOptions.filter((option) => option !== nextState.selectedChartX);
+      const resolvedYOptions = yOptions.length ? yOptions : nextState.chartYOptions;
+      const yChoice = resolveChoice(userText, resolvedYOptions);
+      if (!yChoice) {
+        const assistantMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: buildChoiceMarkdownLocal('Chart Y Axis', 'Choose the metric to use on the Y axis.', resolvedYOptions),
+          timestamp: Date.now(),
+        };
+        appendAssistantMessageToConversation(conversationId, assistantMsg, nextState);
+        return true;
+      }
+      nextState.selectedChartY = yChoice;
+      nextState.stage = 'awaiting_chart_type';
+    }
+
+    if (nextState.stage === 'awaiting_chart_type') {
+      const typeChoice = resolveChoice(userText, nextState.chartTypeOptions);
+      const resolvedType = typeChoice ? chartTypeByLabel[typeChoice.toLowerCase()] : null;
+      if (!resolvedType) {
+        const assistantMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: buildChoiceMarkdownLocal('Chart Type', 'Choose the chart type.', nextState.chartTypeOptions),
+          timestamp: Date.now(),
+        };
+        appendAssistantMessageToConversation(conversationId, assistantMsg, nextState);
+        return true;
+      }
+      nextState.selectedChartType = resolvedType;
+    }
+
+    if (nextState.selectedChartX && nextState.selectedChartY && nextState.selectedChartType) {
+      const finalChartType = nextState.selectedChartType;
+      const finalX = nextState.selectedChartX;
+      const finalY = nextState.selectedChartY;
+      const chart = buildLocalChart(
+        nextState.lastResultRows,
+        finalX,
+        finalY,
+        finalChartType,
+      );
+      nextState.stage = 'ready';
+      nextState.selectedChartX = null;
+      nextState.selectedChartY = null;
+      nextState.selectedChartType = null;
+
+      const assistantMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: chart
+          ? `I created a **${finalChartType ?? 'chart'}** from the latest MCP result.\n\n- **X axis:** \`${finalX || ''}\`\n- **Y axis:** \`${finalY || ''}\`\n- **Purpose:** make the MCP result easier to read visually`
+          : "I couldn’t build a usable chart from the latest MCP result with the selected fields.",
+        timestamp: Date.now(),
+        chart: chart ?? undefined,
+      };
+      appendAssistantMessageToConversation(conversationId, assistantMsg, nextState);
+      return true;
+    }
+
+    return false;
+  };
+
   const handleChatAction = (action: ChatAction, message: Message) => {
     if (action.actionType === 'run_mcp_preset') {
       const prompt = String(action.payload?.prompt || '').trim();
@@ -2153,6 +2489,16 @@ export function ChatInterface({
         onMcpToolIdChange(targetMcpToolId);
       }
       void handleSend(prompt, { preferredMcpTool: preferredTool, selectedMcpToolId: targetMcpToolId });
+      return;
+    }
+    if (action.actionType === 'generate_mcp_chart') {
+      const targetMcpToolId = String(action.payload?.mcpToolId || mcpToolId);
+      if (targetMcpToolId && targetMcpToolId !== mcpToolId) {
+        onMcpToolIdChange(targetMcpToolId);
+      }
+      void handleSend(MCP_CHART_CREATE_OPTION, {
+        selectedMcpToolId: targetMcpToolId,
+      });
       return;
     }
     if (action.actionType === 'open_planning_form') {
@@ -2397,6 +2743,9 @@ export function ChatInterface({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
+    if (resolvedWorkflow === 'MCP' && activeConvId && maybeHandleMcpChartFlow(activeConvId, text)) {
+      return;
+    }
     setIsLoading(true);
     const controller = new AbortController();
     activeRequestControllerRef.current = controller;
@@ -2593,6 +2942,8 @@ export function ChatInterface({
                   history: memoryHistory,
                   mcp_url: activeTool!.url,
                   auth_token: activeTool!.authToken || undefined,
+                  api_key: activeTool!.apiKey || undefined,
+                  api_key_header: activeTool!.apiKeyHeader || undefined,
                   tool_selection_mode: activeTool!.toolSelectionMode || 'all',
                   active_tool_names: activeTool!.activeToolNames || [],
                   preferred_tool: preferredMcpTool || undefined,
@@ -2612,6 +2963,48 @@ export function ChatInterface({
         const data = await response.json();
         reply = data.answer;
         setIsConnected(true);
+        const nextMcpState = normalizeMcpAgentState(mcpAgentState);
+        const normalizedTabularResult = normalizeMcpTabularResult(data.tabular_result as McpTabularResult | null);
+        let mcpActions: ChatAction[] | undefined;
+        if (normalizedTabularResult) {
+          nextMcpState.lastResultMeta = normalizedTabularResult.meta;
+          nextMcpState.lastResultRows = normalizedTabularResult.rows;
+          nextMcpState.chartXOptions = [];
+          nextMcpState.chartYOptions = [];
+          nextMcpState.chartTypeOptions = [];
+          nextMcpState.selectedChartX = null;
+          nextMcpState.selectedChartY = null;
+          nextMcpState.selectedChartType = null;
+          nextMcpState.stage = 'ready';
+
+          const chartContext = inferMcpChartOptions(
+            normalizedTabularResult.meta,
+            normalizedTabularResult.rows,
+          );
+          if (chartContext.canChart) {
+            mcpActions = [
+              {
+                id: `generate-mcp-chart-${Date.now()}`,
+                label: 'Generate chart',
+                actionType: 'generate_mcp_chart',
+                variant: 'secondary',
+                payload: {
+                  mcpToolId: effectiveMcpToolId,
+                },
+              },
+            ];
+          }
+        } else {
+          nextMcpState.lastResultMeta = [];
+          nextMcpState.lastResultRows = [];
+          nextMcpState.chartXOptions = [];
+          nextMcpState.chartYOptions = [];
+          nextMcpState.chartTypeOptions = [];
+          nextMcpState.selectedChartX = null;
+          nextMcpState.selectedChartY = null;
+          nextMcpState.selectedChartType = null;
+          nextMcpState.stage = 'idle';
+        }
 
         const assistantMcpMsg: Message = {
           id: (Date.now() + 1).toString(),
@@ -2629,10 +3022,11 @@ export function ChatInterface({
               ? data.tool_calls.map((tc: { tool: string; args: Record<string, unknown>; result: string }, i: number) => ({
                   id: `mcp-${i}`,
                   title: `Tool: ${tc.tool}`,
-                  status: 'success' as const,
-                  details: `Args: ${JSON.stringify(tc.args)}\n\nResult: ${tc.result}`,
-                }))
+                status: 'success' as const,
+                details: `Args: ${JSON.stringify(tc.args)}\n\nResult: ${tc.result}`,
+              }))
             : undefined,
+          actions: mcpActions,
         };
 
         onConversationsChange(prev => {
@@ -2640,7 +3034,16 @@ export function ChatInterface({
           if (idx === -1) return prev;
           const updated = [...prev];
           const nextMessages = [...updated[idx].messages, assistantMcpMsg];
-          updated[idx] = { ...updated[idx], messages: nextMessages, memory: buildConversationMemory(nextMessages), updatedAt: Date.now() };
+          updated[idx] = {
+            ...updated[idx],
+            agentState: {
+              ...(updated[idx].agentState ?? {}),
+              mcp: nextMcpState,
+            },
+            messages: nextMessages,
+            memory: buildConversationMemory(nextMessages),
+            updatedAt: Date.now(),
+          };
           return updated;
         });
         setIsLoading(false);
@@ -5339,7 +5742,8 @@ export function ChatInterface({
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() => handleMcpToolSelection(MCP_ORCHESTRATOR_ID)}
-                        className={`${toolsSecondaryButtonBase} ${mcpToolId === MCP_ORCHESTRATOR_ID ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20' : 'bg-white/85 text-gray-700 border border-teal-200/70 hover:bg-white dark:bg-white/7 dark:text-gray-200 dark:border-teal-800/70 dark:hover:bg-white/10'}`}
+                        className={`${toolsSecondaryButtonBase} ${mcpToolId === MCP_ORCHESTRATOR_ID ? 'bg-teal-500 text-white shadow-md shadow-teal-500/20 border border-teal-500' : 'bg-gradient-to-r from-teal-50 to-cyan-50 text-teal-800 border border-teal-200/90 shadow-sm hover:from-teal-100 hover:to-cyan-100 dark:from-teal-950/35 dark:to-cyan-950/25 dark:text-teal-100 dark:border-teal-700/80 dark:hover:from-teal-950/45 dark:hover:to-cyan-950/35'}`}
+                        title="Coordinate multiple MCP connectors"
                       >
                         <Network className="h-3.5 w-3.5" /> MCP Orchestrator
                       </button>
