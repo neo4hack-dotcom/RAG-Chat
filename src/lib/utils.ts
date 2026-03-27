@@ -1625,6 +1625,7 @@ export function preprocessMarkdown(md: string): string {
   // Fix inline numbered list items
   text = text.replace(/([.!?])\s+(\d+\.\s+[A-Z0-9])/g, '$1\n$2');
   text = promoteChoiceListsToTaskLists(text);
+  text = collapseTechnicalSections(text);
   return text;
 }
 
