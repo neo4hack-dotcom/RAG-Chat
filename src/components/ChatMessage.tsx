@@ -475,6 +475,11 @@ function getCollapsibleSummary(title: string): string | null {
   return null;
 }
 
+function markdownHeadingLevel(line: string): number | null {
+  const match = line.match(/^(#{2,4})\s+.+$/);
+  return match ? match[1].length : null;
+}
+
 function parseHtmlDetailsBlock(rawBlock: string): { summary: string; content: string } | null {
   const summaryMatch = rawBlock.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
   if (!summaryMatch) return null;
@@ -540,14 +545,18 @@ function splitAssistantContent(content: string): AssistantContentBlock[] {
         flushMarkdown();
         const sectionLines: string[] = [];
         let sectionInCodeFence = false;
+        const currentHeadingLevel = headingMatch[1].length;
         let cursor = index + 1;
         while (cursor < lines.length) {
           const current = lines[cursor];
           if (/^\s*```/.test(current)) {
             sectionInCodeFence = !sectionInCodeFence;
           }
-          if (!sectionInCodeFence && /^(#{2,4})\s+.+$/.test(current)) {
-            break;
+          if (!sectionInCodeFence) {
+            const nextHeadingLevel = markdownHeadingLevel(current);
+            if (nextHeadingLevel !== null && nextHeadingLevel <= currentHeadingLevel) {
+              break;
+            }
           }
           sectionLines.push(current);
           cursor += 1;
@@ -834,7 +843,7 @@ function buildComponents(messageId: string, onCheckboxToggle?: (id: string, text
       </blockquote>
     ),
 
-    details: ({ children, ...props }: any) => (
+    details: ({ children, open: _open, ...props }: any) => (
       <details className="pointer-events-auto my-4 overflow-hidden rounded-[1.35rem] border border-gray-200/80 bg-white/75 shadow-sm dark:border-gray-700/80 dark:bg-gray-900/45" {...props}>
         {children}
       </details>
