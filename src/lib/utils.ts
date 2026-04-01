@@ -1657,6 +1657,11 @@ const COLLAPSIBLE_MARKDOWN_SECTION_RULES: Array<{ pattern: RegExp; summary: stri
   { pattern: /^(knowledge signals|sources?|reference notes?|evidence trail|confidence|action log)$/i, summary: 'Expand details' },
 ];
 
+function markdownHeadingLevel(line: string): number | null {
+  const match = line.match(/^(#{2,4})\s+.+$/);
+  return match ? match[1].length : null;
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -1708,8 +1713,14 @@ function collapseTechnicalSections(md: string): string {
     if (/^\s*```/.test(line)) {
       inCodeFence = !inCodeFence;
     }
-    const isHeading = !inCodeFence && /^(#{2,4})\s+.+$/.test(line);
-    if (isHeading) {
+    const nextHeadingLevel = !inCodeFence ? markdownHeadingLevel(line) : null;
+    const currentHeadingLevel =
+      currentSection.length > 0 && !inCodeFence ? markdownHeadingLevel(currentSection[0]) : null;
+
+    if (
+      nextHeadingLevel !== null &&
+      (currentHeadingLevel === null || nextHeadingLevel <= currentHeadingLevel)
+    ) {
       flushSection();
     }
     currentSection.push(line);
